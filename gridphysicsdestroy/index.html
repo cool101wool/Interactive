@@ -1,13 +1,13 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Physics Tear Grid</title>
+<title>Advanced Cloth Sandbox</title>
 
 <style>
-html,
-body{
+html,body{
     margin:0;
     width:100%;
     height:100%;
@@ -16,30 +16,14 @@ body{
     font-family:Arial,sans-serif;
 }
 
-/* =========================
-   BACKGROUND
-========================= */
-
-#bg{
-    position:fixed;
-    inset:0;
-    z-index:0;
-    overflow:hidden;
-}
-
 .star-line{
-    position:absolute;
+    position:fixed;
     left:0;
     width:100%;
     height:1px;
     background-image:url('stars.gif');
     background-repeat:repeat-x;
-    opacity:0.9;
 }
-
-/* =========================
-   WINDOW
-========================= */
 
 .window{
     position:absolute;
@@ -47,43 +31,79 @@ body{
     top:50%;
     transform:translate(-50%,-50%);
 
-    width:1000px;
-    height:700px;
+    width:1280px;
+    height:780px;
 
     border:2px solid white;
-
     background:rgba(0,0,0,0.12);
-
-    backdrop-filter:blur(2px);
-
     overflow:hidden;
-
     z-index:5;
-
-    box-shadow:
-        0 0 30px rgba(255,255,255,0.15),
-        inset 0 0 40px rgba(255,255,255,0.05);
 }
 
-canvas{
-    width:100%;
-    height:100%;
-    display:block;
-}
-
-/* =========================
-   UI
-========================= */
-
-.ui{
+#toolbar{
     position:absolute;
-    top:12px;
-    left:12px;
+    top:0;
+    left:0;
+    right:0;
 
-    z-index:20;
+    height:54px;
 
     display:flex;
-    gap:10px;
+    align-items:center;
+    gap:8px;
+
+    padding:8px;
+
+    background:rgba(0,0,0,0.6);
+
+    border-bottom:1px solid rgba(255,255,255,0.15);
+
+    z-index:20;
+}
+
+#sidebar{
+    position:absolute;
+
+    top:55px;
+    left:0;
+    bottom:0;
+
+    width:260px;
+
+    background:rgba(0,0,0,0.55);
+
+    border-right:1px solid rgba(255,255,255,0.15);
+
+    color:white;
+
+    overflow:auto;
+
+    padding:14px;
+
+    z-index:20;
+}
+
+#sidebar h3{
+    margin-top:0;
+}
+
+#sidebar label{
+    display:block;
+    margin-top:14px;
+    font-size:13px;
+}
+
+#sidebar input,
+#sidebar select{
+    width:100%;
+    margin-top:5px;
+
+    background:black;
+    color:white;
+
+    border:1px solid rgba(255,255,255,0.2);
+
+    padding:6px;
 }
 
 button{
@@ -92,11 +112,9 @@ button{
 
     border:1px solid white;
 
-    padding:8px 14px;
+    padding:8px 12px;
 
     cursor:pointer;
-
-    font-size:14px;
 }
 
 button.active{
@@ -104,93 +122,47 @@ button.active{
     color:black;
 }
 
-.info{
+canvas{
     position:absolute;
 
-    left:12px;
-    bottom:12px;
+    left:261px;
+    top:55px;
 
-    color:white;
+    width:calc(100% - 261px);
+    height:calc(100% - 55px);
 
-    opacity:0.8;
-
-    font-size:13px;
-
-    z-index:20;
-
-    pointer-events:none;
+    display:block;
 }
 </style>
 </head>
 <body>
 
-<div id="bg"></div>
-
-<div class="window">
-
-    <div class="ui">
-        <button id="dragBtn" class="active">
-            DRAG
-        </button>
-
-        <button id="grabBtn">
-            GRAB
-        </button>
-
-        <button id="slashBtn">
-            SLASH
-        </button>
-    </div>
-
-    <div class="info">
-        DRAG = single point hold<br>
-        GRAB = grab a 3x3 chunk<br>
-        SLASH = slice the cloth apart
-    </div>
-
-    <canvas id="glcanvas"></canvas>
-</div>
-
 <script>
-/* =========================================================
-   BACKGROUND
-========================================================= */
+var totalLayers = 20;
+var spacing = 50;
 
-const bg = document.getElementById("bg");
+var currentPositions = [];
+var speedFactors = [];
+var isInverted = [];
 
-const totalLayers = 20;
-const spacing = 50;
-
-const currentPositions = [];
-const speedFactors = [];
-const isInverted = [];
-
-function getPerspectiveSpeed(rowIndex){
-
-    const baseSpeed = 0.5;
-
-    const zDepth =
-        (totalLayers - rowIndex);
-
+function getPerspectiveSpeed(rowIndex) {
+    var baseSpeed = 0.5;
+    var zDepth = (totalLayers - rowIndex);
     return baseSpeed * (25 / zDepth);
 }
 
-function generateLayers(){
+function generateLayers() {
 
-    for(let i=0;i<totalLayers;i++){
+    for (var i = 0; i < totalLayers; i++) {
 
-        const line =
-            document.createElement("div");
+        var line = document.createElement("div");
 
         line.className = "star-line";
+        line.id = "starLine" + i;
 
-        line.style.top =
-            ((i * spacing) + 50) + "px";
+        line.style.top = ((i * spacing) + 50) + "px";
 
-        bg.appendChild(line);
-
-        let finalSpeed =
-            getPerspectiveSpeed(i);
+        var finalSpeed = getPerspectiveSpeed(i);
 
         if (i == 0) finalSpeed = getPerspectiveSpeed(15);
         if (i == 1) finalSpeed = getPerspectiveSpeed(14);
@@ -203,217 +175,138 @@ function generateLayers(){
 
         speedFactors.push(finalSpeed);
 
-        currentPositions.push(
-            Math.random() * 250
-        );
+        currentPositions.push(Math.floor(Math.random() * 250));
 
-        isInverted.push(
-            Math.random() > 0.5
-        );
+        isInverted.push(Math.random() > 0.5);
+
+        document.body.appendChild(line);
     }
 }
 
-function animateBackground(){
+function updateGlidingPhysics() {
 
-    const lines =
-        document.querySelectorAll(".star-line");
+    for (var i = 0; i < totalLayers; i++) {
 
-    for(let i=0;i<lines.length;i++){
+        var element = document.getElementById("starLine" + i);
 
-        currentPositions[i] +=
-            speedFactors[i];
+        if (element) {
 
-        if(currentPositions[i] >= 250){
+            currentPositions[i] += speedFactors[i];
 
-            currentPositions[i] -= 250;
-        }
+            if (currentPositions[i] >= 250) {
+                currentPositions[i] -= 250;
+            }
 
-        if(isInverted[i]){
-
-            lines[i].style.transform =
-                "scaleX(-1)";
-
-            lines[i].style.backgroundPositionX =
-                (-currentPositions[i]) + "px";
-
-        }else{
-
-            lines[i].style.transform =
-                "none";
-
-            lines[i].style.backgroundPositionX =
-                currentPositions[i] + "px";
+            if (isInverted[i]) {
+                element.style.transform = "scaleX(-1)";
+                element.style.backgroundPositionX =
+                    (-currentPositions[i]) + "px";
+            } else {
+                element.style.transform = "none";
+                element.style.backgroundPositionX =
+                    currentPositions[i] + "px";
+            }
         }
     }
 
-    requestAnimationFrame(
-        animateBackground
-    );
+    requestAnimationFrame(updateGlidingPhysics);
 }
 
 generateLayers();
-animateBackground();
+requestAnimationFrame(updateGlidingPhysics);
+</script>
 
-/* =========================================================
-   WEBGL
-========================================================= */
+<div class="window">
 
-const canvas =
-    document.getElementById("glcanvas");
+    <div id="toolbar">
 
-const gl =
-    canvas.getContext("webgl", {
-        alpha:true
-    });
+        <button id="dragBtn" class="active">DRAG</button>
+        <button id="grabBtn">GRAB</button>
+        <button id="slashBtn">SLASH</button>
+        <button id="resetBtn">RESET</button>
+
+    </div>
+
+    <div id="sidebar">
+
+        <h3>CLOTH OPTIONS</h3>
+
+        <label>
+            Grid Type
+            <select id="gridType">
+                <option value="square">Square</option>
+                <option value="triangle">Triangle</option>
+            </select>
+        </label>
+
+        <label>
+            Fine Mode
+            <input type="checkbox" id="fineMode">
+        </label>
+
+        <label>
+            Cloth Strength
+            <input type="range" min="20" max="220" value="90" id="strengthSlider">
+        </label>
+
+        <label>
+            Connect Top
+            <input type="checkbox" id="connectTop" checked>
+        </label>
+
+        <label>
+            Connect Bottom
+            <input type="checkbox" id="connectBottom">
+        </label>
+
+        <label>
+            Connect Left
+            <input type="checkbox" id="connectLeft">
+        </label>
+
+        <label>
+            Connect Right
+            <input type="checkbox" id="connectRight">
+        </label>
+
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+</div>
+
+<script>
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
 
 function resize(){
 
-    const rect =
-        canvas.getBoundingClientRect();
+    const rect = canvas.getBoundingClientRect();
 
     canvas.width = rect.width;
     canvas.height = rect.height;
-
-    gl.viewport(
-        0,
-        0,
-        canvas.width,
-        canvas.height
-    );
 }
 
 window.addEventListener("resize", resize);
-
 resize();
-
-/* =========================
-   SHADERS
-========================= */
-
-const vertexShaderSource = `
-attribute vec2 a_position;
-
-uniform vec2 u_resolution;
-
-void main(){
-
-    vec2 zeroToOne =
-        a_position / u_resolution;
-
-    vec2 zeroToTwo =
-        zeroToOne * 2.0;
-
-    vec2 clipSpace =
-        zeroToTwo - 1.0;
-
-    gl_Position = vec4(
-        clipSpace * vec2(1,-1),
-        0,
-        1
-    );
-}
-`;
-
-const fragmentShaderSource = `
-precision mediump float;
-
-uniform vec4 u_color;
-
-void main(){
-
-    gl_FragColor = u_color;
-}
-`;
-
-function createShader(type, source){
-
-    const shader =
-        gl.createShader(type);
-
-    gl.shaderSource(shader, source);
-
-    gl.compileShader(shader);
-
-    return shader;
-}
-
-const vertexShader =
-    createShader(
-        gl.VERTEX_SHADER,
-        vertexShaderSource
-    );
-
-const fragmentShader =
-    createShader(
-        gl.FRAGMENT_SHADER,
-        fragmentShaderSource
-    );
-
-const program =
-    gl.createProgram();
-
-gl.attachShader(program, vertexShader);
-gl.attachShader(program, fragmentShader);
-
-gl.linkProgram(program);
-
-gl.useProgram(program);
-
-const buffer =
-    gl.createBuffer();
-
-gl.bindBuffer(
-    gl.ARRAY_BUFFER,
-    buffer
-);
-
-const positionLocation =
-    gl.getAttribLocation(
-        program,
-        "a_position"
-    );
-
-gl.enableVertexAttribArray(
-    positionLocation
-);
-
-gl.vertexAttribPointer(
-    positionLocation,
-    2,
-    gl.FLOAT,
-    false,
-    0,
-    0
-);
-
-const resolutionLocation =
-    gl.getUniformLocation(
-        program,
-        "u_resolution"
-    );
-
-const colorLocation =
-    gl.getUniformLocation(
-        program,
-        "u_color"
-    );
-
-/* =========================================================
-   PHYSICS
-========================================================= */
 
 const points = [];
 const springs = [];
+const slashTrails = [];
 
-const GRID_SPACING = 28;
+const baseCols = 28;
+const baseRows = 22;
 
-const COLS = 30;
-const ROWS = 22;
+const clothWidth = 760;
+const clothHeight = 560;
 
-const GRAVITY = 0.08;
-const FRICTION = 0.985;
-const STIFFNESS = 0.14;
-const TEAR_DISTANCE = 90;
+const gravity = 0.08;
+const friction = 0.985;
+const stiffness = 0.14;
+
+let tearStrength = 90;
+let currentMode = "drag";
+let grabbed = [];
 
 class Point{
 
@@ -426,7 +319,6 @@ class Point{
         this.oldy = y;
 
         this.pinned = pinned;
-
         this.grabbed = false;
     }
 
@@ -436,17 +328,14 @@ class Point{
             return;
         }
 
-        const vx =
-            (this.x - this.oldx) * FRICTION;
-
-        const vy =
-            (this.y - this.oldy) * FRICTION;
+        const vx = (this.x - this.oldx) * friction;
+        const vy = (this.y - this.oldy) * friction;
 
         this.oldx = this.x;
         this.oldy = this.y;
 
         this.x += vx;
-        this.y += vy + GRAVITY;
+        this.y += vy + gravity;
     }
 }
 
@@ -457,8 +346,7 @@ class Spring{
         this.a = a;
         this.b = b;
 
-        this.length =
-            distance(a,b);
+        this.length = dist(a,b);
 
         this.broken = false;
     }
@@ -469,45 +357,34 @@ class Spring{
             return;
         }
 
-        const dx =
-            this.b.x - this.a.x;
+        const dx = this.b.x - this.a.x;
+        const dy = this.b.y - this.a.y;
 
-        const dy =
-            this.b.y - this.a.y;
+        const d = Math.sqrt(dx*dx + dy*dy) || 0.0001;
 
-        const dist =
-            Math.sqrt(dx*dx + dy*dy);
-
-        if(dist > TEAR_DISTANCE){
-
+        if(d > tearStrength){
             this.broken = true;
             return;
         }
 
-        const diff =
-            (this.length - dist) / dist;
+        const diff = (this.length - d) / d;
 
-        const offsetX =
-            dx * diff * STIFFNESS;
-
-        const offsetY =
-            dy * diff * STIFFNESS;
+        const ox = dx * diff * stiffness;
+        const oy = dy * diff * stiffness;
 
         if(!this.a.pinned && !this.a.grabbed){
-
-            this.a.x -= offsetX;
-            this.a.y -= offsetY;
+            this.a.x -= ox;
+            this.a.y -= oy;
         }
 
         if(!this.b.pinned && !this.b.grabbed){
-
-            this.b.x += offsetX;
-            this.b.y += offsetY;
+            this.b.x += ox;
+            this.b.y += oy;
         }
     }
 }
 
-function distance(a,b){
+function dist(a,b){
 
     const dx = b.x - a.x;
     const dy = b.y - a.y;
@@ -515,105 +392,130 @@ function distance(a,b){
     return Math.sqrt(dx*dx + dy*dy);
 }
 
-/* =========================
-   CREATE GRID
-========================= */
+function createGrid(){
 
-const startX = 90;
-const startY = 60;
+    points.length = 0;
+    springs.length = 0;
 
-for(let y=0;y<ROWS;y++){
+    const fine = fineMode.checked;
 
-    for(let x=0;x<COLS;x++){
+    const cols = fine ? baseCols * 2 : baseCols;
+    const rows = fine ? baseRows * 2 : baseRows;
 
-        const px =
-            startX + x * GRID_SPACING;
+    const spacingX = clothWidth / (cols - 1);
+    const spacingY = clothHeight / (rows - 1);
 
-        const py =
-            startY + y * GRID_SPACING;
+    for(let y=0;y<rows;y++){
 
-        const pinned = y === 0;
+        for(let x=0;x<cols;x++){
 
-        points.push(
-            new Point(px, py, pinned)
-        );
+            const px = 40 + x * spacingX;
+            const py = 40 + y * spacingY;
+
+            const pinned =
+                (connectTop.checked && y===0) ||
+                (connectBottom.checked && y===rows-1) ||
+                (connectLeft.checked && x===0) ||
+                (connectRight.checked && x===cols-1);
+
+            points.push(new Point(px,py,pinned));
+        }
     }
-}
 
-function idx(x,y){
+    function idx(x,y){
+        return y * cols + x;
+    }
 
-    return y * COLS + x;
-}
+    for(let y=0;y<rows;y++){
 
-for(let y=0;y<ROWS;y++){
+        for(let x=0;x<cols;x++){
 
-    for(let x=0;x<COLS;x++){
-
-        if(x < COLS - 1){
-
-            springs.push(
-                new Spring(
+            if(x < cols-1){
+                springs.push(new Spring(
                     points[idx(x,y)],
                     points[idx(x+1,y)]
-                )
-            );
-        }
+                ));
+            }
 
-        if(y < ROWS - 1){
-
-            springs.push(
-                new Spring(
+            if(y < rows-1){
+                springs.push(new Spring(
                     points[idx(x,y)],
                     points[idx(x,y+1)]
-                )
-            );
+                ));
+            }
+
+            if(gridType.value === "triangle"){
+
+                if(x < cols-1 && y < rows-1){
+                    springs.push(new Spring(
+                        points[idx(x,y)],
+                        points[idx(x+1,y+1)]
+                    ));
+                }
+
+                if(x > 0 && y < rows-1){
+                    springs.push(new Spring(
+                        points[idx(x,y)],
+                        points[idx(x-1,y+1)]
+                    ));
+                }
+            }
+
+            if(fine){
+
+                if(x < cols-2){
+                    springs.push(new Spring(
+                        points[idx(x,y)],
+                        points[idx(x+2,y)]
+                    ));
+                }
+
+                if(y < rows-2){
+                    springs.push(new Spring(
+                        points[idx(x,y)],
+                        points[idx(x,y+2)]
+                    ));
+                }
+            }
         }
     }
 }
 
-/* =========================================================
-   MODES
-========================================================= */
+createGrid();
 
-let mode = "drag";
+function mode(btn,m){
 
-const dragBtn =
-    document.getElementById("dragBtn");
+    document.querySelectorAll("button")
+    .forEach(b=>b.classList.remove("active"));
 
-const grabBtn =
-    document.getElementById("grabBtn");
+    btn.classList.add("active");
 
-const slashBtn =
-    document.getElementById("slashBtn");
-
-function setMode(newMode){
-
-    mode = newMode;
-
-    dragBtn.classList.remove("active");
-    grabBtn.classList.remove("active");
-    slashBtn.classList.remove("active");
-
-    if(mode === "drag"){
-        dragBtn.classList.add("active");
-    }
-
-    if(mode === "grab"){
-        grabBtn.classList.add("active");
-    }
-
-    if(mode === "slash"){
-        slashBtn.classList.add("active");
-    }
+    currentMode = m;
 }
 
-dragBtn.onclick = ()=> setMode("drag");
-grabBtn.onclick = ()=> setMode("grab");
-slashBtn.onclick = ()=> setMode("slash");
+dragBtn.onclick = ()=> mode(dragBtn,"drag");
+grabBtn.onclick = ()=> mode(grabBtn,"grab");
+slashBtn.onclick = ()=> mode(slashBtn,"slash");
 
-/* =========================================================
-   MOUSE
-========================================================= */
+resetBtn.onclick = ()=>{
+    createGrid();
+    slashTrails.length = 0;
+};
+
+[
+    gridType,
+    fineMode,
+    connectTop,
+    connectBottom,
+    connectLeft,
+    connectRight
+].forEach(el=>{
+    el.onchange = createGrid;
+});
+
+strengthSlider.oninput = ()=>{
+    tearStrength = parseFloat(strengthSlider.value);
+};
 
 const mouse = {
     x:0,
@@ -621,88 +523,56 @@ const mouse = {
     down:false
 };
 
-let grabbedPoints = [];
-
-const slashTrails = [];
+const velocitySamples = [];
 
 canvas.addEventListener("mousedown", e=>{
 
     mouse.down = true;
 
-    const rect =
-        canvas.getBoundingClientRect();
+    const r = canvas.getBoundingClientRect();
 
-    mouse.x =
-        e.clientX - rect.left;
+    mouse.x = e.clientX - r.left;
+    mouse.y = e.clientY - r.top;
 
-    mouse.y =
-        e.clientY - rect.top;
+    grabbed = [];
 
-    grabbedPoints = [];
+    let nearest = null;
+    let best = Infinity;
 
-    if(mode === "drag" || mode === "grab"){
+    for(const p of points){
 
-        let closest = null;
-        let closestDist = Infinity;
+        const dx = p.x - mouse.x;
+        const dy = p.y - mouse.y;
+
+        const d = Math.sqrt(dx*dx + dy*dy);
+
+        if(d < best){
+            best = d;
+            nearest = p;
+        }
+    }
+
+    if(nearest){
 
         for(const p of points){
 
-            if(p.pinned) continue;
+            const dx = p.x - nearest.x;
+            const dy = p.y - nearest.y;
 
-            const dx = p.x - mouse.x;
-            const dy = p.y - mouse.y;
+            const d = Math.sqrt(dx*dx + dy*dy);
 
-            const d =
-                Math.sqrt(dx*dx + dy*dy);
+            if(
+                (currentMode === "drag" && d < 1) ||
+                (currentMode === "grab" && d < 44)
+            ){
 
-            if(d < closestDist){
+                p.grabbed = true;
 
-                closestDist = d;
-                closest = p;
-            }
-        }
-
-        if(closest){
-
-            if(mode === "drag"){
-
-                closest.grabbed = true;
-
-                grabbedPoints.push({
-                    point:closest,
-                    offsetX:
-                        closest.x - mouse.x,
-                    offsetY:
-                        closest.y - mouse.y
+                grabbed.push({
+                    point:p,
+                    ox:p.x - mouse.x,
+                    oy:p.y - mouse.y
                 });
-
-            }else{
-
-                for(const p of points){
-
-                    const dx =
-                        p.x - closest.x;
-
-                    const dy =
-                        p.y - closest.y;
-
-                    const d =
-                        Math.sqrt(dx*dx + dy*dy);
-
-                    if(d < GRID_SPACING * 1.7 &&
-                       !p.pinned){
-
-                        p.grabbed = true;
-
-                        grabbedPoints.push({
-                            point:p,
-                            offsetX:
-                                p.x - mouse.x,
-                            offsetY:
-                                p.y - mouse.y
-                        });
-                    }
-                }
             }
         }
     }
@@ -712,215 +582,154 @@ window.addEventListener("mouseup", ()=>{
 
     mouse.down = false;
 
-    for(const g of grabbedPoints){
+    let avgVX = 0;
+    let avgVY = 0;
 
-        g.point.grabbed = false;
+    if(velocitySamples.length > 1){
+
+        const first = velocitySamples[0];
+        const last = velocitySamples[velocitySamples.length - 1];
+
+        const totalDX = last.mx - first.mx;
+        const totalDY = last.my - first.my;
+
+        const totalTime = Math.max(1,last.t - first.t);
+
+        avgVX = totalDX / totalTime * 16.666;
+        avgVY = totalDY / totalTime * 16.666;
     }
 
-    grabbedPoints = [];
+    for(const g of grabbed){
+
+        g.point.grabbed = false;
+
+        g.point.oldx = g.point.x - Math.max(-8,Math.min(8,avgVX)) * 1.35;
+        g.point.oldy = g.point.y - Math.max(-8,Math.min(8,avgVY)) * 1.35;
+    }
+
+    grabbed = [];
 });
 
 canvas.addEventListener("mousemove", e=>{
 
-    const rect =
-        canvas.getBoundingClientRect();
+    const r = canvas.getBoundingClientRect();
 
-    mouse.x =
-        e.clientX - rect.left;
+    const oldX = mouse.x;
+    const oldY = mouse.y;
 
-    mouse.y =
-        e.clientY - rect.top;
+    mouse.x = e.clientX - r.left;
+    mouse.y = e.clientY - r.top;
 
-    /* =========================
-       DRAG + GRAB
-    ========================= */
+    velocitySamples.push({
+        mx:mouse.x,
+        my:mouse.y,
+        t:performance.now()
+    });
 
-    if(
-        (mode === "drag" || mode === "grab")
-        && grabbedPoints.length > 0
+    while(
+        velocitySamples.length > 0 &&
+        performance.now() - velocitySamples[0].t > 100
     ){
-
-        for(const g of grabbedPoints){
-
-            g.point.x =
-                mouse.x + g.offsetX;
-
-            g.point.y =
-                mouse.y + g.offsetY;
-        }
+        velocitySamples.shift();
     }
 
-    /* =========================
-       SLASH
-    ========================= */
+    for(const g of grabbed){
 
-    if(mode === "slash" && mouse.down){
+        g.point.x = mouse.x + g.ox;
+        g.point.y = mouse.y + g.oy;
+    }
 
-        slashTrails.push({
-            x:mouse.x,
-            y:mouse.y,
-            life:1
-        });
+    if(currentMode === "slash" && mouse.down){
 
-        for(const s of springs){
+        for(let step=0;step<8;step++){
 
-            if(s.broken) continue;
+            const t = step / 7;
 
-            const mx =
-                (s.a.x + s.b.x) * 0.5;
+            const sx = oldX + (mouse.x - oldX) * t;
+            const sy = oldY + (mouse.y - oldY) * t;
 
-            const my =
-                (s.a.y + s.b.y) * 0.5;
+            slashTrails.push({
+                x1:sx,
+                y1:sy,
+                x2:mouse.x,
+                y2:mouse.y,
+                life:1
+            });
 
-            const dx = mx - mouse.x;
-            const dy = my - mouse.y;
+            for(const s of springs){
 
-            const d =
-                Math.sqrt(dx*dx + dy*dy);
+                if(s.broken){
+                    continue;
+                }
 
-            if(d < 18){
+                const mx = (s.a.x + s.b.x) * 0.5;
+                const my = (s.a.y + s.b.y) * 0.5;
 
-                s.broken = true;
+                const dx = mx - sx;
+                const dy = my - sy;
+
+                if(Math.sqrt(dx*dx + dy*dy) < 18){
+                    s.broken = true;
+                }
             }
         }
     }
 });
 
-/* =========================================================
-   RENDER
-========================================================= */
-
 function render(){
 
-    gl.clearColor(0,0,0,0);
-
-    gl.clear(gl.COLOR_BUFFER_BIT);
-
-    gl.uniform2f(
-        resolutionLocation,
-        canvas.width,
-        canvas.height
-    );
-
-    /* =========================
-       PHYSICS
-    ========================= */
+    ctx.clearRect(0,0,canvas.width,canvas.height);
 
     for(const p of points){
         p.update();
     }
 
     for(let i=0;i<8;i++){
-
         for(const s of springs){
             s.update();
         }
     }
 
-    /* =========================
-       GRID
-    ========================= */
+    ctx.strokeStyle = "white";
+    ctx.lineWidth = 1;
 
-    const verts = [];
+    ctx.beginPath();
 
     for(const s of springs){
 
-        if(s.broken) continue;
+        if(s.broken){
+            continue;
+        }
 
-        verts.push(s.a.x);
-        verts.push(s.a.y);
-
-        verts.push(s.b.x);
-        verts.push(s.b.y);
+        ctx.moveTo(s.a.x,s.a.y);
+        ctx.lineTo(s.b.x,s.b.y);
     }
 
-    gl.bufferData(
-        gl.ARRAY_BUFFER,
-        new Float32Array(verts),
-        gl.DYNAMIC_DRAW
-    );
+    ctx.stroke();
 
-    gl.uniform4f(
-        colorLocation,
-        1,
-        1,
-        1,
-        1
-    );
+    ctx.strokeStyle = "rgba(255,255,255,0.8)";
+    ctx.lineWidth = 4;
 
-    gl.drawArrays(
-        gl.LINES,
-        0,
-        verts.length / 2
-    );
+    for(let i=slashTrails.length-1;i>=0;i--){
 
-    /* =========================
-       SLASH TRAILS
-    ========================= */
+        const t = slashTrails[i];
 
-    const trailVerts = [];
-
-    for(let i=slashTrails.length - 1;i>=0;i--){
-
-        const t =
-            slashTrails[i];
-
-        t.life -= 0.06;
+        t.life -= 0.08;
 
         if(t.life <= 0){
-
             slashTrails.splice(i,1);
             continue;
         }
 
-        const size =
-            t.life * 30;
+        ctx.globalAlpha = t.life;
 
-        /* diagonal slash */
-
-        trailVerts.push(
-            t.x - size,
-            t.y - size,
-
-            t.x + size,
-            t.y + size
-        );
-
-        /* second streak */
-
-        trailVerts.push(
-            t.x - size * 0.5,
-            t.y + size * 0.2,
-
-            t.x + size * 0.5,
-            t.y - size * 0.2
-        );
+        ctx.beginPath();
+        ctx.moveTo(t.x1,t.y1);
+        ctx.lineTo(t.x2,t.y2);
+        ctx.stroke();
     }
 
-    if(trailVerts.length > 0){
-
-        gl.bufferData(
-            gl.ARRAY_BUFFER,
-            new Float32Array(trailVerts),
-            gl.DYNAMIC_DRAW
-        );
-
-        gl.uniform4f(
-            colorLocation,
-            1,
-            1,
-            1,
-            0.9
-        );
-
-        gl.lineWidth(3);
-
-        gl.drawArrays(
-            gl.LINES,
-            0,
-            trailVerts.length / 2
-        );
-    }
+    ctx.globalAlpha = 1;
 
     requestAnimationFrame(render);
 }
