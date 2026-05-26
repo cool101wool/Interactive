@@ -358,6 +358,7 @@ function createSoundUI() {
         container.appendChild(card);
 
         audioObjects[file] = new Audio(file);
+		audioObjects[file].loop = true;
     }
 }
 
