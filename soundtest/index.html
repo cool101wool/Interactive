@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sound Test</title>
+
+<style>
+body {
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+    background: black;
+    color: white;
+    font-family: "Times New Roman", serif;
+}
+
+/* =========================
+   STAR BACKGROUND
+========================= */
+
+.star-line {
+    position: fixed;
+    left: 0;
+    width: 100%;
+    height: 1px;
+    background-image: url('stars.gif');
+    background-repeat: repeat-x;
+    z-index: 0;
+}
+
+/* =========================
+   MAIN UI
+========================= */
+
+.main-wrapper {
+    position: relative;
+    z-index: 5;
+
+    width: 760px;
+    max-width: calc(100% - 20px);
+
+    margin: 20px auto;
+
+    background: #000080;
+
+    border:
+        6px ridge #c0c0c0;
+
+    box-shadow:
+        0 0 20px black;
+}
+
+.top-banner {
+    background: linear-gradient(to bottom, #0000ff, #000080);
+
+    border-bottom:
+        4px ridge #c0c0c0;
+
+    text-align: center;
+
+    padding-top: 18px;
+    padding-bottom: 18px;
+}
+
+.title {
+    font-size: 48px;
+    font-weight: bold;
+
+    color: yellow;
+
+    text-shadow:
+        3px 3px 0 red,
+        6px 6px 0 black;
+
+    letter-spacing: 4px;
+}
+
+.blink {
+    animation: blinkAnim 1s infinite;
+}
+
+@keyframes blinkAnim {
+    50% {
+        opacity: 0;
+    }
+}
+
+.marquee-bar {
+    background: black;
+    color: lime;
+
+    border-top: 3px ridge #808080;
+    border-bottom: 3px ridge #808080;
+
+    font-size: 18px;
+    padding: 6px;
+}
+
+.content {
+    padding: 20px;
+}
+
+.counter-box {
+    text-align: center;
+
+    margin-bottom: 20px;
+
+    font-size: 18px;
+    color: cyan;
+}
+
+.sound-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+}
+
+.sound-card {
+    background: #c0c0c0;
+
+    border:
+        4px outset white;
+
+    color: black;
+
+    padding: 12px;
+
+    text-align: center;
+}
+
+.sound-name {
+    font-size: 22px;
+    font-weight: bold;
+
+    margin-bottom: 14px;
+
+    color: darkblue;
+}
+
+.button-row {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+}
+
+.sound-btn {
+    min-width: 80px;
+
+    padding: 8px;
+
+    font-size: 16px;
+    font-weight: bold;
+
+    cursor: pointer;
+
+    border:
+        3px outset white;
+
+    background: #c0c0c0;
+}
+
+.sound-btn:active {
+    border:
+        3px inset white;
+}
+
+.start-btn {
+    color: green;
+}
+
+.stop-btn {
+    color: red;
+}
+
+.bottom-section {
+    margin-top: 24px;
+
+    background: black;
+
+    border:
+        4px inset #808080;
+
+    padding: 10px;
+
+    text-align: center;
+
+    color: lime;
+}
+
+.gif-row {
+    text-align: center;
+    margin-top: 20px;
+}
+
+.gif-row img {
+    image-rendering: pixelated;
+}
+
+.footer {
+    text-align: center;
+
+    margin-top: 18px;
+
+    color: yellow;
+
+    font-size: 18px;
+}
+
+/* ugly old web look intentionally */
+
+a {
+    color: cyan;
+}
+
+hr {
+    border: 2px inset #808080;
+}
+</style>
+
+<script>
+/* =========================
+   BACKGROUND
+========================= */
+
+var totalLayers = 20;
+var spacing = 50;
+
+var currentPositions = [];
+var speedFactors = [];
+var isInverted = [];
+
+function getPerspectiveSpeed(rowIndex) {
+    var baseSpeed = 0.5;
+    var zDepth = (totalLayers - rowIndex);
+    return baseSpeed * (25 / zDepth);
+}
+
+function generateLayers() {
+
+    var layerHTML = "";
+
+    for (var i = 0; i < totalLayers; i++) {
+
+        var fixedTop = (i * spacing) + 50;
+        var finalSpeed = getPerspectiveSpeed(i);
+
+        if (i == 0) finalSpeed = getPerspectiveSpeed(15);
+        if (i == 1) finalSpeed = getPerspectiveSpeed(14);
+        if (i == 2) finalSpeed = getPerspectiveSpeed(13);
+        if (i == 3) finalSpeed = getPerspectiveSpeed(12);
+        if (i == 4) finalSpeed = getPerspectiveSpeed(11);
+        if (i == 5) finalSpeed = getPerspectiveSpeed(10);
+        if (i == 6) finalSpeed = getPerspectiveSpeed(9);
+        if (i == 7) finalSpeed = getPerspectiveSpeed(8);
+
+        speedFactors.push(finalSpeed);
+
+        currentPositions.push(
+            Math.floor(Math.random() * 250)
+        );
+
+        isInverted.push(Math.random() > 0.5);
+
+        layerHTML +=
+            '<div id="starLine' + i +
+            '" class="star-line" style="top:' +
+            fixedTop + 'px;"></div>';
+    }
+
+    document.body.innerHTML += layerHTML;
+}
+
+function updateGlidingPhysics() {
+
+    for (var i = 0; i < totalLayers; i++) {
+
+        var element =
+            document.getElementById("starLine" + i);
+
+        if (element) {
+
+            currentPositions[i] += speedFactors[i];
+
+            if (currentPositions[i] >= 250) {
+                currentPositions[i] -= 250;
+            }
+
+            if (isInverted[i]) {
+
+                element.style.transform = "scaleX(-1)";
+
+                element.style.backgroundPositionX =
+                    (-currentPositions[i]) + "px";
+
+            } else {
+
+                element.style.transform = "none";
+
+                element.style.backgroundPositionX =
+                    currentPositions[i] + "px";
+            }
+        }
+    }
+
+    requestAnimationFrame(updateGlidingPhysics);
+}
+
+/* =========================
+   SOUND TEST
+========================= */
+
+var soundFiles = [
+    "wave.mp3",
+    "mule.mp3",
+    "impossibletiming.mp3",
+    "dial.mp3",
+    "the.mp3",
+    "wave.mp3"
+];
+
+var audioObjects = {};
+
+function createSoundUI() {
+
+    var container =
+        document.getElementById("soundGrid");
+
+    for (var i = 0; i < soundFiles.length; i++) {
+
+        let file = soundFiles[i];
+
+        var card =
+            document.createElement("div");
+
+        card.className = "sound-card";
+
+        var cleanName =
+            file.replace(/\.[^/.]+$/, "");
+
+        card.innerHTML =
+            '<div class="sound-name">' +
+            cleanName +
+            '</div>' +
+
+            '<div class="button-row">' +
+
+            '<button class="sound-btn start-btn" onclick="playSound(\'' + file + '\')">' +
+            'START' +
+            '</button>' +
+
+            '<button class="sound-btn stop-btn" onclick="stopSound(\'' + file + '\')">' +
+            'STOP' +
+            '</button>' +
+
+            '</div>';
+
+        container.appendChild(card);
+
+        audioObjects[file] = new Audio(file);
+    }
+}
+
+function playSound(file) {
+
+    var audio = audioObjects[file];
+
+    if (!audio) return;
+
+    audio.currentTime = 0;
+    audio.play();
+}
+
+function stopSound(file) {
+
+    var audio = audioObjects[file];
+
+    if (!audio) return;
+
+    audio.pause();
+    audio.currentTime = 0;
+}
+
+window.onload = function () {
+
+    generateLayers();
+
+    requestAnimationFrame(updateGlidingPhysics);
+
+    createSoundUI();
+};
+</script>
+</head>
+
+<body>
+
+<div class="main-wrapper">
+
+    <div class="top-banner">
+
+        <div class="title blink">
+            SOUND TEST
+        </div>
+
+    </div>
+
+    <div class="marquee-bar">
+        <marquee scrollamount="8">
+            ★ WELCOME TO THE SOUND TEST PAGE ★ UNDER CONSTRUCTION ★
+        </marquee>
+    </div>
+
+    <div class="content">
+
+        <div class="counter-box">
+            Visitor Counter:
+            <img src="https://dummyimage.com/80x20/000000/00ff00&text=000000">
+        </div>
+
+        <hr>
+
+        <div class="sound-grid" id="soundGrid"></div>
+
+        <div class="bottom-section">
+            CLICK START TO PLAY AUDIO<br>
+            CLICK STOP TO STOP AUDIO
+        </div>
+
+        <div class="gif-row">
+            <img src="construction.gif">
+            <img src="mailbox.gif">
+            <img src="new.gif">
+        </div>
+
+        <div class="footer">
+            © 1996 SOUND TEST ARCHIVES
+        </div>
+
+    </div>
+
+</div>
+
+</body>
+</html>
