@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Interactive-site</title>
+<style>
+    body {
+        margin: 0;
+        padding: 0;
+        overflow-x: hidden;
+        background-color: #000000;
+    }
+    
+    .star-line {
+        position: fixed;
+        left: 0;
+        width: 100%;
+        height: 1px;
+        background-image: url('stars.gif');
+        background-repeat: repeat-x;
+        z-index: 1;
+    }
+</style>
+<script language="JavaScript">
+<!--
+var totalLayers = 20;
+var spacing = 50; 
+
+// Arrays to hold our physics properties for each layer
+var currentPositions = []; 
+var speedFactors = [];
+var isInverted = []; 
+
+// Helper function to figure out the 3D perspective velocity based on target row indices (0-19)
+function getPerspectiveSpeed(rowIndex) {
+    var baseSpeed = 0.5;
+    var zDepth = (totalLayers - rowIndex);
+    return baseSpeed * (25 / zDepth);
+}
+
+function generateLayers() {
+    var layerHTML = "";
+
+    for (var i = 0; i < totalLayers; i++) {
+        var layerID = "starLine" + i;
+        var fixedTop = (i * spacing) + 50; 
+        
+        // Default perspective fallback speed value
+        var finalSpeed = getPerspectiveSpeed(i);
+
+        // Explicit Custom Speed Map (Adjusting for 0-indexed values in Javascript)
+        // Row 1 is index 0, Row 2 is index 1, etc.
+        if (i == 0) finalSpeed = getPerspectiveSpeed(15); // Row 1 gets Speed of Row 16
+        if (i == 1) finalSpeed = getPerspectiveSpeed(14); // Row 2 gets Speed of Row 15
+        if (i == 2) finalSpeed = getPerspectiveSpeed(13); // Row 3 gets Speed of Row 14
+        if (i == 3) finalSpeed = getPerspectiveSpeed(12); // Row 4 gets Speed of Row 13
+        if (i == 4) finalSpeed = getPerspectiveSpeed(11); // Row 5 gets Speed of Row 12
+        if (i == 5) finalSpeed = getPerspectiveSpeed(10); // Row 6 gets Speed of Row 11 & 10
+        if (i == 6) finalSpeed = getPerspectiveSpeed(9);  // Row 7 gets Speed of Row 10
+        if (i == 7) finalSpeed = getPerspectiveSpeed(8);  // Row 8 gets Speed of Row 9
+
+        speedFactors.push(finalSpeed);
+        
+        // True Random Horizontal Starting Offset
+        var randomXOffset = Math.floor(Math.random() * 250);
+        currentPositions.push(randomXOffset);
+        
+        // Track inversion independently 
+        if (Math.random() > 0.5) {
+            isInverted.push(true);
+        } else {
+            isInverted.push(false);
+        }
+        
+        layerHTML += '<div id="' + layerID + '" class="star-line" style="top:' + fixedTop + 'px;"></div>';
+    }
+    
+    document.write(layerHTML);
+}
+
+// The continuous animation loop engine
+function updateGlidingPhysics() {
+    for (var i = 0; i < totalLayers; i++) {
+        var element = document.getElementById("starLine" + i);
+        if (element) {
+            // Constantly progress the master tick position variables forward
+            currentPositions[i] += speedFactors[i];
+            
+            // Loop the coordinate arithmetic cleanly to prevent canvas rendering errors
+            if (currentPositions[i] >= 250) {
+                currentPositions[i] -= 250;
+            }
+            
+            // Correct for inverted layers
+            if (isInverted[i]) {
+                element.style.transform = "scaleX(-1)";
+                element.style.backgroundPositionX = (-currentPositions[i]) + "px";
+            } else {
+                element.style.transform = "none";
+                element.style.backgroundPositionX = currentPositions[i] + "px";
+            }
+        }
+    }
+    
+    requestAnimationFrame(updateGlidingPhysics);
+}
+
+window.onload = function() {
+    requestAnimationFrame(updateGlidingPhysics);
+};
+//-->
+</script>
+</head>
+
+<body>
+
+<script language="JavaScript">
+<!--
+generateLayers();
+//-->
+</script>
+
+<!-- MAIN CONTENT LAYER -->
+<div id="MainContent" style="position:relative; margin:0 auto; padding-top:40px; width:80%; z-index:100; text-align:center;">
+    <h1><font color="#00FF00" face="Courier New">-- 1nt3ractiv3 s1te --</font></h1>
+
+    <p>
+        <font size="4" color="#FFFFFF">Have fun!</font>
+    </p>
+
+    <p>
+        <font color="#CCCCCC"><i>Links:</i></font>
+    </p>
+
+    <p>
+        <a href="/gridphysicsdestroy/" style="color:#00FFFF; font-family:Courier New;">
+            [ Grid Physics Destroy ]
+        </a>
+    </p>
+
+    <p>
+        <a href="/changes/" style="color:#00FFFF; font-family:Courier New;">
+            [ Changes2 ]
+        </a>
+    </p>
+
+</div>
+
+</body>
+</html>

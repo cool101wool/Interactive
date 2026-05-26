@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Physics Tear Grid</title>
+
+<style>
+html,
+body{
+    margin:0;
+    width:100%;
+    height:100%;
+    overflow:hidden;
+    background:black;
+    font-family:Arial,sans-serif;
+}
+
+/* =========================
+   BACKGROUND
+========================= */
+
+#bg{
+    position:fixed;
+    inset:0;
+    z-index:0;
+    overflow:hidden;
+}
+
+.star-line{
+    position:absolute;
+    left:0;
+    width:100%;
+    height:1px;
+    background-image:url('stars.gif');
+    background-repeat:repeat-x;
+    opacity:0.9;
+}
+
+/* =========================
+   WINDOW
+========================= */
+
+.window{
+    position:absolute;
+    left:50%;
+    top:50%;
+    transform:translate(-50%,-50%);
+
+    width:1000px;
+    height:700px;
+
+    border:2px solid white;
+
+    background:rgba(0,0,0,0.12);
+
+    backdrop-filter:blur(2px);
+
+    overflow:hidden;
+
+    z-index:5;
+
+    box-shadow:
+        0 0 30px rgba(255,255,255,0.15),
+        inset 0 0 40px rgba(255,255,255,0.05);
+}
+
+canvas{
+    width:100%;
+    height:100%;
+    display:block;
+}
+
+/* =========================
+   UI
+========================= */
+
+.ui{
+    position:absolute;
+    top:12px;
+    left:12px;
+
+    z-index:20;
+
+    display:flex;
+    gap:10px;
+}
+
+button{
+    background:black;
+    color:white;
+
+    border:1px solid white;
+
+    padding:8px 14px;
+
+    cursor:pointer;
+
+    font-size:14px;
+}
+
+button.active{
+    background:white;
+    color:black;
+}
+
+.info{
+    position:absolute;
+
+    left:12px;
+    bottom:12px;
+
+    color:white;
+
+    opacity:0.8;
+
+    font-size:13px;
+
+    z-index:20;
+
+    pointer-events:none;
+}
+</style>
+</head>
+<body>
+
+<div id="bg"></div>
+
+<div class="window">
+
+    <div class="ui">
+        <button id="dragBtn" class="active">
+            DRAG
+        </button>
+
+        <button id="grabBtn">
+            GRAB
+        </button>
+
+        <button id="slashBtn">
+            SLASH
+        </button>
+    </div>
+
+    <div class="info">
+        DRAG = single point hold<br>
+        GRAB = grab a 3x3 chunk<br>
+        SLASH = slice the cloth apart
+    </div>
+
+    <canvas id="glcanvas"></canvas>
+</div>
+
+<script>
+/* =========================================================
+   BACKGROUND
+========================================================= */
+
+const bg = document.getElementById("bg");
+
+const totalLayers = 20;
+const spacing = 50;
+
+const currentPositions = [];
+const speedFactors = [];
+const isInverted = [];
+
+function getPerspectiveSpeed(rowIndex){
+
+    const baseSpeed = 0.5;
+
+    const zDepth =
+        (totalLayers - rowIndex);
+
+    return baseSpeed * (25 / zDepth);
+}
+
+function generateLayers(){
+
+    for(let i=0;i<totalLayers;i++){
+
+        const line =
+            document.createElement("div");
+
+        line.className = "star-line";
+
+        line.style.top =
+            ((i * spacing) + 50) + "px";
+
+        bg.appendChild(line);
+
+        let finalSpeed =
+            getPerspectiveSpeed(i);
+
+        if (i == 0) finalSpeed = getPerspectiveSpeed(15);
+        if (i == 1) finalSpeed = getPerspectiveSpeed(14);
+        if (i == 2) finalSpeed = getPerspectiveSpeed(13);
+        if (i == 3) finalSpeed = getPerspectiveSpeed(12);
+        if (i == 4) finalSpeed = getPerspectiveSpeed(11);
+        if (i == 5) finalSpeed = getPerspectiveSpeed(10);
+        if (i == 6) finalSpeed = getPerspectiveSpeed(9);
+        if (i == 7) finalSpeed = getPerspectiveSpeed(8);
+
+        speedFactors.push(finalSpeed);
+
+        currentPositions.push(
+            Math.random() * 250
+        );
+
+        isInverted.push(
+            Math.random() > 0.5
+        );
+    }
+}
+
+function animateBackground(){
+
+    const lines =
+        document.querySelectorAll(".star-line");
+
+    for(let i=0;i<lines.length;i++){
+
+        currentPositions[i] +=
+            speedFactors[i];
+
+        if(currentPositions[i] >= 250){
+
+            currentPositions[i] -= 250;
+        }
+
+        if(isInverted[i]){
+
+            lines[i].style.transform =
+                "scaleX(-1)";
+
+            lines[i].style.backgroundPositionX =
+                (-currentPositions[i]) + "px";
+
+        }else{
+
+            lines[i].style.transform =
+                "none";
+
+            lines[i].style.backgroundPositionX =
+                currentPositions[i] + "px";
+        }
+    }
+
+    requestAnimationFrame(
+        animateBackground
+    );
+}
+
+generateLayers();
+animateBackground();
+
+/* =========================================================
+   WEBGL
+========================================================= */
+
+const canvas =
+    document.getElementById("glcanvas");
+
+const gl =
+    canvas.getContext("webgl", {
+        alpha:true
+    });
+
+function resize(){
+
+    const rect =
+        canvas.getBoundingClientRect();
+
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+
+    gl.viewport(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+}
+
+window.addEventListener("resize", resize);
+
+resize();
+
+/* =========================
+   SHADERS
+========================= */
+
+const vertexShaderSource = `
+attribute vec2 a_position;
+
+uniform vec2 u_resolution;
+
+void main(){
+
+    vec2 zeroToOne =
+        a_position / u_resolution;
+
+    vec2 zeroToTwo =
+        zeroToOne * 2.0;
+
+    vec2 clipSpace =
+        zeroToTwo - 1.0;
+
+    gl_Position = vec4(
+        clipSpace * vec2(1,-1),
+        0,
+        1
+    );
+}
+`;
+
+const fragmentShaderSource = `
+precision mediump float;
+
+uniform vec4 u_color;
+
+void main(){
+
+    gl_FragColor = u_color;
+}
+`;
+
+function createShader(type, source){
+
+    const shader =
+        gl.createShader(type);
+
+    gl.shaderSource(shader, source);
+
+    gl.compileShader(shader);
+
+    return shader;
+}
+
+const vertexShader =
+    createShader(
+        gl.VERTEX_SHADER,
+        vertexShaderSource
+    );
+
+const fragmentShader =
+    createShader(
+        gl.FRAGMENT_SHADER,
+        fragmentShaderSource
+    );
+
+const program =
+    gl.createProgram();
+
+gl.attachShader(program, vertexShader);
+gl.attachShader(program, fragmentShader);
+
+gl.linkProgram(program);
+
+gl.useProgram(program);
+
+const buffer =
+    gl.createBuffer();
+
+gl.bindBuffer(
+    gl.ARRAY_BUFFER,
+    buffer
+);
+
+const positionLocation =
+    gl.getAttribLocation(
+        program,
+        "a_position"
+    );
+
+gl.enableVertexAttribArray(
+    positionLocation
+);
+
+gl.vertexAttribPointer(
+    positionLocation,
+    2,
+    gl.FLOAT,
+    false,
+    0,
+    0
+);
+
+const resolutionLocation =
+    gl.getUniformLocation(
+        program,
+        "u_resolution"
+    );
+
+const colorLocation =
+    gl.getUniformLocation(
+        program,
+        "u_color"
+    );
+
+/* =========================================================
+   PHYSICS
+========================================================= */
+
+const points = [];
+const springs = [];
+
+const GRID_SPACING = 28;
+
+const COLS = 30;
+const ROWS = 22;
+
+const GRAVITY = 0.08;
+const FRICTION = 0.985;
+const STIFFNESS = 0.14;
+const TEAR_DISTANCE = 90;
+
+class Point{
+
+    constructor(x,y,pinned=false){
+
+        this.x = x;
+        this.y = y;
+
+        this.oldx = x;
+        this.oldy = y;
+
+        this.pinned = pinned;
+
+        this.grabbed = false;
+    }
+
+    update(){
+
+        if(this.pinned || this.grabbed){
+            return;
+        }
+
+        const vx =
+            (this.x - this.oldx) * FRICTION;
+
+        const vy =
+            (this.y - this.oldy) * FRICTION;
+
+        this.oldx = this.x;
+        this.oldy = this.y;
+
+        this.x += vx;
+        this.y += vy + GRAVITY;
+    }
+}
+
+class Spring{
+
+    constructor(a,b){
+
+        this.a = a;
+        this.b = b;
+
+        this.length =
+            distance(a,b);
+
+        this.broken = false;
+    }
+
+    update(){
+
+        if(this.broken){
+            return;
+        }
+
+        const dx =
+            this.b.x - this.a.x;
+
+        const dy =
+            this.b.y - this.a.y;
+
+        const dist =
+            Math.sqrt(dx*dx + dy*dy);
+
+        if(dist > TEAR_DISTANCE){
+
+            this.broken = true;
+            return;
+        }
+
+        const diff =
+            (this.length - dist) / dist;
+
+        const offsetX =
+            dx * diff * STIFFNESS;
+
+        const offsetY =
+            dy * diff * STIFFNESS;
+
+        if(!this.a.pinned && !this.a.grabbed){
+
+            this.a.x -= offsetX;
+            this.a.y -= offsetY;
+        }
+
+        if(!this.b.pinned && !this.b.grabbed){
+
+            this.b.x += offsetX;
+            this.b.y += offsetY;
+        }
+    }
+}
+
+function distance(a,b){
+
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+
+    return Math.sqrt(dx*dx + dy*dy);
+}
+
+/* =========================
+   CREATE GRID
+========================= */
+
+const startX = 90;
+const startY = 60;
+
+for(let y=0;y<ROWS;y++){
+
+    for(let x=0;x<COLS;x++){
+
+        const px =
+            startX + x * GRID_SPACING;
+
+        const py =
+            startY + y * GRID_SPACING;
+
+        const pinned = y === 0;
+
+        points.push(
+            new Point(px, py, pinned)
+        );
+    }
+}
+
+function idx(x,y){
+
+    return y * COLS + x;
+}
+
+for(let y=0;y<ROWS;y++){
+
+    for(let x=0;x<COLS;x++){
+
+        if(x < COLS - 1){
+
+            springs.push(
+                new Spring(
+                    points[idx(x,y)],
+                    points[idx(x+1,y)]
+                )
+            );
+        }
+
+        if(y < ROWS - 1){
+
+            springs.push(
+                new Spring(
+                    points[idx(x,y)],
+                    points[idx(x,y+1)]
+                )
+            );
+        }
+    }
+}
+
+/* =========================================================
+   MODES
+========================================================= */
+
+let mode = "drag";
+
+const dragBtn =
+    document.getElementById("dragBtn");
+
+const grabBtn =
+    document.getElementById("grabBtn");
+
+const slashBtn =
+    document.getElementById("slashBtn");
+
+function setMode(newMode){
+
+    mode = newMode;
+
+    dragBtn.classList.remove("active");
+    grabBtn.classList.remove("active");
+    slashBtn.classList.remove("active");
+
+    if(mode === "drag"){
+        dragBtn.classList.add("active");
+    }
+
+    if(mode === "grab"){
+        grabBtn.classList.add("active");
+    }
+
+    if(mode === "slash"){
+        slashBtn.classList.add("active");
+    }
+}
+
+dragBtn.onclick = ()=> setMode("drag");
+grabBtn.onclick = ()=> setMode("grab");
+slashBtn.onclick = ()=> setMode("slash");
+
+/* =========================================================
+   MOUSE
+========================================================= */
+
+const mouse = {
+    x:0,
+    y:0,
+    down:false
+};
+
+let grabbedPoints = [];
+
+const slashTrails = [];
+
+canvas.addEventListener("mousedown", e=>{
+
+    mouse.down = true;
+
+    const rect =
+        canvas.getBoundingClientRect();
+
+    mouse.x =
+        e.clientX - rect.left;
+
+    mouse.y =
+        e.clientY - rect.top;
+
+    grabbedPoints = [];
+
+    if(mode === "drag" || mode === "grab"){
+
+        let closest = null;
+        let closestDist = Infinity;
+
+        for(const p of points){
+
+            if(p.pinned) continue;
+
+            const dx = p.x - mouse.x;
+            const dy = p.y - mouse.y;
+
+            const d =
+                Math.sqrt(dx*dx + dy*dy);
+
+            if(d < closestDist){
+
+                closestDist = d;
+                closest = p;
+            }
+        }
+
+        if(closest){
+
+            if(mode === "drag"){
+
+                closest.grabbed = true;
+
+                grabbedPoints.push({
+                    point:closest,
+                    offsetX:
+                        closest.x - mouse.x,
+                    offsetY:
+                        closest.y - mouse.y
+                });
+
+            }else{
+
+                for(const p of points){
+
+                    const dx =
+                        p.x - closest.x;
+
+                    const dy =
+                        p.y - closest.y;
+
+                    const d =
+                        Math.sqrt(dx*dx + dy*dy);
+
+                    if(d < GRID_SPACING * 1.7 &&
+                       !p.pinned){
+
+                        p.grabbed = true;
+
+                        grabbedPoints.push({
+                            point:p,
+                            offsetX:
+                                p.x - mouse.x,
+                            offsetY:
+                                p.y - mouse.y
+                        });
+                    }
+                }
+            }
+        }
+    }
+});
+
+window.addEventListener("mouseup", ()=>{
+
+    mouse.down = false;
+
+    for(const g of grabbedPoints){
+
+        g.point.grabbed = false;
+    }
+
+    grabbedPoints = [];
+});
+
+canvas.addEventListener("mousemove", e=>{
+
+    const rect =
+        canvas.getBoundingClientRect();
+
+    mouse.x =
+        e.clientX - rect.left;
+
+    mouse.y =
+        e.clientY - rect.top;
+
+    /* =========================
+       DRAG + GRAB
+    ========================= */
+
+    if(
+        (mode === "drag" || mode === "grab")
+        && grabbedPoints.length > 0
+    ){
+
+        for(const g of grabbedPoints){
+
+            g.point.x =
+                mouse.x + g.offsetX;
+
+            g.point.y =
+                mouse.y + g.offsetY;
+        }
+    }
+
+    /* =========================
+       SLASH
+    ========================= */
+
+    if(mode === "slash" && mouse.down){
+
+        slashTrails.push({
+            x:mouse.x,
+            y:mouse.y,
+            life:1
+        });
+
+        for(const s of springs){
+
+            if(s.broken) continue;
+
+            const mx =
+                (s.a.x + s.b.x) * 0.5;
+
+            const my =
+                (s.a.y + s.b.y) * 0.5;
+
+            const dx = mx - mouse.x;
+            const dy = my - mouse.y;
+
+            const d =
+                Math.sqrt(dx*dx + dy*dy);
+
+            if(d < 18){
+
+                s.broken = true;
+            }
+        }
+    }
+});
+
+/* =========================================================
+   RENDER
+========================================================= */
+
+function render(){
+
+    gl.clearColor(0,0,0,0);
+
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.uniform2f(
+        resolutionLocation,
+        canvas.width,
+        canvas.height
+    );
+
+    /* =========================
+       PHYSICS
+    ========================= */
+
+    for(const p of points){
+        p.update();
+    }
+
+    for(let i=0;i<8;i++){
+
+        for(const s of springs){
+            s.update();
+        }
+    }
+
+    /* =========================
+       GRID
+    ========================= */
+
+    const verts = [];
+
+    for(const s of springs){
+
+        if(s.broken) continue;
+
+        verts.push(s.a.x);
+        verts.push(s.a.y);
+
+        verts.push(s.b.x);
+        verts.push(s.b.y);
+    }
+
+    gl.bufferData(
+        gl.ARRAY_BUFFER,
+        new Float32Array(verts),
+        gl.DYNAMIC_DRAW
+    );
+
+    gl.uniform4f(
+        colorLocation,
+        1,
+        1,
+        1,
+        1
+    );
+
+    gl.drawArrays(
+        gl.LINES,
+        0,
+        verts.length / 2
+    );
+
+    /* =========================
+       SLASH TRAILS
+    ========================= */
+
+    const trailVerts = [];
+
+    for(let i=slashTrails.length - 1;i>=0;i--){
+
+        const t =
+            slashTrails[i];
+
+        t.life -= 0.06;
+
+        if(t.life <= 0){
+
+            slashTrails.splice(i,1);
+            continue;
+        }
+
+        const size =
+            t.life * 30;
+
+        /* diagonal slash */
+
+        trailVerts.push(
+            t.x - size,
+            t.y - size,
+
+            t.x + size,
+            t.y + size
+        );
+
+        /* second streak */
+
+        trailVerts.push(
+            t.x - size * 0.5,
+            t.y + size * 0.2,
+
+            t.x + size * 0.5,
+            t.y - size * 0.2
+        );
+    }
+
+    if(trailVerts.length > 0){
+
+        gl.bufferData(
+            gl.ARRAY_BUFFER,
+            new Float32Array(trailVerts),
+            gl.DYNAMIC_DRAW
+        );
+
+        gl.uniform4f(
+            colorLocation,
+            1,
+            1,
+            1,
+            0.9
+        );
+
+        gl.lineWidth(3);
+
+        gl.drawArrays(
+            gl.LINES,
+            0,
+            trailVerts.length / 2
+        );
+    }
+
+    requestAnimationFrame(render);
+}
+
+render();
+
+</script>
+</body>
+</html>
