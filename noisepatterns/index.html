@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>1-Bit Noise</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; background: #0a0a0a; }
+body {
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  font-size: 11px;
+  color: #888;
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  gap: 12px;
+  overflow: hidden;
+}
+#cw { flex: 1; min-height: 0; }
+canvas {
+  display: block; width: 100%; height: 100%;
+  image-rendering: pixelated; cursor: crosshair;
+  box-shadow: 0 0 0 1px #1a1a1a;
+}
+#ctrl { display: flex; flex-direction: column; gap: 8px; }
+.row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.sg { display: flex; align-items: center; gap: 5px; }
+.sg label {
+  font-size: 10px; letter-spacing: 0.1em; color: #2e2e2e;
+  white-space: nowrap; text-align: right; min-width: 72px;
+}
+.sg input[type=range] {
+  width: 100px; -webkit-appearance: none; appearance: none;
+  height: 1px; background: #1c1c1c; outline: none; cursor: pointer;
+}
+.sg input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 10px; height: 10px; background: #aaa; cursor: pointer;
+}
+.sg input[type=range]::-moz-range-thumb {
+  width: 10px; height: 10px; background: #aaa; border: none; cursor: pointer;
+}
+.sg .v { font-size: 10px; width: 30px; color: #383838; }
+.bg { display: flex; gap: 2px; }
+.b {
+  background: none; border: 1px solid #1a1a1a; color: #363636;
+  font-family: inherit; font-size: 10px; padding: 3px 8px;
+  cursor: pointer; letter-spacing: 0.04em; white-space: nowrap;
+  transition: color 0.08s, border-color 0.08s, background 0.08s;
+}
+.b:hover { color: #777; border-color: #2e2e2e; }
+.b.on    { color: #ccc; border-color: #444; background: #181818; }
+.sep  { color: #191919; font-size: 10px; }
+.sec  { font-size: 10px; letter-spacing: 0.1em; color: #272727; white-space: nowrap; }
+.hint { font-size: 10px; color: #1e1e1e; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+
+<div id="cw"><canvas id="c"></canvas></div>
+
+<div id="ctrl">
+  <div class="row">
+    <!-- The main slider: blend A into B -->
+    <div class="sg">
+      <label>A → B</label>
+      <input type="range" id="sBlend" min="0" max="0.5" step="0.005" value="0">
+      <span class="v" id="vBlend">0.00</span>
+    </div>
+    <span class="hint">noise ─── voronoi tile</span>
+  </div>
+  <div class="row">
+    <div class="sg">
+      <label>cells</label>
+      <input type="range" id="sCells" min="5" max="60" step="1" value="22">
+      <span class="v" id="vCells">22</span>
+    </div>
+    <div class="sg">
+      <label>pattern</label>
+      <input type="range" id="sPat" min="2" max="4" step="1" value="3">
+      <span class="v" id="vPat">3×3</span>
+    </div>
+    <div class="sg">
+      <label>jitter</label>
+      <input type="range" id="sJitter" min="0" max="1" step="0.01" value="1">
+      <span class="v" id="vJitter">1.0</span>
+    </div>
+  </div>
+  <div class="row">
+    <span class="sec">pixel</span>
+    <div class="bg">
+      <button class="b"    data-px="2">2</button>
+      <button class="b"    data-px="3">3</button>
+      <button class="b on" data-px="4">4</button>
+      <button class="b"    data-px="6">6</button>
+      <button class="b"    data-px="8">8</button>
+    </div>
+    <span class="sep">·</span>
+    <span class="sec">zoom</span>
+    <div class="bg">
+      <button class="b on" data-zm="1">1×</button>
+      <button class="b"    data-zm="2">2×</button>
+      <button class="b"    data-zm="3">3×</button>
+      <button class="b"    data-zm="4">4×</button>
+    </div>
+    <span class="sep">·</span>
+    <button class="b" id="bRnd" style="border-color:#222;color:#444;padding:3px 16px">randomize</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+let W, H, GW, GH, imgData, pix;
+
+const P = {
+  blend:   0,    // 0 = pure layer A (noise), 1 = pure layer B (voronoi tile)
+  cells:   22,
+  patSize: 3,
+  jitter:  1.0,
+  px:      4,
+  zoom:    1,
+};
+
+// Independent seeds — all re-randomized on Randomize
+let sA = 0x1111, sVoro = 0x2222, sPat = 0x3333;
+
+// ─── Seeded xorshift32 RNG ────────────────────────────────────────────────
+function mkRNG(seed) {
+  let s = (seed ^ 0xdeadbeef) | 1;
+  return () => { s ^= s<<13; s ^= s>>>17; s ^= s<<5; return (s>>>0)/4294967296; };
+}
+
+// ─── Precomputed layers ───────────────────────────────────────────────────
+// Layer A: random float per grid cell [0, 1).  NOT pre-thresholded.
+// Layer B: Voronoi-tiled binary pattern (0 or 1) per grid cell.
+let layerA  = null;  // Float32Array(GW*GH)
+let layerB  = null;  // Uint8Array(GW*GH)
+
+// Voronoi working data
+let voroSeeds = [];  // [{x,y}] grid coords
+let voroMap   = null; // Uint8Array(GW*GH) — nearest seed index
+let cellPats  = [];  // Uint8Array(ps*ps) per Voronoi cell
+
+// ─── Canvas setup ─────────────────────────────────────────────────────────
+function setup() {
+  const cw = document.getElementById('cw');
+  W = cw.offsetWidth || 800; H = cw.offsetHeight || 500;
+  canvas.width = W; canvas.height = H;
+  GW = Math.ceil(W / P.px);
+  GH = Math.ceil(H / P.px);
+  imgData = ctx.createImageData(W, H);
+  pix     = imgData.data;
+}
+
+// ─── Layer A: per-pixel random floats ─────────────────────────────────────
+function genLayerA() {
+  layerA = new Float32Array(GW * GH);
+  const rng = mkRNG(sA);
+  for (let i = 0, n = GW*GH; i < n; i++) layerA[i] = rng();
+}
+
+// ─── Voronoi: jittered grid seeds ─────────────────────────────────────────
+function genVoroSeeds() {
+  const rng  = mkRNG(sVoro);
+  const N    = P.cells | 0;
+  const j    = P.jitter;
+  voroSeeds  = [];
+  const cols = Math.max(1, Math.round(Math.sqrt(N * GW / GH)));
+  const rows = Math.max(1, Math.ceil(N / cols));
+  const cw   = GW / cols, rh = GH / rows;
+  let k = 0;
+  for (let r = 0; r < rows && k < N; r++) {
+    for (let c = 0; c < cols && k < N; c++) {
+      voroSeeds.push({
+        x: Math.max(0, Math.min(GW-1, (c+0.5)*cw + (rng()-0.5)*cw*j)),
+        y: Math.max(0, Math.min(GH-1, (r+0.5)*rh + (rng()-0.5)*rh*j)),
+      });
+      k++;
+    }
+  }
+}
+
+function genVoroMap() {
+  voroMap = new Uint8Array(GW * GH);
+  const ns = voroSeeds.length;
+  for (let gy = 0; gy < GH; gy++) {
+    for (let gx = 0; gx < GW; gx++) {
+      let md = Infinity, cell = 0;
+      for (let k = 0; k < ns; k++) {
+        const dx = gx - voroSeeds[k].x, dy = gy - voroSeeds[k].y;
+        const d  = dx*dx + dy*dy;
+        if (d < md) { md = d; cell = k; }
+      }
+      voroMap[gy*GW+gx] = cell;
+    }
+  }
+}
+
+// ─── Layer B: each Voronoi cell tiled with a random NxN binary pattern ────
+function genLayerB() {
+  // Generate one random binary tile per cell
+  const rng = mkRNG(sPat);
+  const ps  = P.patSize | 0;
+  const n    = ps * ps;
+  const ones = Math.round(n / 2);  // same luminance: every pattern has identical white-pixel count
+  cellPats   = Array.from({ length: voroSeeds.length }, () => {
+    const p = new Uint8Array(n);
+    for (let i = 0; i < ones; i++) p[i] = 1;
+    // Fisher-Yates shuffle with seeded RNG
+    for (let i = n - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      const t = p[i]; p[i] = p[j]; p[j] = t;
+    }
+    return p;
+  });
+
+  // Pre-tile: store the pattern value for every grid cell
+  layerB = new Uint8Array(GW * GH);
+  for (let gy = 0; gy < GH; gy++)
+    for (let gx = 0; gx < GW; gx++)
+      layerB[gy*GW+gx] = cellPats[voroMap[gy*GW+gx]][(gy%ps)*ps + (gx%ps)];
+}
+
+// ─── Full regeneration ────────────────────────────────────────────────────
+function genAll() {
+  genLayerA();
+  genVoroSeeds();
+  genVoroMap();
+  genLayerB();
+}
+
+// ─── Render ───────────────────────────────────────────────────────────────
+// Blend = 0: output = threshold(layerA)  → pure random noise
+// Blend = 1: output = layerB              → pure Voronoi tile patterns
+// In between: merged = A*(1-blend) + B*blend, then threshold → 1-bit
+// Layer B is never shown "raw" — the 1-bit threshold is always applied.
+function render() {
+  const eff    = P.px * P.zoom;
+  const vGW    = Math.ceil(W / eff), vGH = Math.ceil(H / eff);
+  const offX   = Math.max(0, (GW - vGW) >> 1);
+  const offY   = Math.max(0, (GH - vGH) >> 1);
+  const blend  = P.blend;
+  const iblend = 1 - blend;
+
+  for (let i = 0, n = pix.length; i < n; i += 4) {
+    pix[i] = pix[i+1] = pix[i+2] = 0; pix[i+3] = 255;
+  }
+
+  for (let gy = offY, eY = Math.min(offY+vGH, GH); gy < eY; gy++) {
+    for (let gx = offX, eX = Math.min(offX+vGW, GW); gx < eX; gx++) {
+      const idx = gy*GW+gx;
+
+      // Blend A (random float) with B (binary int), then round to 1-bit
+      const merged = layerA[idx] * iblend + layerB[idx] * blend;
+      const col    = merged > 0.5 ? 255 : 0;
+
+      const sx = (gx-offX)*eff, sy = (gy-offY)*eff;
+      const ex = Math.min(sx+eff, W), ey = Math.min(sy+eff, H);
+      for (let py = sy; py < ey; py++) {
+        const row = py * W;
+        for (let px = sx; px < ex; px++) {
+          const i = (row+px)*4;
+          pix[i] = pix[i+1] = pix[i+2] = col; pix[i+3] = 255;
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+// ─── Randomize ────────────────────────────────────────────────────────────
+function doRandomize() {
+  sA    = (Math.random()*0x7FFFFFFF)|0;
+  sVoro = (Math.random()*0x7FFFFFFF)|0;
+  sPat  = (Math.random()*0x7FFFFFFF)|0;
+  genAll();
+  render();
+}
+
+// ─── Init & resize ────────────────────────────────────────────────────────
+let resizeTid;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTid);
+  resizeTid = setTimeout(() => { setup(); doRandomize(); }, 100);
+});
+setup();
+doRandomize();
+
+// ─── Bindings ─────────────────────────────────────────────────────────────
+function bind(sid, vid, prop, fmt, fn) {
+  const el = document.getElementById(sid), vEl = document.getElementById(vid);
+  el.addEventListener('input', () => {
+    P[prop] = parseFloat(el.value);
+    vEl.textContent = fmt(P[prop]);
+    fn();
+  });
+}
+
+// Blend: just re-render (no data regeneration needed)
+bind('sBlend',  'vBlend',  'blend',   v => v.toFixed(2), render);
+
+// Cells / jitter: rebuild Voronoi and layer B
+function rebuildVoro() {
+  genVoroSeeds(); genVoroMap(); genLayerB(); render();
+}
+bind('sCells',  'vCells',  'cells',   v => (v|0)+'',         rebuildVoro);
+bind('sJitter', 'vJitter', 'jitter',  v => v.toFixed(1),     rebuildVoro);
+
+// Pattern size: rebuild layer B tile patterns only
+bind('sPat',    'vPat',    'patSize', v => (v|0)+'×'+(v|0),  () => { genLayerB(); render(); });
+
+document.querySelectorAll('[data-px]').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('[data-px]').forEach(x => x.classList.remove('on'));
+  b.classList.add('on'); P.px = parseInt(b.dataset.px);
+  setup(); doRandomize();
+}));
+
+document.querySelectorAll('[data-zm]').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('[data-zm]').forEach(x => x.classList.remove('on'));
+  b.classList.add('on'); P.zoom = parseInt(b.dataset.zm);
+  render();
+}));
+
+document.getElementById('bRnd').addEventListener('click', doRandomize);
+</script>
+</body>
+</html>
