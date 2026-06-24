@@ -99,8 +99,17 @@ PALE = (240, 237, 218)
 PAD = 60
 TITLE_H = 68
 
+# muted, technical-looking leader-line colors (+ white for dark image areas)
+PRESET_COLORS = ["#0e0e0e", "#1f3a93", "#9e1b1b", "#1f6b2e", "#5b4636", "#ffffff"]
+PRESET_NAMES  = ["Ink", "Blue", "Red", "Green", "Sepia", "White"]
 
-def _dashed_seg(draw, x0, y0, x1, y1, dash=(7, 4)):
+
+def hex_to_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _dashed_seg(draw, x0, y0, x1, y1, fill=INK, dash=(7, 4)):
     dx, dy = x1 - x0, y1 - y0
     L = math.hypot(dx, dy)
     if L == 0:
@@ -113,11 +122,11 @@ def _dashed_seg(draw, x0, y0, x1, y1, dash=(7, 4)):
         if on:
             draw.line([(round(x0 + ux * pos), round(y0 + uy * pos)),
                        (round(x0 + ux * end), round(y0 + uy * end))],
-                      fill=INK, width=1)
+                      fill=fill, width=1)
         pos, on = end, not on
 
 
-def _arrowhead(draw, x, y, fromx, fromy, size=8):
+def _arrowhead(draw, x, y, fromx, fromy, size=8, fill=INK):
     dx, dy = x - fromx, y - fromy
     L = math.hypot(dx, dy)
     if L == 0:
@@ -127,7 +136,7 @@ def _arrowhead(draw, x, y, fromx, fromy, size=8):
     draw.polygon([(x, y),
                   (x - ux * size + px * size * 0.45, y - uy * size + py * size * 0.45),
                   (x - ux * size - px * size * 0.45, y - uy * size - py * size * 0.45)],
-                 fill=INK)
+                 fill=fill)
 
 
 def _tsize(draw, text, fnt):
@@ -184,6 +193,7 @@ def render_patent(img, labels, fig_num=1, title="", grayscale=False,
                       font=f_lbl, fill=INK)
 
         # build leader path: box edge -> waypoints -> anchor
+        col = hex_to_rgb(lbl.get("color", "#0e0e0e"))
         first_target = wps[0] if wps else (ax, ay)
         edge = _nearest_edge(bcx, bcy, bw / 2, bh / 2, first_target)
         path = [edge] + wps + [(ax, ay)]
@@ -191,13 +201,13 @@ def render_patent(img, labels, fig_num=1, title="", grayscale=False,
             x0, y0 = path[i]
             x1, y1 = path[i + 1]
             if dashed:
-                _dashed_seg(draw, x0, y0, x1, y1)
+                _dashed_seg(draw, x0, y0, x1, y1, fill=col)
             else:
-                draw.line([(int(x0), int(y0)), (int(x1), int(y1))], fill=INK, width=1)
+                draw.line([(int(x0), int(y0)), (int(x1), int(y1))], fill=col, width=1)
         if arrow:
             px, py = path[-2]
-            _arrowhead(draw, int(ax), int(ay), int(px), int(py))
-        draw.ellipse((ax - 4, ay - 4, ax + 4, ay + 4), fill=INK)
+            _arrowhead(draw, int(ax), int(ay), int(px), int(py), fill=col)
+        draw.ellipse((ax - 4, ay - 4, ax + 4, ay + 4), fill=col)
 
     m = 9
     if border_style in ("double", "single"):
@@ -251,6 +261,8 @@ class PatentApp(tk.Tk):
         self.selected = None
         self.placing = False
         self.drag = None              # {"type":..,"index":i,"wp":j}
+        self.current_color = PRESET_COLORS[0]
+        self._swatches = []
 
         self.dx = self.dy = 0
         self.dw = self.dh = 1
@@ -340,6 +352,24 @@ class PatentApp(tk.Tk):
                   ).pack(side="left", fill="x", expand=True, padx=(3, 0))
         self._btn(s, "+ ADD BEND TO SELECTED", self.add_bend, ACCENT, "#332b14"
                   ).pack(fill="x", padx=14, pady=(4, 0))
+
+        self._flabel(s, "PATH COLOR (selected line)")
+        sw_row = tk.Frame(s, bg=PANEL)
+        sw_row.pack(fill="x", padx=14, pady=(0, 2))
+        self._swatches = []
+        for idx, hexc in enumerate(PRESET_COLORS):
+            holder = tk.Frame(sw_row, bg=PANEL, highlightthickness=2,
+                              highlightbackground=PANEL, cursor="hand2")
+            holder.pack(side="left", padx=2)
+            chip = tk.Frame(holder, bg=hexc, width=30, height=24,
+                            highlightthickness=1, highlightbackground="#555",
+                            cursor="hand2")
+            chip.pack_propagate(False)
+            chip.pack()
+            for w in (holder, chip):
+                w.bind("<Button-1>", lambda e, h=hexc: self.set_path_color(h))
+            self._swatches.append(holder)
+        self._refresh_swatches()
 
         self._head(s, "OUTPUT")
         self._btn(s, "↓  SAVE PNG", self.save_png, GREEN, "#16301a"
@@ -487,7 +517,8 @@ class PatentApp(tk.Tk):
             lx = max(-0.18, min(1.18, nx - 0.32 if nx > 0.5 else nx + 0.32))
             ly = max(-0.05, min(1.05, ny - 0.18 if ny > 0.5 else ny + 0.18))
             self.labels.append({"ref": ref.strip(), "text": text.strip(),
-                                "ax": nx, "ay": ny, "lx": lx, "ly": ly, "waypoints": []})
+                                "ax": nx, "ay": ny, "lx": lx, "ly": ly,
+                                "waypoints": [], "color": self.current_color})
             self.selected = len(self.labels) - 1
             self.cancel_placing(); self.refresh_list()
             self.redraw_source(); self.render_now()
@@ -495,7 +526,7 @@ class PatentApp(tk.Tk):
         hit = self._hit(event.x, event.y)
         self.drag = hit
         self.selected = hit["index"] if hit else None
-        self.refresh_list_selection(); self.update_overlays()
+        self.refresh_list_selection(); self._refresh_swatches(); self.update_overlays()
 
     def _hit(self, x, y):
         for i, l in enumerate(self.labels):
@@ -600,10 +631,30 @@ class PatentApp(tk.Tk):
         l.setdefault("waypoints", []).insert(k, {"x": nx, "y": ny})
         self.update_overlays(); self.render_now()
 
+    # ── color ─────────────────────────────────────────────────────────────
+    def set_path_color(self, hexc):
+        self.current_color = hexc
+        if self.selected is not None and 0 <= self.selected < len(self.labels):
+            self.labels[self.selected]["color"] = hexc
+            self.update_overlays()
+            self.render_now()
+        self._refresh_swatches()
+
+    def _refresh_swatches(self):
+        # the "active" color = selected label's color, else current default
+        if self.selected is not None and 0 <= self.selected < len(self.labels):
+            active = self.labels[self.selected].get("color", self.current_color)
+        else:
+            active = self.current_color
+        for b, hexc in zip(self._swatches, PRESET_COLORS):
+            b.config(highlightbackground=(ACCENT if hexc == active else PANEL),
+                     highlightcolor=(ACCENT if hexc == active else PANEL))
+
     # ── list ──────────────────────────────────────────────────────────────
     def on_list_select(self, event):
         sel = self.listbox.curselection()
         self.selected = sel[0] if sel else None
+        self._refresh_swatches()
         self.update_overlays()
 
     def refresh_list(self):
@@ -662,10 +713,12 @@ class PatentApp(tk.Tk):
         c = self.src_canvas; c.delete("ov")
         for i, l in enumerate(self.labels):
             on = (i == self.selected)
-            col = ACCENT if on else "#cfcfcf"
+            base = l.get("color", "#0e0e0e")
+            # use the label's own color; if it's near-black, lift to grey so it's visible on dark canvas
+            col = base if base != "#0e0e0e" else "#cfcfcf"
             path = self.label_path_canvas(l)
             flat = [v for p in path for v in p]
-            c.create_line(*flat, fill=col, width=2 if on else 1,
+            c.create_line(*flat, fill=col, width=3 if on else 2,
                           dash=(5, 3) if self.dash_var.get() else None, tags="ov")
             # waypoints
             for w in l.get("waypoints", []):
