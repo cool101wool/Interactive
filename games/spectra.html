@@ -362,8 +362,7 @@ function buildPattern(grid, l, rng, nColors, safeRows){
   const colorList = isRainbow ? SPECTRUM.slice(0, Math.min(6, Math.max(4,nColors)))
                               : game.activePalette.slice();
   const cn = colorList.length;
-  const rainSprinkle = l>=5 ? 0.03 : 0;                          // wildcard gems
-  const bombSprinkle = l>=5 ? clamp(0.01 + (l-5)*0.004, 0, 0.05) : 0;
+  // NOTE: pattern levels are kept "pure" — no bomb or rainbow orbs in the layout.
 
   // organic blob seeds for the "clumps" pattern
   let seeds=[];
@@ -430,10 +429,7 @@ function buildPattern(grid, l, rng, nColors, safeRows){
           fill = bc>=0; colorIdx = Math.max(0,bc); break; }
       }
       if(!fill) continue;
-
-      if(bombSprinkle && rng() < bombSprinkle)      grid[r][c] = bombBubble();
-      else if(rainSprinkle && rng() < rainSprinkle) grid[r][c] = rainbowBubble();
-      else grid[r][c] = normalBubble(colorList[clamp(colorIdx,0,cn-1)]);
+      grid[r][c] = normalBubble(colorList[clamp(colorIdx,0,cn-1)]);
     }
   }
 }
@@ -511,8 +507,9 @@ function makeShooterBubble(){
   if(pool.length===0) return normalBubble(0);
 
   const l = game.level;
-  const bombChance = l>=4 ? clamp(0.025 + (l-4)*0.003, 0, 0.07) : 0;
-  const rainChance = l>=5 ? clamp(0.03 + (l-5)*0.004, 0, 0.08) : 0;
+  // pattern levels stay pure: no bomb or rainbow orbs from the shooter either
+  const bombChance = (!game.isPattern && l>=4) ? clamp(0.025 + (l-4)*0.003, 0, 0.07) : 0;
+  const rainChance = (!game.isPattern && l>=5) ? clamp(0.03 + (l-5)*0.004, 0, 0.08) : 0;
   const dualChance = l>=3 ? clamp(0.07 + (l-3)*0.01, 0, 0.18) : 0;
   const roll = Math.random();
   if(roll < bombChance) return bombBubble();
