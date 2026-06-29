@@ -291,11 +291,47 @@ function generateLevel(l){
 
   anchorRepair(grid);                       // no startup floaters, ever
   if(!grid[0].some(Boolean)) grid[0][Math.floor(COLS/2)] = normalBubble(0);
+  edgeMerge(grid);                          // no 1- or 2-wide colour groups on the edges
   // activePalette must reflect every colour actually present (rainbow patterns
   // and recolours can introduce colours beyond the level's nominal count, and
   // bestGroup for a rainbow orb iterates exactly this list).
   recomputeActivePalette(grid);
   return grid;
+}
+
+// Eliminate tiny (1- or 2-orb) colour groups that touch the left/right edge by
+// recolouring them into their largest differently-coloured neighbour.
+function edgeMerge(grid){
+  let guard=0;
+  while(guard++ < 1500){
+    const seen=new Set(); let target=null;
+    scan:
+    for(let r=0;r<MAXROWS;r++) for(let c=0;c<grid[r].length;c++){
+      const b=grid[r][c]; if(!b || b.type!=='normal') continue;
+      const key=r+','+c; if(seen.has(key)) continue;
+      const col=b.c, comp=[], st=[[r,c]]; seen.add(key); let edge=false;
+      while(st.length){
+        const [rr,cc]=st.pop(); const bb=grid[rr][cc];
+        if(!bb || bb.type!=='normal' || bb.c!==col) continue;
+        comp.push([rr,cc]);
+        if(cc===0 || cc===colsInRow(rr)-1) edge=true;
+        for(const [nr,nc] of neighbors(rr,cc)){
+          const k=nr+','+nc; if(seen.has(k)) continue;
+          const nb=grid[nr][nc];
+          if(nb && nb.type==='normal' && nb.c===col){ seen.add(k); st.push([nr,nc]); }
+        }
+      }
+      if(edge && comp.length<=2){ target={comp,col}; break scan; }
+    }
+    if(!target) break;
+    const counts={};
+    for(const [r,c] of target.comp) for(const [nr,nc] of neighbors(r,c)){
+      const nb=grid[nr][nc]; if(nb && nb.type==='normal' && nb.c!==target.col) counts[nb.c]=(counts[nb.c]||0)+1;
+    }
+    let best=null, bn=-1; for(const k in counts){ if(counts[k]>bn){ bn=counts[k]; best=+k; } }
+    if(best===null) break;
+    for(const [r,c] of target.comp) grid[r][c]=normalBubble(best);
+  }
 }
 
 function recomputeActivePalette(grid){
@@ -316,6 +352,11 @@ function buildRandom(grid, l, rng, nColors, safeRows){
   const rainChance = l>=5 ? clamp(0.015 + (l-5)*0.005, 0, 0.06) : 0;
   const bombChance = l>=5 ? clamp(0.01 + (l-5)*0.004, 0, 0.05) : 0;
 
+  // hard caps on specials in the layout
+  const maxBombs = l<20 ? 2 : 1;
+  const maxWheels = l<20 ? 6 : 4;
+  let bombs=0, wheels=0;
+
   for(let r=0;r<rows;r++){
     const n = colsInRow(r);
     for(let c=0;c<n;c++){
@@ -326,10 +367,10 @@ function buildRandom(grid, l, rng, nColors, safeRows){
       if(rng() > fill) continue;
 
       const roll = rng();
-      if(roll < bombChance){
-        grid[r][c] = bombBubble();
-      } else if(roll < bombChance+rainChance && nColors>=4){
-        grid[r][c] = rainbowBubble();
+      if(roll < bombChance && bombs < maxBombs){
+        grid[r][c] = bombBubble(); bombs++;
+      } else if(roll < bombChance+rainChance && nColors>=4 && wheels < maxWheels){
+        grid[r][c] = rainbowBubble(); wheels++;
       } else if(roll < bombChance+rainChance+dualChance && nColors>=2){
         let a = Math.floor(rng()*nColors), b = Math.floor(rng()*nColors);
         if(b===a) b=(b+1)%nColors;
@@ -351,10 +392,92 @@ function visCol(r,c){ return Math.round((cellX(r,c) - R) / (2*R)); }
 // PALETTE re-ordered roughly red -> violet so "rainbow" schemes read as a spectrum
 const SPECTRUM = [0,5,3,2,1,4]; // rose, coral, amber, mint, azure, violet
 
+const REGION_PATTERNS = ['threewide','threetall','triangles','hexagons','voronoi'];
+
+// split a length into contiguous runs that are each at least 3 (never 1 or 2)
+function partitionRuns(n){
+  if(n < 3) return [n];
+  let g = Math.floor(n/3), rem = n%3;
+  const sizes = new Array(g).fill(3);
+  let i=0; while(rem>0){ sizes[i%g]++; rem--; i++; }
+  return sizes;
+}
+function randColor(colorList, rng){ return colorList[Math.floor(rng()*colorList.length)]; }
+
+// Region patterns fill the board (or seed regions) and colour each region at
+// random, with all runs >= 3 wide/tall so nothing tiny is left at the edges.
+function buildRegionPattern(grid, name, rng, colorList, rows){
+  if(name==='threewide'){                 // whole-board rows of random-colour 3+ runs
+    for(let r=0;r<rows;r++){
+      const n = colsInRow(r); let c=0;
+      for(const s of partitionRuns(n)){ const col=randColor(colorList,rng);
+        for(let k=0;k<s;k++) grid[r][c++] = normalBubble(col); }
+    }
+    return;
+  }
+  if(name==='threetall'){                 // vertical version: random-colour 3+ runs down each column
+    const cols=new Map();
+    for(let r=0;r<rows;r++){ const n=colsInRow(r);
+      for(let c=0;c<n;c++){ const vc=visCol(r,c); if(!cols.has(vc)) cols.set(vc,[]); cols.get(vc).push([r,c]); } }
+    for(const list of cols.values()){
+      list.sort((a,b)=>a[0]-b[0]); let i=0;
+      for(const s of partitionRuns(list.length)){ const col=randColor(colorList,rng);
+        for(let k=0;k<s;k++){ const [r,c]=list[i++]; grid[r][c]=normalBubble(col); } }
+    }
+    return;
+  }
+  if(name==='voronoi' || name==='hexagons'){
+    const seeds=[];
+    if(name==='voronoi'){                 // irregular blobs
+      const K = 6 + Math.floor(rng()*5);
+      for(let i=0;i<K;i++) seeds.push({x:rng(), y:rng(), col:randColor(colorList,rng)});
+    } else {                              // regular hex-arranged seeds -> hexagonal cells
+      const step=0.26; let row=0;
+      for(let y=step*0.5; y<1.05; y+=step){
+        const off=(row&1)? step*0.5 : 0;
+        for(let x=off+step*0.25; x<1.05; x+=step) seeds.push({x, y, col:randColor(colorList,rng)});
+        row++;
+      }
+    }
+    for(let r=0;r<rows;r++){ const n=colsInRow(r);
+      for(let c=0;c<n;c++){
+        const x=cellX(r,c)/W, y=rows>1?r/(rows-1):0;
+        let bd=Infinity, bc=colorList[0];
+        for(const s of seeds){ const d=(x-s.x)*(x-s.x)+(y-s.y)*(y-s.y); if(d<bd){ bd=d; bc=s.col; } }
+        grid[r][c]=normalBubble(bc);
+      } }
+    return;
+  }
+  if(name==='triangles'){                 // greedy 3-orb triangles, random colour each
+    for(let r=0;r<rows;r++){ const n=colsInRow(r); for(let c=0;c<n;c++) grid[r][c]=normalBubble(colorList[0]); }
+    const used=new Set(), order=[];
+    for(let r=0;r<rows;r++) for(let c=0;c<colsInRow(r);c++) order.push([r,c]);
+    for(const [r,c] of order){
+      if(used.has(r+','+c)) continue;
+      const nb = neighbors(r,c).filter(([rr,cc])=>rr<rows && !used.has(rr+','+cc));
+      let tri=null;
+      for(let i=0;i<nb.length && !tri;i++) for(let j=i+1;j<nb.length && !tri;j++){
+        const [ar,ac]=nb[i], [br,bc]=nb[j];
+        if(neighbors(ar,ac).some(([xr,xc])=>xr===br && xc===bc)) tri=[[r,c],[ar,ac],[br,bc]];
+      }
+      if(tri){ const col=randColor(colorList,rng);
+        for(const [tr,tc] of tri){ grid[tr][tc]=normalBubble(col); used.add(tr+','+tc); } }
+    }
+    // leftovers join an adjacent triangle's colour (no stray singles)
+    for(const [r,c] of order){ if(used.has(r+','+c)) continue;
+      const nbu=neighbors(r,c).filter(([rr,cc])=>rr<rows && used.has(rr+','+cc));
+      if(nbu.length){ const [nr,nc]=nbu[0]; grid[r][c]=normalBubble(grid[nr][nc].c); }
+      used.add(r+','+c);
+    }
+    return;
+  }
+}
+
 function buildPattern(grid, l, rng, nColors, safeRows){
   const rows = Math.min(safeRows, 8 + Math.round(l*0.4));   // bigger pattern levels
   const patterns = ['bands','columns','pyramid','diamond','rings','chevron','checker','heart',
-                    'vrainbow','diagrainbow','tallcols','widerows','blocks2x2','clumps'];
+                    'vrainbow','diagrainbow','widerows','blocks2x2','clumps',
+                    'threewide','threetall','triangles','hexagons','voronoi'];
   const name = patterns[Math.floor(rng()*patterns.length)];
 
   // rainbow-flavoured shapes lay colours out as a full spectrum
@@ -364,6 +487,9 @@ function buildPattern(grid, l, rng, nColors, safeRows){
   const cn = colorList.length;
   // NOTE: pattern levels are kept "pure" — no bomb or rainbow orbs in the layout.
 
+  // region-based shapes have their own builder (random-colour regions, runs >= 3)
+  if(REGION_PATTERNS.includes(name)){ buildRegionPattern(grid, name, rng, colorList, rows); return; }
+
   // organic blob seeds for the "clumps" pattern
   let seeds=[];
   if(name==='clumps'){
@@ -371,7 +497,6 @@ function buildPattern(grid, l, rng, nColors, safeRows){
     for(let i=0;i<K;i++) seeds.push({x:rng(), y:rng()*0.95, col:Math.floor(rng()*cn), rad:0.24+rng()*0.12});
   }
   const bandH = Math.max(2, Math.ceil(rows/4));   // for "4 wide rows"
-  const bandW = Math.max(2, Math.ceil(COLS/4));   // for "4 tall columns"
 
   for(let r=0;r<rows;r++){
     const n = colsInRow(r);
@@ -414,8 +539,6 @@ function buildPattern(grid, l, rng, nColors, safeRows){
           colorIdx = Math.min(cn-1, Math.floor(t*cn)); break; }
         case 'diagrainbow':                    // diagonal rainbow stripes (2-wide so they pop)
           fill = true; colorIdx = mod(Math.floor((vc - r)/2)); break;
-        case 'tallcols':                       // ~4 tall columns (wide vertical bands)
-          fill = true; colorIdx = mod(Math.floor(vc/bandW)); break;
         case 'widerows':                       // ~4 wide rows (tall horizontal bands)
           fill = true; colorIdx = mod(Math.floor(r/bandH)); break;
         case 'blocks2x2':                      // checkerboard of 2x2 colour blocks
@@ -508,8 +631,8 @@ function makeShooterBubble(){
 
   const l = game.level;
   // pattern levels stay pure: no bomb or rainbow orbs from the shooter either
-  const bombChance = (!game.isPattern && l>=4) ? clamp(0.025 + (l-4)*0.003, 0, 0.07) : 0;
   const rainChance = (!game.isPattern && l>=5) ? clamp(0.03 + (l-5)*0.004, 0, 0.08) : 0;
+  const bombChance = rainChance/3;          // bomb is three times as rare as the colourwheel
   const dualChance = l>=3 ? clamp(0.07 + (l-3)*0.01, 0, 0.18) : 0;
   const roll = Math.random();
   if(roll < bombChance) return bombBubble();
