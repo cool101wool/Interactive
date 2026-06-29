@@ -110,6 +110,7 @@
       <div class="row"><span class="swatch" style="background:radial-gradient(circle at 35% 30%, #ff9bb5, #ff4d7d)"></span><span>Match <b>3+</b> to clear them</span></div>
       <div class="row"><span class="swatch" id="dualSwatch"></span><span><b>Dual</b> orbs match either color</span></div>
       <div class="row"><span class="swatch" id="rainSwatch"></span><span><b>Rainbow</b> matches anything</span></div>
+      <div class="row"><span class="swatch" id="bombSwatch"></span><span><b>Bomb</b> blasts everything nearby</span></div>
     </div>
     <button class="ghost" id="resetBtn">RESET PROGRESS</button>
   </div>
@@ -138,7 +139,6 @@
     <p class="sub">Level <span class="gold" id="menuLvl">1</span> · Score <span class="gold" id="menuScore">0</span></p>
     <button class="cta" id="resumeBtn">RESUME</button>
     <button class="ghost" id="restartBtn">RESTART LEVEL</button>
-    <button class="ghost" id="menuResetBtn">RESET ALL PROGRESS</button>
   </div>
 </div></div>
 
@@ -200,11 +200,11 @@ const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 let W=0, H=0, DPR=1;
 
-const COLS = 8;            // bubbles per even row
+const COLS = 10;           // bubbles per even row (wider board = bigger levels)
 let R=24, RH=42;           // bubble radius, row height
 let TOP=60;                // y of first row centre (before descent)
 let SHOOT_Y=0, DEATH_Y=0;  // shooter origin y, lose line
-const MAXROWS = 16;
+const MAXROWS = 22;
 
 function colsInRow(r){ return (r&1) ? COLS-1 : COLS; }
 function emptyGrid(){ const g=[]; for(let r=0;r<MAXROWS;r++) g.push(new Array(colsInRow(r)).fill(null)); return g; }
@@ -255,15 +255,17 @@ const game = {
 function normalBubble(idx){ return {type:'normal', c:idx}; }
 function dualBubble(a,b){ return {type:'dual', a:a, b:b}; }
 function rainbowBubble(){ return {type:'rainbow'}; }
+function bombBubble(){ return {type:'bomb'}; }
 
 // colors (palette indices) a bubble can satisfy
 function bubbleColors(b){
   if(b.type==='normal') return [b.c];
   if(b.type==='dual')   return [b.a,b.b];
-  return null; // rainbow = wildcard
+  return null; // rainbow / bomb = no fixed colour list
 }
 function bubbleHasColor(b, idx){
-  if(b.type==='rainbow') return true;
+  if(b.type==='rainbow') return true;     // wildcard
+  if(b.type==='bomb')    return false;    // bombs never match a colour group
   if(b.type==='normal')  return b.c===idx;
   return b.a===idx || b.b===idx;
 }
@@ -289,29 +291,46 @@ function generateLevel(l){
 
   anchorRepair(grid);                       // no startup floaters, ever
   if(!grid[0].some(Boolean)) grid[0][Math.floor(COLS/2)] = normalBubble(0);
+  // activePalette must reflect every colour actually present (rainbow patterns
+  // and recolours can introduce colours beyond the level's nominal count, and
+  // bestGroup for a rainbow orb iterates exactly this list).
+  recomputeActivePalette(grid);
   return grid;
+}
+
+function recomputeActivePalette(grid){
+  const s = new Set();
+  for(let r=0;r<MAXROWS;r++) for(let c=0;c<grid[r].length;c++){
+    const b=grid[r][c]; if(!b) continue;
+    if(b.type==='normal') s.add(b.c);
+    else if(b.type==='dual'){ s.add(b.a); s.add(b.b); }
+  }
+  game.activePalette = s.size ? [...s] : [0,1,2];
 }
 
 /* ---------- the original organic / random cluster ---------- */
 function buildRandom(grid, l, rng, nColors, safeRows){
-  let rows = clamp(3 + Math.round(l*0.6), 3, 9);
+  let rows = clamp(4 + Math.round(l*0.8), 4, 14);   // bigger clusters
   rows = Math.min(rows, safeRows);
   const dualChance = l>=3 ? clamp(0.05 + (l-3)*0.012, 0, 0.16) : 0;
   const rainChance = l>=5 ? clamp(0.015 + (l-5)*0.005, 0, 0.06) : 0;
+  const bombChance = l>=5 ? clamp(0.01 + (l-5)*0.004, 0, 0.05) : 0;
 
   for(let r=0;r<rows;r++){
     const n = colsInRow(r);
     for(let c=0;c<n;c++){
       const depth = r/rows;
-      const fill = r===0 ? 0.98 : (0.92 - depth*0.45);
+      const fill = r===0 ? 0.98 : (0.94 - depth*0.4);
       const supported = r===0 || neighbors(r,c).some(([rr,cc])=>rr<r && grid[rr][cc]);
       if(!supported) continue;
       if(rng() > fill) continue;
 
       const roll = rng();
-      if(roll < rainChance && nColors>=4){
+      if(roll < bombChance){
+        grid[r][c] = bombBubble();
+      } else if(roll < bombChance+rainChance && nColors>=4){
         grid[r][c] = rainbowBubble();
-      } else if(roll < rainChance+dualChance && nColors>=2){
+      } else if(roll < bombChance+rainChance+dualChance && nColors>=2){
         let a = Math.floor(rng()*nColors), b = Math.floor(rng()*nColors);
         if(b===a) b=(b+1)%nColors;
         grid[r][c] = dualBubble(a,b);
@@ -329,12 +348,31 @@ function buildRandom(grid, l, rng, nColors, safeRows){
    built top-anchored where possible; anchorRepair() catches the rest. */
 function visCol(r,c){ return Math.round((cellX(r,c) - R) / (2*R)); }
 
+// PALETTE re-ordered roughly red -> violet so "rainbow" schemes read as a spectrum
+const SPECTRUM = [0,5,3,2,1,4]; // rose, coral, amber, mint, azure, violet
+
 function buildPattern(grid, l, rng, nColors, safeRows){
-  const rows = Math.min(safeRows, 6 + Math.round(l*0.3));
-  const patterns = ['bands','columns','pyramid','diamond','rings','chevron','checker','heart'];
+  const rows = Math.min(safeRows, 8 + Math.round(l*0.4));   // bigger pattern levels
+  const patterns = ['bands','columns','pyramid','diamond','rings','chevron','checker','heart',
+                    'vrainbow','diagrainbow','tallcols','widerows','blocks2x2','clumps'];
   const name = patterns[Math.floor(rng()*patterns.length)];
-  const pal = game.activePalette;
-  const rainSprinkle = l>=5 ? 0.04 : 0;   // a few wildcard gems on higher levels
+
+  // rainbow-flavoured shapes lay colours out as a full spectrum
+  const isRainbow = (name==='vrainbow' || name==='diagrainbow');
+  const colorList = isRainbow ? SPECTRUM.slice(0, Math.min(6, Math.max(4,nColors)))
+                              : game.activePalette.slice();
+  const cn = colorList.length;
+  const rainSprinkle = l>=5 ? 0.03 : 0;                          // wildcard gems
+  const bombSprinkle = l>=5 ? clamp(0.01 + (l-5)*0.004, 0, 0.05) : 0;
+
+  // organic blob seeds for the "clumps" pattern
+  let seeds=[];
+  if(name==='clumps'){
+    const K = 5 + Math.floor(rng()*4);
+    for(let i=0;i<K;i++) seeds.push({x:rng(), y:rng()*0.95, col:Math.floor(rng()*cn), rad:0.24+rng()*0.12});
+  }
+  const bandH = Math.max(2, Math.ceil(rows/4));   // for "4 wide rows"
+  const bandW = Math.max(2, Math.ceil(COLS/4));   // for "4 tall columns"
 
   for(let r=0;r<rows;r++){
     const n = colsInRow(r);
@@ -343,38 +381,59 @@ function buildPattern(grid, l, rng, nColors, safeRows){
       const x  = cellX(r,c)/W;                 // 0 .. 1
       const sx = (x-0.5)*2;                    // -1 .. 1, centred
       const vc = visCol(r,c);
+      const mod = (v)=>((v%cn)+cn)%cn;
       let fill=false, colorIdx=0;
 
       switch(name){
         case 'bands':                          // horizontal colour stripes
-          fill = true; colorIdx = r % nColors; break;
+          fill = true; colorIdx = mod(r); break;
         case 'columns':                        // vertical colour stripes
-          fill = true; colorIdx = ((vc % nColors)+nColors)%nColors; break;
+          fill = true; colorIdx = mod(vc); break;
         case 'pyramid':                        // wide at top, narrows downward
-          fill = Math.abs(sx) <= (1 - t*0.92); colorIdx = r % nColors; break;
+          fill = Math.abs(sx) <= (1 - t*0.92); colorIdx = mod(r); break;
         case 'diamond':                        // rhombus, point anchored at top
           fill = Math.abs(sx) <= Math.max(0.18, 1 - Math.abs(t-0.5)*2);
-          colorIdx = Math.min(nColors-1, Math.round(Math.abs(t-0.5)*2*(nColors-1))); break;
+          colorIdx = Math.min(cn-1, Math.round(Math.abs(t-0.5)*2*(cn-1))); break;
         case 'rings': {                        // solid block, concentric colour rings
           fill = true;
           const d = Math.min(1, Math.hypot(sx, (t-0.5)*2)/1.414);
-          colorIdx = Math.min(nColors-1, Math.floor(d*nColors)); break; }
-        case 'chevron':                        // diagonal stripes
-          fill = true; colorIdx = (((r + vc) % nColors)+nColors)%nColors; break;
+          colorIdx = Math.min(cn-1, Math.floor(d*cn)); break; }
+        case 'chevron':                        // diagonal stripes (2-wide so they pop)
+          fill = true; colorIdx = mod(Math.floor((r + vc)/2)); break;
         case 'checker': {                      // checkerboard, colour zones by thirds
           fill = ((r + vc) % 2) === 0;
-          colorIdx = Math.floor(vc/3) % nColors; break; }
+          colorIdx = Math.floor(vc/3) % cn; break; }
         case 'heart': {                        // implicit heart curve
-          const hx = sx*1.25;
-          const hy = (0.62 - t)*1.45;
+          const hx = sx*1.25, hy = (0.62 - t)*1.45;
           const f = Math.pow(hx*hx + hy*hy - 1, 3) - hx*hx*hy*hy*hy;
           fill = f <= 0;
-          colorIdx = (r % 2 === 0) ? 0 : (nColors>1?1:0); break; }
+          colorIdx = (r % 2 === 0) ? 0 : (cn>1?1:0); break; }
+        case 'vrainbow': {                     // a big "V", coloured as a rainbow by depth
+          const band = 0.24;
+          const onArm = Math.abs(sx + 1 - t) < band || Math.abs(sx - 1 + t) < band;
+          fill = onArm || (t>0.9 && Math.abs(sx)<0.25);
+          colorIdx = Math.min(cn-1, Math.floor(t*cn)); break; }
+        case 'diagrainbow':                    // diagonal rainbow stripes (2-wide so they pop)
+          fill = true; colorIdx = mod(Math.floor((vc - r)/2)); break;
+        case 'tallcols':                       // ~4 tall columns (wide vertical bands)
+          fill = true; colorIdx = mod(Math.floor(vc/bandW)); break;
+        case 'widerows':                       // ~4 wide rows (tall horizontal bands)
+          fill = true; colorIdx = mod(Math.floor(r/bandH)); break;
+        case 'blocks2x2':                      // checkerboard of 2x2 colour blocks
+          fill = true; colorIdx = mod(Math.floor(vc/2) + Math.floor(r/2)); break;
+        case 'clumps': {                       // organic colour blobs with gaps
+          let bd=Infinity, bc=-1;
+          for(const s of seeds){
+            const d = Math.hypot(x - s.x, t - s.y);
+            if(d < s.rad && d < bd){ bd=d; bc=s.col; }
+          }
+          fill = bc>=0; colorIdx = Math.max(0,bc); break; }
       }
       if(!fill) continue;
 
-      if(rainSprinkle && rng() < rainSprinkle) grid[r][c] = rainbowBubble();
-      else grid[r][c] = normalBubble(pal[clamp(colorIdx,0,nColors-1)]);
+      if(bombSprinkle && rng() < bombSprinkle)      grid[r][c] = bombBubble();
+      else if(rainSprinkle && rng() < rainSprinkle) grid[r][c] = rainbowBubble();
+      else grid[r][c] = normalBubble(colorList[clamp(colorIdx,0,cn-1)]);
     }
   }
 }
@@ -418,6 +477,7 @@ function anchorRepair(grid){
 }
 function cloneBubble(b){
   if(b.type==='rainbow') return rainbowBubble();
+  if(b.type==='bomb') return bombBubble();
   if(b.type==='dual') return dualBubble(b.a,b.b);
   return normalBubble(b.c);
 }
@@ -425,16 +485,16 @@ function cloneBubble(b){
 /* ---------- which base colors currently exist on the board ---------- */
 function colorsOnBoard(){
   const set = new Set();
-  let rainbowOnly = true;
+  let coloredFound = false;
   for(let r=0;r<MAXROWS;r++) for(let c=0;c<game.grid[r].length;c++){
     const b = game.grid[r][c]; if(!b) continue;
-    if(b.type==='rainbow') continue;
-    rainbowOnly = false;
+    if(b.type==='rainbow' || b.type==='bomb') continue;  // no fixed colour
+    coloredFound = true;
     bubbleColors(b).forEach(i=>set.add(i));
   }
   if(set.size===0){
-    // board is empty or only rainbows remain
-    return rainbowOnly && boardCount()>0 ? game.activePalette.slice() : [...set];
+    // only rainbows/bombs (or empty) — offer the level palette so the player isn't stuck
+    return (!coloredFound && boardCount()>0) ? game.activePalette.slice() : [...set];
   }
   return [...set];
 }
@@ -451,11 +511,13 @@ function makeShooterBubble(){
   if(pool.length===0) return normalBubble(0);
 
   const l = game.level;
+  const bombChance = l>=4 ? clamp(0.025 + (l-4)*0.003, 0, 0.07) : 0;
   const rainChance = l>=5 ? clamp(0.03 + (l-5)*0.004, 0, 0.08) : 0;
   const dualChance = l>=3 ? clamp(0.07 + (l-3)*0.01, 0, 0.18) : 0;
   const roll = Math.random();
-  if(roll < rainChance) return rainbowBubble();
-  if(roll < rainChance+dualChance && pool.length>=2){
+  if(roll < bombChance) return bombBubble();
+  if(roll < bombChance+rainChance) return rainbowBubble();
+  if(roll < bombChance+rainChance+dualChance && pool.length>=2){
     let a = pool[Math.floor(Math.random()*pool.length)];
     let b = pool[Math.floor(Math.random()*pool.length)];
     if(b===a) b = pool[(pool.indexOf(a)+1)%pool.length];
@@ -467,9 +529,9 @@ function makeShooterBubble(){
 // fully cleared — swap it for something useful so the player is never stuck.
 function validateBubble(b){
   if(!b) return makeShooterBubble();
+  if(b.type==='rainbow' || b.type==='bomb') return b;  // always useful
   const present = colorsOnBoard();
   if(present.length===0) return b;
-  if(b.type==='rainbow') return b;
   const cols = bubbleColors(b).filter(i=>present.includes(i));
   if(cols.length===0) return makeShooterBubble();
   return b;
@@ -581,13 +643,34 @@ function landMoving(){
   const [r,c] = cell;
   game.grid[r][c] = m.bubble;
 
-  const group = bestGroup(r,c);
-  if(group.length>=3){
+  const removed = new Set();   // "r,c" keys slated for removal this turn
+  let bombUsed = false;
+
+  if(m.bubble.type==='bomb'){
+    // firing WITH a bomb: detonates where it lands
+    triggerBomb(r, c, removed);
+    bombUsed = true;
+  } else {
+    const group = bestGroup(r,c);
+    if(group.length>=3) for(const [pr,pc] of group) removed.add(pr+','+pc);
+
+    // any bomb touched by the new orb, or by a popped orb, goes off
+    const seeds = [];
+    const scan = (rr,cc)=>{ for(const [nr,nc] of neighbors(rr,cc)){
+      const b=game.grid[nr][nc];
+      if(b && b.type==='bomb' && !removed.has(nr+','+nc)) seeds.push([nr,nc]); } };
+    scan(r,c);
+    for(const key of [...removed]){ const [pr,pc]=key.split(',').map(Number); scan(pr,pc); }
+    for(const [br,bc] of seeds){ triggerBomb(br,bc,removed); bombUsed=true; }
+  }
+
+  if(removed.size>0){
     let popped=0;
-    for(const [pr,pc] of group){
-      const b = game.grid[pr][pc];
+    for(const key of removed){
+      const [pr,pc]=key.split(',').map(Number);
+      const b=game.grid[pr][pc]; if(!b) continue;
       spawnPop(cellX(pr,pc), cellY(pr), b);
-      game.grid[pr][pc] = null; popped++;
+      game.grid[pr][pc]=null; popped++;
     }
     // floaters detach and rain down
     const floaters = findFloaters();
@@ -598,14 +681,41 @@ function landMoving(){
         vx:(Math.random()-.5)*2, bubble:b, r:R});
       game.grid[fr][fc] = null; dropped++;
     }
-    game.score += popped*10 + dropped*25 + Math.max(0,(group.length-3))*15;
-    sound.pop(group.length);
-    if(dropped>0){ showToast(dropped>=6?'AVALANCHE!':'+'+dropped+' dropped'); sound.drop(); }
+    const dScore = dropScore(dropped);
+    game.score += popped*10 + dScore;
+    if(bombUsed) sound.explode(); else sound.pop(popped);
+    if(dropped>=3){ showToast(dropMsg(dropped)+'  +'+dScore); sound.drop(); }
+    else if(dropped>0){ sound.drop(); }
+    else if(bombUsed) showToast('BOOM!');
+  } else if(bombUsed){
+    sound.explode();
   } else {
     sound.stick();
   }
   game.state='resolving';
 }
+
+// A bomb clears, for each neighbour, that neighbour's whole same-colour group
+// (even a lone orb). Bombs in range chain-detonate.
+function triggerBomb(r0,c0, removed){
+  const queue=[[r0,c0]];
+  removed.add(r0+','+c0);
+  while(queue.length){
+    const [r,c]=queue.shift();
+    for(const [nr,nc] of neighbors(r,c)){
+      const b=game.grid[nr][nc]; if(!b) continue;
+      const key=nr+','+nc;
+      if(b.type==='bomb'){ if(!removed.has(key)){ removed.add(key); queue.push([nr,nc]); } continue; }
+      if(b.type==='rainbow'){ removed.add(key); continue; }   // remove wildcard alone
+      const idx = (b.type==='dual') ? b.a : b.c;
+      for(const [gr,gc] of floodColor(nr,nc,idx)) removed.add(gr+','+gc);
+    }
+  }
+}
+
+// dropping a big shower at once should pay off — superlinear bonus
+function dropScore(n){ return n<=0 ? 0 : n*20 + n*(n-1)*5; }
+function dropMsg(n){ return n>=10 ? 'MEGA AVALANCHE!' : n>=6 ? 'AVALANCHE!' : '+'+n+' dropped'; }
 
 function afterResolve(){
   // resolution finished — decide what happens next
@@ -627,13 +737,16 @@ function loseCheck(){
 function spawnPop(x,y,b){
   game.poppers.push({x,y,r:R,bubble:b,life:0,max:11});
   const col = popColor(b);
-  for(let i=0;i<7;i++){
-    const a = Math.random()*TAU, s = 1.5+Math.random()*3.5;
-    game.particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:0,max:18+Math.random()*10,col});
+  const count = b.type==='bomb' ? 18 : 7;
+  const power = b.type==='bomb' ? 6 : 3.5;
+  for(let i=0;i<count;i++){
+    const a = Math.random()*TAU, s = 1.5+Math.random()*power;
+    game.particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:0,max:18+Math.random()*12,col});
   }
 }
 function popColor(b){
   if(b.type==='rainbow') return '#ffffff';
+  if(b.type==='bomb') return '#ff9a3c';
   if(b.type==='dual') return PALETTE[b.a].base;
   return PALETTE[b.c].base;
 }
@@ -668,6 +781,10 @@ function drawBubble(x,y,r,b,scale=1,alpha=1){
     ctx.fillStyle=gB; ctx.fillRect(x,y-r,r,r*2);
     ctx.strokeStyle='rgba(255,255,255,.45)'; ctx.lineWidth=Math.max(1,r*0.06);
     ctx.beginPath(); ctx.moveTo(x,y-r); ctx.lineTo(x,y+r); ctx.stroke();
+  } else if(b.type==='bomb'){
+    let g=ctx.createRadialGradient(x-r*0.3,y-r*0.4,r*0.1,x,y,r);
+    g.addColorStop(0,'#717784'); g.addColorStop(.5,'#33373f'); g.addColorStop(1,'#131519');
+    ctx.fillStyle=g; ctx.fillRect(x-r,y-r,r*2,r*2);
   } else {
     const P=PALETTE[b.c];
     let g=ctx.createRadialGradient(x-r*0.32,y-r*0.42,r*0.1,x,y,r);
@@ -687,6 +804,24 @@ function drawBubble(x,y,r,b,scale=1,alpha=1){
   ctx.beginPath(); ctx.arc(x,y,r-0.6,0,TAU);
   ctx.strokeStyle='rgba(0,0,0,.22)'; ctx.lineWidth=Math.max(1,r*0.08); ctx.stroke();
   ctx.restore();
+
+  if(b.type==='bomb'){
+    const pulse = 0.6 + 0.4*Math.sin(performance.now()*0.012);
+    ctx.save();
+    ctx.globalAlpha=alpha;
+    // fuse
+    ctx.strokeStyle='#c8a463'; ctx.lineWidth=Math.max(1.5,r*0.13); ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(x+r*0.12,y-r*0.72);
+    ctx.quadraticCurveTo(x+r*0.55,y-r*1.05, x+r*0.66,y-r*0.82); ctx.stroke();
+    // spark
+    ctx.globalAlpha=alpha*pulse;
+    ctx.fillStyle='#ffd66b'; ctx.beginPath(); ctx.arc(x+r*0.68,y-r*0.84,r*0.18,0,TAU); ctx.fill();
+    ctx.fillStyle='#ff5a3c'; ctx.beginPath(); ctx.arc(x+r*0.68,y-r*0.84,r*0.1,0,TAU); ctx.fill();
+    // danger ring
+    ctx.globalAlpha=alpha*0.55*pulse; ctx.strokeStyle='#ff4d4d'; ctx.lineWidth=Math.max(1,r*0.07);
+    ctx.beginPath(); ctx.arc(x,y,r*0.62,0,TAU); ctx.stroke();
+    ctx.restore();
+  }
 }
 
 function shade(hex,amt){
@@ -981,6 +1116,26 @@ const sound = {
   drop(){ this.blip(180,0.18,'sawtooth',0.04); },
   win(){ this.ensure(); [523,659,784,1046].forEach((f,i)=>setTimeout(()=>this.blip(f,0.16,'triangle',0.06),i*110)); },
   lose(){ this.ensure(); [400,300,200].forEach((f,i)=>setTimeout(()=>this.blip(f,0.22,'sawtooth',0.05),i*150)); },
+  // bomb: play the supplied explode.ogg if present, otherwise a synth boom
+  explodeAudio:null,
+  explode(){
+    if(this.muted) return;
+    this.ensure();
+    try{
+      if(!this.explodeAudio){ this.explodeAudio = new Audio('explode.ogg'); this.explodeAudio.volume=0.55; }
+      this.explodeAudio.currentTime = 0;
+      const p = this.explodeAudio.play();
+      if(p && p.catch) p.catch(()=>this.boom());   // no file / blocked -> fallback
+    }catch(e){ this.boom(); }
+  },
+  boom(){
+    if(this.muted||!this.ctx) return;
+    const t=this.ctx.currentTime;
+    const o=this.ctx.createOscillator(), g=this.ctx.createGain();
+    o.type='sawtooth'; o.frequency.setValueAtTime(160,t); o.frequency.exponentialRampToValueAtTime(40,t+0.35);
+    g.gain.setValueAtTime(0.12,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.4);
+    o.connect(g); g.connect(this.ctx.destination); o.start(t); o.stop(t+0.4);
+  },
 };
 
 /* ============================================================
@@ -991,6 +1146,9 @@ function refreshLegendSwatches(){
   d.style.background='linear-gradient(90deg, '+PALETTE[0].base+' 0 50%, '+PALETTE[1].base+' 50% 100%)';
   const r=document.getElementById('rainSwatch');
   r.style.background='conic-gradient('+RAINBOW_STOPS.join(',')+')';
+  const bo=document.getElementById('bombSwatch');
+  if(bo){ bo.style.background='radial-gradient(circle at 35% 30%, #717784, #15171c)';
+    bo.style.boxShadow='inset -3px -4px 7px rgba(0,0,0,.5), 0 0 8px rgba(255,77,77,.6)'; }
 }
 
 document.getElementById('startBtn').onclick=()=>{ sound.ensure(); startLevel(game.level); };
@@ -1009,10 +1167,6 @@ document.getElementById('menuBtn').onclick=()=>{
 };
 document.getElementById('resumeBtn').onclick=()=>{ hideOverlays(); game.state=game._prevState||'aiming'; };
 document.getElementById('restartBtn').onclick=()=>{ startLevel(game.level); };
-document.getElementById('menuResetBtn').onclick=()=>{
-  setCookie('bs_level',1); setCookie('bs_score',0);
-  game.score=0; startLevel(1);
-};
 document.getElementById('muteBtn').onclick=function(){
   sound.muted=!sound.muted; this.textContent=sound.muted?'🔈':'🔊'; saveProgress();
 };
