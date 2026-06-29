@@ -112,7 +112,6 @@
       <div class="row"><span class="swatch" id="rainSwatch"></span><span><b>Rainbow</b> matches anything</span></div>
       <div class="row"><span class="swatch" id="bombSwatch"></span><span><b>Bomb</b> blasts everything nearby</span></div>
     </div>
-    <button class="ghost" id="resetBtn">RESET PROGRESS</button>
   </div>
 
   <!-- Level complete -->
@@ -1073,6 +1072,7 @@ function render(dt){
 function update(dt){
   game.shooter.x = W/2;
   game.shooter.y = SHOOT_Y;
+  const f = dt / 16.667;   // frame factor: 1.0 at 60fps, scales everything by real time
 
   // smooth descent toward target
   if(game.descent < game.descentTarget){
@@ -1081,10 +1081,12 @@ function update(dt){
 
   if(game.state==='shooting' && game.moving){
     const m=game.moving;
-    const speed=Math.hypot(m.vx,m.vy);
-    const sub=Math.max(1,Math.ceil(speed/(R*0.5)));
+    // vx/vy are tuned in px-per-60fps-frame; multiply by f for real-time displacement
+    const stepX = m.vx*f, stepY = m.vy*f;
+    const dispF = Math.hypot(stepX, stepY);
+    const sub = Math.max(1, Math.ceil(dispF/(R*0.5)));
     for(let s=0;s<sub;s++){
-      m.x += m.vx/sub; m.y += m.vy/sub;
+      m.x += stepX/sub; m.y += stepY/sub;
       if(m.x < R){ m.x=R; m.vx=-m.vx; sound.wall(); }
       if(m.x > W-R){ m.x=W-R; m.vx=-m.vx; sound.wall(); }
       // ceiling
@@ -1098,12 +1100,12 @@ function update(dt){
     }
   }
 
-  // animations
-  for(let i=game.poppers.length-1;i>=0;i--){ const p=game.poppers[i]; if(++p.life>=p.max) game.poppers.splice(i,1); }
+  // animations (all per-60fps-frame quantities scaled by f)
+  for(let i=game.poppers.length-1;i>=0;i--){ const p=game.poppers[i]; p.life+=f; if(p.life>=p.max) game.poppers.splice(i,1); }
   for(let i=game.particles.length-1;i>=0;i--){ const p=game.particles[i];
-    p.x+=p.vx; p.y+=p.vy; p.vy+=0.12; if(++p.life>=p.max) game.particles.splice(i,1); }
+    p.x+=p.vx*f; p.y+=p.vy*f; p.vy+=0.12*f; p.life+=f; if(p.life>=p.max) game.particles.splice(i,1); }
   for(let i=game.droppers.length-1;i>=0;i--){ const d=game.droppers[i];
-    d.vy+=0.45; d.y+=d.vy; d.x+=d.vx; if(d.y>H+R*2) game.droppers.splice(i,1); }
+    d.vy+=0.45*f; d.y+=d.vy*f; d.x+=d.vx*f; if(d.y>H+R*2) game.droppers.splice(i,1); }
 
   if(game.state==='resolving'){
     if(game.poppers.length===0 && game.droppers.length===0 && game.particles.length===0){
@@ -1117,7 +1119,7 @@ function update(dt){
 
 let last=performance.now();
 function loop(now){
-  const dt=Math.min(40, now-last); last=now;
+  const dt=Math.min(50, now-last); last=now;   // clamp big gaps (tab switches) so physics stays stable
   if(['aiming','shooting','resolving'].includes(game.state)) update(dt);
   render(dt);
   syncHud();
@@ -1274,11 +1276,6 @@ function refreshLegendSwatches(){
 document.getElementById('startBtn').onclick=()=>{ sound.ensure(); startLevel(game.level); };
 document.getElementById('nextBtn').onclick=()=>{ startLevel(game.level); };
 document.getElementById('retryBtn').onclick=()=>{ startLevel(game.level); };
-document.getElementById('resetBtn').onclick=()=>{
-  setCookie('bs_level',1); setCookie('bs_score',0);
-  game.level=1; game.score=0; syncHud();
-  showToast('progress reset');
-};
 document.getElementById('menuBtn').onclick=()=>{
   if(!['aiming','resolving'].includes(game.state) && game.state!=='shooting') return;
   document.getElementById('menuLvl').textContent=game.level;
