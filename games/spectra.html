@@ -186,13 +186,13 @@ function saveProgress(){ setCookie('bs_level', game.level); setCookie('bs_score'
 /* ---------- color palette (light core + base shade) ---------- */
 const PALETTE = [
   {name:'rose',   core:'#ff9bb5', base:'#ff3d6e'},
-  {name:'azure',  core:'#9be0ff', base:'#0aa3ff'},   // cyan-leaning blue (clearly not purple)
+  {name:'azure',  core:'#9be4ff', base:'#00b0ff'},   // bright cyan-blue
   {name:'mint',   core:'#a7ffd8', base:'#16d39a'},
   {name:'yellow', core:'#fff7a0', base:'#ffe000'},   // pure yellow (clearly not orange)
-  {name:'violet', core:'#d4a6ff', base:'#9b30ff'},   // vivid purple (clearly not blue)
+  {name:'violet', core:'#e6a8ff', base:'#c81fff'},   // magenta-purple (clearly not blue)
   {name:'coral',  core:'#ffb38a', base:'#ff6a2b'},
 ];
-const RAINBOW_STOPS = ['#ff3d6e','#ff6a2b','#ffe000','#16d39a','#0aa3ff','#9b30ff','#ff3d6e'];
+const RAINBOW_STOPS = ['#ff3d6e','#ff6a2b','#ffe000','#16d39a','#00b0ff','#c81fff','#ff3d6e'];
 
 /* ---------- canvas / layout ---------- */
 const canvas = document.getElementById('game');
