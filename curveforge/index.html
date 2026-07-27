@@ -1,0 +1,1719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Curve Forge — number sequence → math function</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b23; --panel2:#1c222c; --line:#2a323f;
+    --txt:#e6edf3; --dim:#8b98a9; --acc:#7ee787; --acc2:#79c0ff; --warn:#f0883e; --bad:#ff7b72;
+    --mono:'SF Mono',ui-monospace,'Cascadia Code',Consolas,'Liberation Mono',monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}
+  /* full-bleed rule, but text aligned with the centred content column */
+  header{padding:16px max(22px, calc((100% - 1240px)/2 + 22px));border-bottom:1px solid var(--line);
+    display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;letter-spacing:.3px}
+  h1 span{color:var(--acc)}
+  header p{margin:0;color:var(--dim);font-size:12.5px}
+  /* nothing may exceed the viewport width */
+  html,body{max-width:100%;overflow-x:hidden}
+  .wrap{display:grid;grid-template-columns:minmax(0,360px) minmax(0,1fr);gap:16px;
+    padding:16px 22px 40px;align-items:start;max-width:1240px;margin:0 auto}
+  /* min-width:0 lets grid/flex children actually shrink; without it a wide
+     child (long code line, big number table) forces the page wider */
+  .wrap>*{min-width:0;max-width:100%}
+  @media(max-width:980px){.wrap{grid-template-columns:minmax(0,1fr)}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;
+    min-width:0;max-width:100%;overflow:hidden}
+  .card + .card{margin-top:14px}
+  label{display:block;font-size:11.5px;text-transform:uppercase;letter-spacing:.7px;color:var(--dim);margin:0 0 6px}
+  textarea,input,select{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--txt);
+    border-radius:7px;padding:9px 10px;font-family:var(--mono);font-size:13px;outline:none}
+  textarea{min-height:88px;resize:vertical;line-height:1.6}
+  textarea:focus,input:focus,select:focus{border-color:var(--acc2)}
+  .row{display:flex;gap:10px}.row>*{flex:1}
+  .mt{margin-top:12px}
+  .chk{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--txt);text-transform:none;letter-spacing:0;margin:0}
+  .chk input{width:auto;flex:none;accent-color:var(--acc)}
+  button{background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:7px;
+    padding:8px 12px;font-size:12.5px;cursor:pointer;font-family:inherit}
+  button:hover{border-color:var(--acc2);color:var(--acc2)}
+  button.pri{background:var(--acc);border-color:var(--acc);color:#0b0f14;font-weight:600}
+  button.pri:hover{filter:brightness(1.1);color:#0b0f14}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .chip{font-size:11.5px;padding:5px 9px;border-radius:20px;background:var(--panel2);border:1px solid var(--line);cursor:pointer;color:var(--dim)}
+  .chip:hover{color:var(--acc2);border-color:var(--acc2)}
+  canvas{width:100%;height:300px;display:block;border-radius:8px;background:#0b0f14;border:1px solid var(--line)}
+  pre{margin:0;background:#0b0f14;border:1px solid var(--line);border-radius:8px;padding:13px;overflow:auto;
+    font-family:var(--mono);font-size:12.5px;line-height:1.6;color:#d6e2f0;max-height:400px}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px;table-layout:fixed}
+  th,td{text-align:right;padding:4px 6px;border-bottom:1px solid var(--line);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  th{color:var(--dim);font-weight:500;text-transform:uppercase;font-size:10.5px;letter-spacing:.5px}
+  td:first-child,th:first-child{text-align:left}
+  .models{max-height:290px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+  .m{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:7px 11px;cursor:pointer;border-bottom:1px solid var(--line);font-size:12.5px}
+  .m:last-child{border-bottom:none}
+  .m:hover{background:var(--panel2)}
+  .m.on{background:#132a1c;box-shadow:inset 3px 0 0 var(--acc)}
+  .m .r2{font-family:var(--mono);font-size:11.5px;color:var(--dim);white-space:nowrap}
+  .m.on .r2{color:var(--acc)}
+  .perfect{color:var(--acc)}
+  .head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:10px;flex-wrap:wrap}
+  .head h2{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--dim);margin:0;font-weight:600}
+  .formula{font-family:var(--mono);font-size:12.5px;color:var(--acc2);background:var(--panel2);padding:9px 11px;border-radius:7px;margin-bottom:11px;overflow:auto;white-space:nowrap}
+  .err{color:var(--bad);font-size:12.5px;margin-top:8px}
+  .warnbox{color:var(--warn);font-size:12px;margin-top:8px;line-height:1.5;background:#241a0f;border:1px solid #4a3418;padding:8px 10px;border-radius:7px}
+  .note{color:var(--dim);font-size:11.5px;margin-top:8px;line-height:1.5}
+  .stats{display:flex;gap:16px;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-bottom:10px}
+  .stats b{color:var(--txt);font-weight:600}
+  .tbl-wrap{max-height:250px;overflow:auto}
+  .ok{color:var(--acc)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+  .busy{opacity:.55}
+  .tabs{display:flex;gap:6px}
+  .tab{flex:1;padding:9px 10px;font-size:13px;border-radius:7px;border:1px solid transparent;background:transparent;color:var(--dim)}
+  .tab:hover{color:var(--txt)}
+  .tab.on{background:var(--panel2);border-color:var(--line);color:var(--acc);font-weight:600}
+  .tab.on:hover{color:var(--acc)}
+  .easeprev{height:110px;margin-top:10px}
+  [hidden]{display:none !important}
+</style>
+</head>
+<body>
+<header>
+  <h1>Curve <span>Forge</span></h1>
+  <p>Paste a number sequence → get a real math function (no if-chains) in the language of your choice.</p>
+</header>
+
+<div class="wrap">
+  <!-- ============ LEFT ============ -->
+  <div>
+    <div class="card" style="padding:6px">
+      <div class="tabs">
+        <button class="tab" data-mode="interp">Between points</button>
+        <button class="tab on" data-mode="fit">Fit a formula</button>
+      </div>
+      <div class="note" id="modeNote" style="padding:0 4px 4px"></div>
+    </div>
+
+    <!-- ============ BETWEEN-POINTS MODE ============ -->
+    <div class="card modeInterp" hidden>
+      <label for="imethod">How to travel between points</label>
+      <select id="imethod"></select>
+      <div class="note" id="imethodNote"></div>
+      <label class="chk mt"><input type="checkbox" id="iExtrap"> Keep going past the ends (instead of holding)</label>
+      <label class="chk mt"><input type="checkbox" id="iInside" checked> Put the tables inside the function</label>
+      <div class="note" id="insideNote"></div>
+    </div>
+
+    <div class="card">
+      <label for="data">Data</label>
+      <textarea id="data" spellcheck="false">1 2 4 8 16 32 64 128 256</textarea>
+      <div class="chips">
+        <span class="chip" data-set="1 2 4 8 16 32 64 128 256">powers of 2</span>
+        <span class="chip" data-set="100 250 475 800 1250 1850 2600">rpg xp</span>
+        <span class="chip" data-set="1 4 9 16 25 36 49 64">squares</span>
+        <span class="chip" data-set="10 18 24 28 30 30 28 24">arc</span>
+        <span class="chip" data-set="1000 700 490 343 240 168">decay</span>
+        <span class="chip" data-set="0 5 20 45 60 66 68 69 69.5">s-curve</span>
+        <span class="chip" data-set="1:1
+50:7
+52:6
+54:5
+56:4
+58:3
+60:2">step + line</span>
+        <span class="chip" data-set="10:0
+20:3
+30:4
+40:8
+50:12
+60:10
+90:13
+140:20
+200:10
+300:5
+400:3
+500:0
+600:0
+700:0">noisy hump</span>
+      </div>
+      <div class="note">One number per entry → x starts at the index below. Or write <code>x, y</code> / <code>x: y</code> pairs, one per line (any order — they get sorted by x).</div>
+
+      <div class="row mt">
+        <div><label for="start">First x</label><input id="start" type="number" value="1" step="1"></div>
+        <div class="modeFit"><label for="metric">Minimise</label>
+          <select id="metric">
+            <option value="auto" selected>Auto</option>
+            <option value="rel">Percentage error</option>
+            <option value="abs">Absolute error</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row mt modeFit">
+        <div><label for="prio">Priority</label>
+          <select id="prio">
+            <option value="accurate" selected>Lowest error</option>
+            <option value="balanced">Balanced</option>
+            <option value="simple">Simplest curve</option>
+          </select>
+        </div>
+      </div>
+
+      <label class="chk mt modeFit"><input type="checkbox" id="doClamp"> Clamp to data min/max</label>
+      <label class="chk mt modeFit"><input type="checkbox" id="autoPick" checked> Auto-pick best fit</label>
+    </div>
+
+    <div class="card modeFit">
+      <div class="head"><h2>Candidate curves</h2><span class="r2" id="mcount"></span></div>
+      <div class="models" id="models"></div>
+      <div id="metricNote"></div>
+      <div id="fitErr"></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <div><label for="fname">Function name</label><input id="fname" value="curve"></div>
+        <div><label for="lang">Language</label>
+          <select id="lang">
+            <option value="lua">Lua</option>
+            <option value="javascript" selected>JavaScript</option>
+            <option value="typescript">TypeScript</option>
+            <option value="cpp">C++</option>
+            <option value="csharp">C#</option>
+            <option value="c">C</option>
+            <option value="rust">Rust</option>
+            <option value="java">Java</option>
+            <option value="python">Python</option>
+            <option value="gdscript">GDScript</option>
+          </select>
+        </div>
+      </div>
+      <label class="chk mt"><input type="checkbox" id="doRound"> Round result to whole number</label>
+    </div>
+
+    <div class="card">
+      <div class="head"><h2>Try a value</h2></div>
+      <div class="row">
+        <input id="tryX" type="number" value="3" step="1">
+        <div style="flex:1.4;display:flex;align-items:center;font-family:var(--mono);font-size:14px" id="tryOut"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="head"><h2>Past the end</h2></div>
+      <div class="tbl-wrap"><table id="proj"></table></div>
+      <div class="note" id="projNote">Each row doubles the largest x in your data. This is where a curve that
+        looks perfect on your points will show its true behaviour.</div>
+    </div>
+  </div>
+
+  <!-- ============ RIGHT ============ -->
+  <div>
+    <div class="card">
+      <div class="head"><h2 id="hFit">Fit</h2><div class="stats" id="stats"></div></div>
+      <div class="formula" id="formula">—</div>
+      <canvas id="plot" width="1200" height="600"></canvas>
+      <div class="note">● data points &nbsp; — fitted curve &nbsp; <span style="color:var(--warn)">— outside your data range</span></div>
+      <div id="extrapWarn"></div>
+    </div>
+
+    <div class="card">
+      <div class="head"><h2>Generated code</h2>
+        <div style="display:flex;gap:8px"><button id="copy" class="pri">Copy</button><button id="dl">Download</button></div>
+      </div>
+      <pre id="code">—</pre>
+    </div>
+
+    <div class="card">
+      <div class="head"><h2 id="hTbl">Accuracy per point</h2></div>
+      <div class="tbl-wrap"><table id="tbl"></table></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ===== MATH CORE START =====
+/* ============================================================
+   linear algebra
+   ============================================================ */
+function solveLinear(A, b){
+  const n = b.length;
+  const M = A.map((r,i)=>r.slice().concat([b[i]]));
+  for(let c=0;c<n;c++){
+    let piv=c;
+    for(let r=c+1;r<n;r++) if(Math.abs(M[r][c])>Math.abs(M[piv][c])) piv=r;
+    if(!isFinite(M[piv][c]) || Math.abs(M[piv][c])<1e-13) return null;
+    const t=M[c];M[c]=M[piv];M[piv]=t;
+    for(let r=0;r<n;r++){
+      if(r===c) continue;
+      const f=M[r][c]/M[c][c];
+      if(f===0) continue;
+      for(let k=c;k<=n;k++) M[r][k]-=f*M[c][k];
+    }
+  }
+  const out=M.map((r,i)=>r[n]/r[i]);
+  return out.every(v=>isFinite(v)) ? out : null;
+}
+
+/* weighted least squares: minimise sum_i w_i^2 * (y_i - sum_j p_j*basis_j(x_i))^2
+   ridge is a tiny Tikhonov term that keeps near-singular systems solvable */
+function linFitW(xs, ys, basis, nb, w, ridge){
+  const B = xs.map(x=>{const r=[];for(let j=0;j<nb;j++){const v=basis(x,j); if(!isFinite(v)) return null; r.push(v);} return r;});
+  if(B.some(r=>r===null)) return null;
+  const A=[],b=[];
+  for(let a=0;a<nb;a++){
+    const row=[];
+    for(let c=0;c<nb;c++){let s=0;for(let i=0;i<xs.length;i++)s+=B[i][a]*B[i][c]*w[i]*w[i];row.push(s);}
+    let s=0;for(let i=0;i<xs.length;i++)s+=B[i][a]*ys[i]*w[i]*w[i];
+    A.push(row);b.push(s);
+  }
+  const scale = A.reduce((m,r,i)=>Math.max(m,Math.abs(r[i])),0) || 1;
+  for(let i=0;i<nb;i++) A[i][i] += scale*(ridge||1e-12);
+  return solveLinear(A,b);
+}
+
+/* ============================================================
+   error weighting
+   'rel' weights each point by 1/|y| so a miss of 5 at y=10 counts
+   far more than a miss of 5 at y=100000. Floored so near-zero
+   values can't dominate with an astronomically large weight.
+   ============================================================ */
+/* Is percentage error even a meaningful thing to minimise for this data?
+   It is not, if any value is zero (error/0 is undefined) or the values
+   change sign. In those cases a naive 1/|y| weight hands the near-zero
+   points a colossal weight and the fit ignores everything else. */
+function relIsSane(ys){
+  const mx = Math.max.apply(null, ys.map(Math.abs)) || 1;
+  const hasZero = ys.some(y=>Math.abs(y) <= mx*1e-6);
+  const signs = new Set(ys.filter(y=>y!==0).map(y=>Math.sign(y)));
+  const ratio = mx / Math.min.apply(null, ys.filter(y=>y!==0).map(Math.abs).concat([mx]));
+  return {ok: !hasZero && signs.size<=1, hasZero, mixedSign:signs.size>1, ratio};
+}
+function resolveMetric(metric, ys){
+  if(metric!=='auto') return metric;
+  const r = relIsSane(ys);
+  // percentage only pays off when values span a wide range and are all one sign
+  return (r.ok && r.ratio>20) ? 'rel' : 'abs';
+}
+function makeWeights(ys, metric){
+  if(metric!=='rel') return ys.map(()=>1);
+  const mx = Math.max.apply(null, ys.map(Math.abs)) || 1;
+  const r = relIsSane(ys);
+  // when the data is clean, weight is exactly 1/|y|. When it contains zeros
+  // the floor is raised hard so they can't dominate (weight ratio capped ~20).
+  const floor = r.ok ? mx*1e-9 : mx*0.05;
+  return ys.map(y=>1/Math.max(Math.abs(y), floor));
+}
+
+/* ============================================================
+   Levenberg–Marquardt on weighted residuals
+   ============================================================ */
+function lmFit(f, p0, xs, ys, w, iters){
+  iters = iters||250;
+  let p = p0.slice();
+  if(!p.every(isFinite)) return null;
+  const cost = pp=>{
+    let s=0;
+    for(let i=0;i<xs.length;i++){
+      const v=f(xs[i],pp);
+      if(!isFinite(v)) return Infinity;
+      const d=(ys[i]-v)*w[i];
+      s+=d*d;
+    }
+    return s;
+  };
+  let c0 = cost(p);
+  if(!isFinite(c0)) return null;
+  let lam = 1e-3;
+  const n=p.length, m=xs.length;
+  for(let it=0;it<iters;it++){
+    const J=[], r=[];
+    let ok=true;
+    for(let i=0;i<m;i++){
+      const base=f(xs[i],p);
+      if(!isFinite(base)){ok=false;break;}
+      r.push((ys[i]-base)*w[i]);
+      const row=[];
+      for(let j=0;j<n;j++){
+        const h=Math.max(1e-9,Math.abs(p[j])*1e-7);
+        const pp=p.slice(); pp[j]+=h;
+        const d=(f(xs[i],pp)-base)/h*w[i];
+        row.push(isFinite(d)?d:0);
+      }
+      J.push(row);
+    }
+    if(!ok) break;
+    const A=[],b=[];
+    for(let a=0;a<n;a++){
+      const row=[];
+      for(let c=0;c<n;c++){let s=0;for(let i=0;i<m;i++)s+=J[i][a]*J[i][c];row.push(s);}
+      let s=0;for(let i=0;i<m;i++)s+=J[i][a]*r[i];
+      A.push(row);b.push(s);
+    }
+    let improved=false;
+    for(let tr=0;tr<12;tr++){
+      const Ad=A.map((row,i)=>row.map((v,j)=> i===j ? v*(1+lam)+1e-13 : v));
+      const dp=solveLinear(Ad,b);
+      if(!dp){lam*=10; if(lam>1e14)break; continue;}
+      const pn=p.map((v,i)=>v+dp[i]);
+      const c2=cost(pn);
+      if(c2 < c0*(1-1e-15)){p=pn;c0=c2;lam=Math.max(lam/7,1e-14);improved=true;break;}
+      lam*=9;
+      if(lam>1e14) break;
+    }
+    if(!improved) break;
+  }
+  return p;
+}
+
+/* ============================================================
+   stats
+   ============================================================ */
+function statsOf(xs, ys, f, w){
+  const n=xs.length;
+  const mean=ys.reduce((a,b)=>a+b,0)/n;
+  let ssr=0,sst=0,maxAbs=0,maxRel=0,obj=0,relSum=0;
+  for(let i=0;i<n;i++){
+    const v=f(xs[i]);
+    if(!isFinite(v)) return null;
+    const d=ys[i]-v;
+    ssr+=d*d; sst+=(ys[i]-mean)*(ys[i]-mean);
+    obj+=(d*w[i])*(d*w[i]);
+    maxAbs=Math.max(maxAbs,Math.abs(d));
+    const rel = Math.abs(ys[i])>1e-12 ? Math.abs(d/ys[i]) : (Math.abs(d)>1e-12?Infinity:0);
+    if(isFinite(rel)){ maxRel=Math.max(maxRel,rel); relSum+=rel; }
+    else maxRel=Math.max(maxRel, Math.abs(d));
+  }
+  const r2 = sst<1e-14 ? (ssr<1e-14?1:0) : 1-ssr/sst;
+  return {r2, ssr, obj, maxAbs, maxRel, meanRel:relSum/n, rmse:Math.sqrt(ssr/n)};
+}
+
+/* ============================================================
+   codegen helpers
+   ============================================================ */
+/* Write a number out in full decimal — 0.0000001192 rather than 1.192e-7.
+   Exponent notation is only used when writing it out would take an absurd
+   number of characters, or when doing so would lose precision. */
+function plainDecimal(v, sig){
+  const expo = ()=>{
+    let s=Number(v.toPrecision(sig)).toExponential();
+    const pr=s.split('e');
+    if(pr[0].indexOf('.')<0) pr[0]+='.0';
+    return pr[0]+'e'+pr[1];
+  };
+  let s=Number(v.toPrecision(sig)).toString();
+  if(s.indexOf('e')<0 && s.indexOf('E')<0) return s.indexOf('.')<0 ? s+'.0' : s;
+  const exp=Math.floor(Math.log10(Math.abs(v)));
+  const decimals=sig-1-exp;
+  if(decimals<0){                       // big integer-ish value
+    // NB: toFixed() itself returns exponential form at >=1e21, so check for it
+    if(Math.abs(v)>=1e21) return expo();
+    const t=v.toFixed(0);
+    if(t.indexOf('e')>=0||t.indexOf('E')>=0) return expo();
+    return t.replace('-','').length<=25 ? t+'.0' : expo();
+  }
+  if(decimals>100) return expo();       // toFixed caps at 100 places
+  let t=v.toFixed(decimals);
+  if(t.indexOf('.')>=0) t=t.replace(/0+$/,'');
+  if(t.charAt(t.length-1)==='.') t+='0';
+  if(t.indexOf('.')<0) t+='.0';
+  // guard: the written form must still parse back to the same number
+  return Number(t)===Number(v.toPrecision(sig)) ? t : expo();
+}
+function fmt(v){
+  if(!isFinite(v)) return "0.0";
+  // tidy 1.0000000000001 -> 1.0, but STRICTLY relative: a genuinely tiny
+  // coefficient must never be snapped to zero. It may be multiplied by a
+  // huge exp() later, in which case zeroing it changes the result entirely.
+  const r=Math.round(v);
+  if(r!==0 && Math.abs(v-r) < Math.abs(v)*1e-12) v=r;
+  if(v===0) return "0.0";
+  return plainDecimal(v, 15);
+}
+/* readable number for on-screen tables */
+function human(v){
+  if(!isFinite(v)) return '∞';
+  if(v===0) return '0';
+  const a=Math.abs(v);
+  if(a>=1e13||a<1e-10) return v.toExponential(2);
+  const dec = a>=100 ? 2 : a>=1 ? 3 : Math.min(12, 4+Math.ceil(-Math.log10(a)));
+  let s=v.toFixed(dec);
+  if(s.indexOf('.')>=0) s=s.replace(/0+$/,'').replace(/\.$/,'');
+  return s;
+}
+/* Horner: c[0] + c[1]v + c[2]v^2 ... -> ((c2)*v + c1)*v + c0 */
+function horner(c, v){
+  if(c.length===1) return fmt(c[0]);
+  let e=fmt(c[c.length-1]);
+  for(let j=c.length-2;j>=0;j--) e='('+e+') * '+v+' + '+fmt(c[j]);
+  return e;
+}
+function polyStr(c, v){
+  const t=[];
+  for(let j=c.length-1;j>=0;j--){
+    if(Math.abs(c[j])<1e-14) continue;
+    t.push(fmt(c[j]) + (j===0?'':'·'+v+(j===1?'':'^'+j)));
+  }
+  return (t.join(' + ')||'0').replace(/\+ -/g,'− ');
+}
+
+/* ============================================================
+   model families
+   Every model is { id, label, k, p, f(x,p), pretty(p), build(L,p), linear? }
+   k = number of free parameters. `linear` models are already optimal
+   under weighted least squares, so LM can't improve them.
+   ============================================================ */
+function centering(xs){
+  const x0 = xs.reduce((a,b)=>a+b,0)/xs.length;
+  let sc = (Math.max.apply(null,xs)-Math.min.apply(null,xs))/2;
+  if(!(sc>1e-12)) sc=1;
+  return {x0, sc};
+}
+const U = (x0,sc)=>'(x - '+fmt(x0)+') / '+fmt(sc);
+
+function mPoly(xs, ys, w, deg, n){
+  if(deg+1 > n) return null;
+  const {x0,sc}=centering(xs);
+  const c = linFitW(xs.map(x=>(x-x0)/sc), ys, (u,j)=>Math.pow(u,j), deg+1, w);
+  if(!c) return null;
+  const ev=(x,p)=>{const u=(x-x0)/sc;let v=0;for(let j=p.length-1;j>=0;j--)v=v*u+p[j];return v;};
+  const names=['Constant','Linear','Quadratic','Cubic','Quartic','Quintic','Degree 6','Degree 7','Degree 8','Degree 9'];
+  return {
+    id:'poly'+deg, k:deg+1, p:c, f:ev, linear:true,
+    label:(names[deg]||('Degree '+deg))+(deg+1===n?' (exact)':''),
+    pretty:p=>'f(x) = '+polyStr(p,'u')+'   where u = '+U(x0,sc).replace(/ \* /g,'·'),
+    build:(L,p)=>({vars:[['u',U(x0,sc)]], ret:horner(p,'u')})
+  };
+}
+
+function mExp(xs, ys, w, withOffset, n){
+  const k=withOffset?3:2; if(k>n) return null;
+  const x0=xs[0];
+  const ymin=Math.min.apply(null,ys);
+  const off = withOffset ? ymin - Math.max(1e-6, Math.abs(ymin)*0.05) : 0;
+  const adj = ys.map(y=>y-off);
+  if(adj.some(y=>y<=0)) return null;
+  const lg = linFitW(xs.map(x=>x-x0), adj.map(Math.log), (u,j)=>j===0?1:u, 2, w.map(()=>1));
+  if(!lg) return null;
+  const ev = withOffset ? (x,p)=>p[0]*Math.exp(p[1]*(x-x0))+p[2] : (x,p)=>p[0]*Math.exp(p[1]*(x-x0));
+  const p0 = withOffset ? [Math.exp(lg[0]),lg[1],off] : [Math.exp(lg[0]),lg[1]];
+  const p = lmFit(ev,p0,xs,ys,w) || p0;
+  return {
+    id: withOffset?'expoff':'exp', k, p, f:ev,
+    label: withOffset?'Exponential + offset':'Exponential',
+    pretty:p=>'f(x) = '+fmt(p[0])+' · '+fmt(Math.exp(p[1]))+'^(x − '+fmt(x0)+')'+(withOffset?' + '+fmt(p[2]):''),
+    build:(L,p)=>({vars:[], ret: fmt(p[0])+' * '+L.pow(fmt(Math.exp(p[1])),'x - '+fmt(x0))+(withOffset?' + '+fmt(p[2]):'')})
+  };
+}
+
+/* exp of a polynomial: growth whose *rate* itself curves. Nails XP/cost tables. */
+function mExpPoly(xs, ys, w, deg, n){
+  const k=deg+1; if(k>n) return null;
+  if(ys.some(y=>y<=0)) return null;
+  const {x0,sc}=centering(xs);
+  const c = linFitW(xs.map(x=>(x-x0)/sc), ys.map(Math.log), (u,j)=>Math.pow(u,j), deg+1, w.map(()=>1));
+  if(!c) return null;
+  const ev=(x,p)=>{const u=(x-x0)/sc;let v=0;for(let j=p.length-1;j>=0;j--)v=v*u+p[j];return Math.exp(v);};
+  const p = lmFit(ev,c,xs,ys,w) || c;
+  return {
+    id:'exppoly'+deg, k, p, f:ev,
+    label:'exp(polynomial deg '+deg+')',
+    pretty:p=>'f(x) = exp( '+polyStr(p,'u')+' )   where u = '+U(x0,sc).replace(/ \* /g,'·'),
+    build:(L,p)=>({vars:[['u',U(x0,sc)]], ret:L.exp(horner(p,'u'))})
+  };
+}
+
+function mPower(xs, ys, w, n){
+  if(2>n) return null;
+  if(xs.some(x=>x<=0) || ys.some(y=>y<=0)) return null;
+  const lg=linFitW(xs.map(Math.log), ys.map(Math.log), (u,j)=>j===0?1:u, 2, w.map(()=>1));
+  if(!lg) return null;
+  const ev=(x,p)=>p[0]*Math.pow(x,p[1]);
+  const p=lmFit(ev,[Math.exp(lg[0]),lg[1]],xs,ys,w)||[Math.exp(lg[0]),lg[1]];
+  return {id:'power', k:2, p, f:ev, label:'Power law',
+    pretty:p=>'f(x) = '+fmt(p[0])+' · x^'+fmt(p[1]),
+    build:(L,p)=>({vars:[], ret:fmt(p[0])+' * '+L.pow('x',fmt(p[1]))})};
+}
+
+/* a*(x+s)^b + c — the shift lets it work when x starts at 0 or below */
+function mPowerOff(xs, ys, w, n){
+  if(4>n) return null;
+  const xmin=Math.min.apply(null,xs);
+  const span=Math.max(1e-9,Math.max.apply(null,xs)-xmin);
+  const shift=p=>xmin-Math.exp(p[2]);          // guaranteed below every x
+  const ev=(x,p)=>{const b=x-shift(p); if(b<=1e-12) return NaN; return p[0]*Math.pow(b,p[1])+p[3];};
+  let best=null;
+  [0.02,0.3,2].forEach(df=>{
+    [0.5,1,2,3].forEach(b0=>{
+      const p0=[1,b0,Math.log(span*df),Math.min.apply(null,ys)];
+      const p=lmFit(ev,p0,xs,ys,w,150);
+      if(!p) return;
+      const s=statsOf(xs,ys,x=>ev(x,p),w);
+      if(s && (!best||s.obj<best.s.obj)) best={p,s};
+    });
+  });
+  if(!best) return null;
+  return {id:'poweroff', k:4, p:best.p, f:ev, label:'Power law + shift/offset',
+    pretty:p=>'f(x) = '+fmt(p[0])+' · (x − '+fmt(shift(p))+')^'+fmt(p[1])+' + '+fmt(p[3]),
+    build:(L,p)=>({vars:[], ret:fmt(p[0])+' * '+L.pow('x - '+fmt(shift(p)),fmt(p[1]))+' + '+fmt(p[3])})};
+}
+
+function mLog(xs, ys, w, n){
+  if(2>n || xs.some(x=>x<=0)) return null;
+  const c=linFitW(xs, ys, (x,j)=>j===0?1:Math.log(x), 2, w);
+  if(!c) return null;
+  const ev=(x,p)=>p[0]+p[1]*Math.log(x);
+  return {id:'log', k:2, p:c, f:ev, linear:true, label:'Logarithmic',
+    pretty:p=>'f(x) = '+fmt(p[1])+' · ln(x) + '+fmt(p[0]),
+    build:(L,p)=>({vars:[], ret:fmt(p[1])+' * '+L.ln('x')+' + '+fmt(p[0])})};
+}
+
+function mLogOff(xs, ys, w, n){
+  if(3>n) return null;
+  const xmin=Math.min.apply(null,xs);
+  const span=Math.max(1e-9,Math.max.apply(null,xs)-xmin);
+  const shift=p=>xmin-Math.exp(p[2]);
+  const ev=(x,p)=>{const b=x-shift(p); if(b<=1e-12) return NaN; return p[0]+p[1]*Math.log(b);};
+  let best=null;
+  [0.005,0.05,0.5,5].forEach(df=>{
+    const p0=[ys[0],1,Math.log(span*df)];
+    const p=lmFit(ev,p0,xs,ys,w,150);
+    if(!p) return;
+    const s=statsOf(xs,ys,x=>ev(x,p),w);
+    if(s && (!best||s.obj<best.s.obj)) best={p,s};
+  });
+  if(!best) return null;
+  return {id:'logoff', k:3, p:best.p, f:ev, label:'Logarithmic + shift',
+    pretty:p=>'f(x) = '+fmt(p[1])+' · ln(x − '+fmt(shift(p))+') + '+fmt(p[0]),
+    build:(L,p)=>({vars:[], ret:fmt(p[1])+' * '+L.ln('x - '+fmt(shift(p)))+' + '+fmt(p[0])})};
+}
+
+function mLogistic(xs, ys, w, n){
+  if(4>n) return null;
+  const ymax=Math.max.apply(null,ys), ymin=Math.min.apply(null,ys);
+  if(ymax-ymin<1e-12) return null;
+  const span=Math.max(1e-9,Math.max.apply(null,xs)-Math.min.apply(null,xs));
+  const xmid=(Math.max.apply(null,xs)+Math.min.apply(null,xs))/2;
+  const ev=(x,p)=>p[3]+p[0]/(1+Math.exp(-p[1]*(x-p[2])));
+  let best=null;
+  [1,3,8,20].forEach(kk=>{ [-1,1].forEach(sg=>{
+    const p=lmFit(ev,[(ymax-ymin)*1.05*sg, sg*kk/span*4, xmid, sg>0?ymin:ymax],xs,ys,w,150);
+    if(!p) return;
+    const s=statsOf(xs,ys,x=>ev(x,p),w);
+    if(s && (!best||s.obj<best.s.obj)) best={p,s};
+  });});
+  if(!best) return null;
+  return {id:'logistic', k:4, p:best.p, f:ev, label:'Logistic (S-curve)',
+    pretty:p=>'f(x) = '+fmt(p[3])+' + '+fmt(p[0])+' / (1 + e^(−'+fmt(p[1])+'(x − '+fmt(p[2])+')))',
+    build:(L,p)=>({vars:[], ret:fmt(p[3])+' + '+fmt(p[0])+' / (1.0 + '+L.exp(fmt(-p[1])+' * (x - '+fmt(p[2])+')')+')'})};
+}
+
+function mHyper(xs, ys, w, n){
+  if(3>n) return null;
+  const xmin=Math.min.apply(null,xs);
+  const ev=(x,p)=>{const d=x+p[1]; if(Math.abs(d)<1e-9) return NaN; return p[0]/d+p[2];};
+  let best=null;
+  [0.5,2,10,50].forEach(off=>{
+    const p0=[(Math.max.apply(null,ys)-Math.min.apply(null,ys))*off, off-xmin+1, Math.min.apply(null,ys)];
+    const p=lmFit(ev,p0,xs,ys,w,150);
+    if(!p) return;
+    if(xs.some(x=>Math.abs(x+p[1])<1e-9)) return;
+    const s=statsOf(xs,ys,x=>ev(x,p),w);
+    if(s && (!best||s.obj<best.s.obj)) best={p,s};
+  });
+  if(!best) return null;
+  return {id:'hyper', k:3, p:best.p, f:ev, label:'Hyperbolic a/(x+b)+c',
+    pretty:p=>'f(x) = '+fmt(p[0])+' / (x + '+fmt(p[1])+') + '+fmt(p[2]),
+    build:(L,p)=>({vars:[], ret:fmt(p[0])+' / (x + '+fmt(p[1])+') + '+fmt(p[2])})};
+}
+
+/* rational P(u)/Q(u): the most flexible smooth family that still
+   extrapolates calmly (tends to a constant or a line, never explodes
+   the way a high-degree polynomial does) */
+function mRational(xs, ys, w, num, den, n){
+  const k=num+den+1; if(k>n) return null;
+  const {x0,sc}=centering(xs);
+  const us=xs.map(x=>(x-x0)/sc);
+  // linearised start: y*Q(u) = P(u)  ->  y = P(u) - y*(Q(u)-1)
+  const lin=linFitW(us.map((u,i)=>i), ys, (i,j)=>{
+    const u=us[i];
+    return j<=num ? Math.pow(u,j) : -ys[i]*Math.pow(u, j-num);
+  }, k, w, 1e-9);
+  const ev=(x,p)=>{
+    const u=(x-x0)/sc;
+    let P=0; for(let j=num;j>=0;j--) P=P*u+p[j];
+    let Q=0; for(let j=den;j>=1;j--) Q=(Q+p[num+j])*u;
+    Q+=1;
+    if(Math.abs(Q)<1e-12) return NaN;
+    return P/Q;
+  };
+  let p0 = lin;
+  if(!p0){ p0=new Array(k).fill(0); p0[0]=ys[0]; }
+  const p = lmFit(ev,p0,xs,ys,w,250) || p0;
+  const s = statsOf(xs,ys,x=>ev(x,p),w);
+  if(!s) return null;
+  return {id:'rat'+num+'_'+den, k, p, f:ev, label:'Rational P'+num+'/Q'+den,
+    pretty:p=>'f(x) = ( '+polyStr(p.slice(0,num+1),'u')+' ) / ( '+polyStr([1].concat(p.slice(num+1)),'u')+' )   where u = '+U(x0,sc).replace(/ \* /g,'·'),
+    build:(L,p)=>({vars:[['u',U(x0,sc)]],
+      ret:'('+horner(p.slice(0,num+1),'u')+') / ('+horner([1].concat(p.slice(num+1)),'u')+')'})};
+}
+
+/* sum of smooth steps (sigmoids). This is the "fit literally any shape"
+   family: each unit is a soft step, so N units can follow N bends —
+   including near-discontinuities — while staying perfectly smooth and
+   flattening out (not exploding) outside the data range. */
+function mSigSum(xs, ys, w, units, n){
+  const k=3*units+1; if(k>n+1) return null;
+  const xmin=Math.min.apply(null,xs), xmax=Math.max.apply(null,xs);
+  const span=Math.max(1e-9,xmax-xmin);
+  const ev=(x,p)=>{
+    let v=p[0];
+    for(let i=0;i<units;i++){
+      const a=p[1+3*i], wt=p[2+3*i], b=p[3+3*i];
+      v += a/(1+Math.exp(-(wt*x+b)));
+    }
+    return v;
+  };
+  // init: spread the steps across x, solve the (linear) amplitudes exactly, keep the best start
+  let best=null;
+  const sharpness=[2,6,20,60];
+  for(const sh of sharpness){
+    for(let jitter=0;jitter<3;jitter++){
+      const wt=[],bs=[];
+      for(let i=0;i<units;i++){
+        const frac=(i+1+ (jitter-1)*0.25)/(units+1);
+        const centre=xmin+span*Math.min(0.95,Math.max(0.05,frac));
+        const slope=sh/span;
+        wt.push(slope); bs.push(-slope*centre);
+      }
+      const amps=linFitW(xs.map((x,i)=>i), ys,
+        (i,j)=> j===0?1:1/(1+Math.exp(-(wt[j-1]*xs[i]+bs[j-1]))), units+1, w, 1e-9);
+      if(!amps) continue;
+      const p0=[amps[0]];
+      for(let i=0;i<units;i++) p0.push(amps[i+1], wt[i], bs[i]);
+      const p=lmFit(ev,p0,xs,ys,w,300);
+      if(!p) continue;
+      const s=statsOf(xs,ys,x=>ev(x,p),w);
+      if(s && (!best||s.obj<best.s.obj)) best={p,s};
+    }
+  }
+  if(!best) return null;
+  return {id:'sig'+units, k, p:best.p, f:ev,
+    label:'Smooth step blend ×'+units,
+    pretty:p=>{
+      let t='f(x) = '+fmt(p[0]);
+      for(let i=0;i<units;i++) t+=' + '+fmt(p[1+3*i])+'/(1 + e^(−('+fmt(p[2+3*i])+'x + '+fmt(p[3+3*i])+')))';
+      return t.replace(/\+ -/g,'− ');
+    },
+    build:(L,p)=>{
+      let ret=fmt(p[0]);
+      for(let i=0;i<units;i++)
+        ret+=' + '+fmt(p[1+3*i])+' / (1.0 + '+L.exp(fmt(-p[2+3*i])+' * x + '+fmt(-p[3+3*i]))+')';
+      return {vars:[], ret};
+    }};
+}
+
+/* sum of bumps — good for humps/valleys, decays to a constant outside */
+function mGaussSum(xs, ys, w, units, n){
+  const k=3*units+1; if(k>n+1) return null;
+  const xmin=Math.min.apply(null,xs), xmax=Math.max.apply(null,xs);
+  const span=Math.max(1e-9,xmax-xmin);
+  const ev=(x,p)=>{
+    let v=p[0];
+    for(let i=0;i<units;i++){
+      const z=(x-p[2+3*i])*p[3+3*i];
+      v+=p[1+3*i]*Math.exp(-z*z);
+    }
+    return v;
+  };
+  let best=null;
+  for(const width of [0.5,1,2]){
+    const ctr=[],inv=[];
+    for(let i=0;i<units;i++){
+      ctr.push(xmin+span*(i+1)/(units+1));
+      inv.push((units+1)/(span*width));
+    }
+    const amps=linFitW(xs.map((x,i)=>i), ys,
+      (i,j)=>{ if(j===0) return 1; const z=(xs[i]-ctr[j-1])*inv[j-1]; return Math.exp(-z*z); },
+      units+1, w, 1e-9);
+    if(!amps) continue;
+    const p0=[amps[0]];
+    for(let i=0;i<units;i++) p0.push(amps[i+1], ctr[i], inv[i]);
+    const p=lmFit(ev,p0,xs,ys,w,300);
+    if(!p) continue;
+    const s=statsOf(xs,ys,x=>ev(x,p),w);
+    if(s && (!best||s.obj<best.s.obj)) best={p,s};
+  }
+  if(!best) return null;
+  return {id:'gauss'+units, k, p:best.p, f:ev, label:'Bump blend ×'+units,
+    pretty:p=>{
+      let t='f(x) = '+fmt(p[0]);
+      for(let i=0;i<units;i++) t+=' + '+fmt(p[1+3*i])+'·exp(−((x − '+fmt(p[2+3*i])+')·'+fmt(p[3+3*i])+')²)';
+      return t.replace(/\+ -/g,'− ');
+    },
+    build:(L,p)=>{
+      const vars=[]; let ret=fmt(p[0]);
+      for(let i=0;i<units;i++){
+        vars.push(['z'+(i+1),'(x - '+fmt(p[2+3*i])+') * '+fmt(p[3+3*i])]);
+        ret+=' + '+fmt(p[1+3*i])+' * '+L.exp('-z'+(i+1)+' * z'+(i+1));
+      }
+      return {vars, ret};
+    }};
+}
+
+/* Asymmetric hump: rises like a power, decays like an exponential.
+   Evaluated in log space (a·exp(b·ln x − c·x)) so big x can't overflow.
+   This is the natural shape for "ramps up, peaks, tails off to nothing". */
+function mGammaBump(xs, ys, w, n){
+  if(5>n) return null;
+  const xmin=Math.min.apply(null,xs);
+  const span=Math.max(1e-9,Math.max.apply(null,xs)-xmin);
+  const ymax=Math.max.apply(null,ys), ymin=Math.min.apply(null,ys);
+  const xp=xs[ys.indexOf(ymax)];
+  // p=[a,b,c,d,t]. The origin is shifted to s = xmin - e^t, which is always
+  // strictly below your smallest x — so ln() stays defined even when your
+  // data starts at x = 0 or goes negative. t is fitted, not guessed.
+  const shift=p=>xmin-Math.exp(p[4]);
+  const ev=(x,p)=>{
+    const u=x-shift(p);
+    if(!(u>0)) return NaN;
+    return p[0]*Math.exp(p[1]*Math.log(u)-p[2]*u)+p[3];
+  };
+  let best=null;
+  [0.02,0.3,2].forEach(df=>{
+    const delta=span*df, up=Math.max(xp-(xmin-delta),1e-9);
+    [0.5,1,2,4,8].forEach(b=>{
+      const c=b/up;
+      const a=(ymax-ymin)/Math.exp(b*Math.log(up)-c*up);
+      const p=lmFit(ev,[a,b,c,ymin,Math.log(delta)],xs,ys,w,200);
+      if(!p) return;
+      const s=statsOf(xs,ys,x=>ev(x,p),w);
+      if(s && (!best||s.obj<best.s.obj)) best={p,s};
+    });
+  });
+  if(!best) return null;
+  return {id:'gammabump', k:5, p:best.p, f:ev, label:'Rise-and-decay hump',
+    pretty:p=>'f(x) = '+fmt(p[0])+' · u^'+fmt(p[1])+' · e^(−'+fmt(p[2])+'u) + '+fmt(p[3])+'   where u = x − '+fmt(shift(p)),
+    build:(L,p)=>({vars:[['u','x - '+fmt(shift(p))]],
+      ret:fmt(p[0])+' * '+L.exp(fmt(p[1])+' * '+L.ln('u')+' - '+fmt(p[2])+' * u')+' + '+fmt(p[3])})};
+}
+
+/* Log-normal hump: a bump that is stretched on the right, squashed on the
+   left — peaks early then trails off slowly. */
+function mLogNormBump(xs, ys, w, n){
+  if(5>n) return null;
+  const xmin=Math.min.apply(null,xs);
+  const span=Math.max(1e-9,Math.max.apply(null,xs)-xmin);
+  const ymax=Math.max.apply(null,ys), ymin=Math.min.apply(null,ys);
+  const xp=xs[ys.indexOf(ymax)];
+  const shift=p=>xmin-Math.exp(p[4]);   // same shifted origin trick as above
+  const ev=(x,p)=>{
+    const u=x-shift(p);
+    if(!(u>0)) return NaN;
+    const z=(Math.log(u)-p[1])/p[2];
+    return p[0]*Math.exp(-z*z)+p[3];
+  };
+  let best=null;
+  [0.02,0.3,2].forEach(df=>{
+    const delta=span*df, up=Math.max(xp-(xmin-delta),1e-9);
+    const lspan=Math.max(0.2, Math.log(Math.max.apply(null,xs)-(xmin-delta))-Math.log(delta));
+    [0.25,0.6,1.2].forEach(fr=>{
+      const p=lmFit(ev,[ymax-ymin, Math.log(up), lspan*fr, ymin, Math.log(delta)],xs,ys,w,200);
+      if(!p) return;
+      const s=statsOf(xs,ys,x=>ev(x,p),w);
+      if(s && (!best||s.obj<best.s.obj)) best={p,s};
+    });
+  });
+  if(!best) return null;
+  return {id:'lognorm', k:5, p:best.p, f:ev, label:'Skewed hump (log-normal)',
+    pretty:p=>'f(x) = '+fmt(p[0])+' · exp(−((ln u − '+fmt(p[1])+') / '+fmt(p[2])+')²) + '+fmt(p[3])+'   where u = x − '+fmt(shift(p)),
+    build:(L,p)=>({vars:[['u','x - '+fmt(shift(p))],['z','('+L.ln('u')+' - '+fmt(p[1])+') / '+fmt(p[2])]],
+      ret:fmt(p[0])+' * '+L.exp('-z * z')+' + '+fmt(p[3])})};
+}
+
+function mDoubleExp(xs, ys, w, n){
+  if(4>n) return null;
+  const x0=xs[0];
+  const ev=(x,p)=>p[0]*Math.exp(p[1]*(x-x0))+p[2]*Math.exp(p[3]*(x-x0));
+  const span=Math.max(1e-9,Math.max.apply(null,xs)-x0);
+  let best=null;
+  [[0.5,-0.5],[2,-2],[0.2,-3],[1,0.05]].forEach(rr=>{
+    const p0=[ys[0]/2, rr[0]/span*3, ys[0]/2, rr[1]/span*3];
+    const p=lmFit(ev,p0,xs,ys,w,200);
+    if(!p) return;
+    const s=statsOf(xs,ys,x=>ev(x,p),w);
+    if(s && (!best||s.obj<best.s.obj)) best={p,s};
+  });
+  if(!best) return null;
+  return {id:'dexp', k:4, p:best.p, f:ev, label:'Sum of two exponentials',
+    pretty:p=>'f(x) = '+fmt(p[0])+'·'+fmt(Math.exp(p[1]))+'^(x−'+fmt(x0)+') + '+fmt(p[2])+'·'+fmt(Math.exp(p[3]))+'^(x−'+fmt(x0)+')',
+    build:(L,p)=>({vars:[], ret:fmt(p[0])+' * '+L.pow(fmt(Math.exp(p[1])),'x - '+fmt(x0))+' + '+fmt(p[2])+' * '+L.pow(fmt(Math.exp(p[3])),'x - '+fmt(x0))})};
+}
+
+function mSine(xs, ys, w, n){
+  if(4>n || xs.length<4) return null;
+  const span=Math.max.apply(null,xs)-Math.min.apply(null,xs);
+  if(span<=0) return null;
+  const dx=span/(xs.length-1);
+  const wMax=2*Math.PI/(3*dx);           // stay under Nyquist or the fit aliases
+  const yRange=Math.max.apply(null,ys)-Math.min.apply(null,ys);
+  let best=null;
+  for(let i=1;i<=2000;i++){
+    const om=(i/2000)*wMax;
+    const c=linFitW(xs, ys, (x,j)=> j===0?Math.sin(om*x): j===1?Math.cos(om*x):1, 3, w);
+    if(!c) continue;
+    if(Math.hypot(c[0],c[1])>yRange*3+1e-6) continue;
+    const s=statsOf(xs,ys,x=>c[0]*Math.sin(om*x)+c[1]*Math.cos(om*x)+c[2],w);
+    if(s && (!best||s.obj<best.s.obj)) best={om,c,s};
+  }
+  if(!best || best.s.r2<0.5) return null;
+  const ev=(x,p)=>p[1]*Math.sin(p[0]*x)+p[2]*Math.cos(p[0]*x)+p[3];
+  const p0=[best.om,best.c[0],best.c[1],best.c[2]];
+  const p=lmFit(ev,p0,xs,ys,w,200)||p0;
+  return {id:'sine', k:4, p, f:ev, label:'Sinusoid',
+    pretty:p=>'f(x) = '+fmt(Math.hypot(p[1],p[2]))+' · sin('+fmt(p[0])+'x + '+fmt(Math.atan2(p[2],p[1]))+') + '+fmt(p[3]),
+    build:(L,p)=>({vars:[], ret:fmt(Math.hypot(p[1],p[2]))+' * '+L.sin(fmt(p[0])+' * x + '+fmt(Math.atan2(p[2],p[1])))+' + '+fmt(p[3])})};
+}
+
+/* ============================================================
+   fit everything, rank by the chosen priority
+   ============================================================ */
+function fitAll(xs, ys, metric, priority){
+  const n=xs.length;
+  metric = resolveMetric(metric, ys);
+  const w=makeWeights(ys, metric);
+  const out=[];
+  const add=m=>{
+    if(!m) return;
+    // final polish in the chosen metric (linear models are already optimal)
+    if(!m.linear){
+      const better=lmFit(m.f, m.p, xs, ys, w, 200);
+      if(better){
+        const a=statsOf(xs,ys,x=>m.f(x,m.p),w), b=statsOf(xs,ys,x=>m.f(x,better),w);
+        if(b && (!a || b.obj<=a.obj)) m.p=better;
+      }
+    }
+    const s=statsOf(xs,ys,x=>m.f(x,m.p),w);
+    if(!s || !m.p.every(isFinite)) return;
+    const dof=n-m.k-1;
+    s.adj = dof>0 ? 1-(1-s.r2)*(n-1)/dof : -Infinity;
+    s.aicc = dof>0 ? n*Math.log(Math.max(s.obj/n,1e-300)) + 2*m.k + 2*m.k*(m.k+1)/dof : Infinity;
+    m.stats=s;
+    m.predict = x=>m.f(x,m.p);
+    m.sane = inspect(m, xs, ys);
+    out.push(m);
+  };
+
+  for(let d=1; d<=Math.min(9,n-1); d++) add(mPoly(xs,ys,w,d,n));
+  add(mExp(xs,ys,w,false,n));
+  add(mExp(xs,ys,w,true,n));
+  for(let d=2; d<=Math.min(4,n-1); d++) add(mExpPoly(xs,ys,w,d,n));
+  add(mPower(xs,ys,w,n));
+  add(mPowerOff(xs,ys,w,n));
+  add(mLog(xs,ys,w,n));
+  add(mLogOff(xs,ys,w,n));
+  add(mLogistic(xs,ys,w,n));
+  add(mHyper(xs,ys,w,n));
+  add(mDoubleExp(xs,ys,w,n));
+  add(mSine(xs,ys,w,n));
+  add(mGammaBump(xs,ys,w,n));
+  add(mLogNormBump(xs,ys,w,n));
+  [[1,1],[2,1],[2,2],[3,2],[3,3],[4,3]].forEach(r=>add(mRational(xs,ys,w,r[0],r[1],n)));
+  for(let u=1;u<=4;u++) add(mSigSum(xs,ys,w,u,n));
+  for(let u=1;u<=4;u++) add(mGaussSum(xs,ys,w,u,n));
+
+  // de-duplicate: keep the cheapest model among ones that fit identically
+  out.sort((a,b)=>a.stats.obj-b.stats.obj || a.k-b.k);
+  const keep=[];
+  for(const m of out){
+    const dup=keep.find(o=>Math.abs(o.stats.obj-m.stats.obj) <= Math.max(m.stats.obj,1e-30)*1e-6 && o.k<=m.k);
+    if(!dup) keep.push(m);
+  }
+
+  const score = {
+    simple:   m=>m.stats.adj,
+    balanced: m=>-m.stats.aicc,
+    accurate: m=>-m.stats.obj
+  }[priority] || (m=>-m.stats.aicc);
+
+  // a curve that blows up between your own data points is always wrong,
+  // whatever its error column says — demote it in every mode.
+  const penalty = m=>{
+    let bad=0;
+    if(!m.sane.stable) bad+=4;
+    if(!m.sane.tail)   bad+=1;
+    if(priority!=='accurate' && !m.sane.monoOK) bad+=0.5;
+    return bad;
+  };
+
+  keep.sort((a,b)=>{
+    const pd=penalty(a)-penalty(b);
+    if(pd) return pd;
+    const d=score(b)-score(a);
+    if(isFinite(d) && Math.abs(d)>1e-12) return d;
+    if(score(a)===-Infinity && score(b)!==-Infinity) return 1;
+    if(score(b)===-Infinity && score(a)!==-Infinity) return -1;
+    const d2=a.stats.obj-b.stats.obj;
+    if(Math.abs(d2)>1e-15) return d2;
+    return a.k-b.k;
+  });
+  return keep;
+}
+
+/* ============================================================
+   behavioural sanity check
+
+   Low error at the data points is not enough. A rational function can
+   have a pole *between* two of your points and shoot to infinity there,
+   and a bump/blend model can wander back down when your data only ever
+   goes up. Both look perfect in the error column and are useless in a
+   game. So we walk the curve and check how it actually behaves.
+   ============================================================ */
+function inspect(m, xs, ys){
+  const xmin=Math.min.apply(null,xs), xmax=Math.max.apply(null,xs);
+  const span=Math.max(1e-9,xmax-xmin);
+  const yMin=Math.min.apply(null,ys), yMax=Math.max.apply(null,ys);
+  const yRange=Math.max(1e-9,yMax-yMin);
+  const lim=Math.max(Math.abs(yMin),Math.abs(yMax))+yRange*50;
+  const eps=yRange*1e-6;
+
+  // is the source data itself monotonic?
+  let dataDir=0, dataMono=true;
+  for(let i=1;i<xs.length;i++){
+    const d=Math.sign(ys[i]-ys[i-1]);
+    if(d===0) continue;
+    if(dataDir===0) dataDir=d; else if(d!==dataDir) dataMono=false;
+  }
+
+  let stable=true, tail=true, mono=true, dir=0, prev=null;
+  const walk=(from,to,steps,cap)=>{
+    for(let i=0;i<=steps;i++){
+      const v=m.predict(from+(to-from)*i/steps);
+      if(!isFinite(v)||Math.abs(v)>cap) return false;
+      if(prev!==null){
+        const d=v-prev;
+        if(Math.abs(d)>eps){ const sg=Math.sign(d); if(dir===0) dir=sg; else if(sg!==dir) mono=false; }
+      }
+      prev=v;
+    }
+    return true;
+  };
+  stable = walk(xmin, xmax, 400, lim);              // pole or blow-up inside the data
+  if(stable) tail = walk(xmax, xmax+span*0.3, 80, lim*4);  // sane just past the end
+  return {stable, tail, monoOK: !dataMono || mono, dataMono};
+}
+
+/* how wild does this model get just outside the data? used to warn the user */
+function extrapolationRisk(m, xs, ys){
+  const xmin=Math.min.apply(null,xs), xmax=Math.max.apply(null,xs);
+  const span=Math.max(1e-9,xmax-xmin);
+  const yspan=Math.max(1e-9,Math.max.apply(null,ys)-Math.min.apply(null,ys));
+  let worst=0, blew=false;
+  for(let i=1;i<=40;i++){
+    const x=xmax+span*i/40;
+    const v=m.predict(x);
+    if(!isFinite(v)){blew=true;continue;}
+    worst=Math.max(worst, Math.abs(v-ys[ys.length-1])/yspan);
+  }
+  return {ratio:worst, blew};
+}
+
+/* ---------- input parsing ---------- */
+function parseData(text, start){
+  const lines = text.split(/\n/).map(s=>s.trim()).filter(s=>s.length);
+  const numsIn = s => (s.match(/-?\d+(\.\d+)?([eE][-+]?\d+)?/g)||[]).map(Number);
+  if(lines.length>1 && lines.every(l=>numsIn(l).length===2)){
+    const pts = lines.map(l=>numsIn(l)).sort((a,b)=>a[0]-b[0]);
+    return {xs:pts.map(p=>p[0]), ys:pts.map(p=>p[1]), paired:true};
+  }
+  const all = numsIn(text);
+  return {xs: all.map((_,i)=>start+i), ys: all, paired:false};
+}
+
+/* ---------- language backends ---------- */
+const LANGS = {
+  lua:{label:'Lua', ind:'  ', ext:'lua',
+    pow:(a,b)=>'('+a+') ^ ('+b+')', exp:a=>'math.exp('+a+')', ln:a=>'math.log('+a+')',
+    sin:a=>'math.sin('+a+')', cos:a=>'math.cos('+a+')', sqrt:a=>'math.sqrt('+a+')', round:a=>'math.floor(('+a+') + 0.5)',
+    minmax:(a,lo,hi)=>'math.max('+lo+', math.min('+hi+', '+a+'))',
+    decl:(n,v,r,i)=>'local function '+n+'(x)\n'+v.map(p=>i+'local '+p[0]+' = '+p[1]+'\n').join('')+i+'return '+r+'\nend'},
+  javascript:{label:'JavaScript', ind:'  ', ext:'js',
+    pow:(a,b)=>'Math.pow('+a+', '+b+')', exp:a=>'Math.exp('+a+')', ln:a=>'Math.log('+a+')',
+    sin:a=>'Math.sin('+a+')', cos:a=>'Math.cos('+a+')', sqrt:a=>'Math.sqrt('+a+')', round:a=>'Math.round('+a+')',
+    minmax:(a,lo,hi)=>'Math.max('+lo+', Math.min('+hi+', '+a+'))',
+    decl:(n,v,r,i)=>'function '+n+'(x) {\n'+v.map(p=>i+'const '+p[0]+' = '+p[1]+';\n').join('')+i+'return '+r+';\n}'},
+  typescript:{label:'TypeScript', ind:'  ', ext:'ts',
+    pow:(a,b)=>'Math.pow('+a+', '+b+')', exp:a=>'Math.exp('+a+')', ln:a=>'Math.log('+a+')',
+    sin:a=>'Math.sin('+a+')', cos:a=>'Math.cos('+a+')', sqrt:a=>'Math.sqrt('+a+')', round:a=>'Math.round('+a+')',
+    minmax:(a,lo,hi)=>'Math.max('+lo+', Math.min('+hi+', '+a+'))',
+    decl:(n,v,r,i)=>'export function '+n+'(x: number): number {\n'+v.map(p=>i+'const '+p[0]+' = '+p[1]+';\n').join('')+i+'return '+r+';\n}'},
+  c:{label:'C', ind:'    ', ext:'c', head:'#include <math.h>\n\n',
+    pow:(a,b)=>'pow('+a+', '+b+')', exp:a=>'exp('+a+')', ln:a=>'log('+a+')',
+    sin:a=>'sin('+a+')', cos:a=>'cos('+a+')', sqrt:a=>'sqrt('+a+')', round:a=>'round('+a+')',
+    minmax:(a,lo,hi)=>'fmax('+lo+', fmin('+hi+', '+a+'))',
+    decl:(n,v,r,i)=>'double '+n+'(double x) {\n'+v.map(p=>i+'double '+p[0]+' = '+p[1]+';\n').join('')+i+'return '+r+';\n}'},
+  cpp:{label:'C++', ind:'    ', ext:'cpp', head:'#include <cmath>\n#include <algorithm>\n\n',
+    pow:(a,b)=>'std::pow('+a+', '+b+')', exp:a=>'std::exp('+a+')', ln:a=>'std::log('+a+')',
+    sin:a=>'std::sin('+a+')', cos:a=>'std::cos('+a+')', sqrt:a=>'std::sqrt('+a+')', round:a=>'std::round('+a+')',
+    minmax:(a,lo,hi)=>'std::max('+lo+', std::min('+hi+', '+a+'))',
+    decl:(n,v,r,i)=>'double '+n+'(double x) {\n'+v.map(p=>i+'double '+p[0]+' = '+p[1]+';\n').join('')+i+'return '+r+';\n}'},
+  csharp:{label:'C#', ind:'    ', ext:'cs', head:'using System;\n\n',
+    pow:(a,b)=>'Math.Pow('+a+', '+b+')', exp:a=>'Math.Exp('+a+')', ln:a=>'Math.Log('+a+')',
+    sin:a=>'Math.Sin('+a+')', cos:a=>'Math.Cos('+a+')', sqrt:a=>'Math.Sqrt('+a+')', round:a=>'Math.Round('+a+')',
+    minmax:(a,lo,hi)=>'Math.Max('+lo+', Math.Min('+hi+', '+a+'))',
+    decl:(n,v,r,i)=>'public static double '+n+'(double x)\n{\n'+v.map(p=>i+'double '+p[0]+' = '+p[1]+';\n').join('')+i+'return '+r+';\n}'},
+  java:{label:'Java', ind:'    ', ext:'java',
+    pow:(a,b)=>'Math.pow('+a+', '+b+')', exp:a=>'Math.exp('+a+')', ln:a=>'Math.log('+a+')',
+    sin:a=>'Math.sin('+a+')', cos:a=>'Math.cos('+a+')', sqrt:a=>'Math.sqrt('+a+')', round:a=>'(double) Math.round('+a+')',
+    minmax:(a,lo,hi)=>'Math.max('+lo+', Math.min('+hi+', '+a+'))',
+    decl:(n,v,r,i)=>'public static double '+n+'(double x) {\n'+v.map(p=>i+'double '+p[0]+' = '+p[1]+';\n').join('')+i+'return '+r+';\n}'},
+  rust:{label:'Rust', ind:'    ', ext:'rs',
+    pow:(a,b)=>'('+a+' as f64).powf('+b+')', exp:a=>'('+a+').exp()', ln:a=>'('+a+' as f64).ln()',
+    sin:a=>'('+a+').sin()', cos:a=>'('+a+').cos()', sqrt:a=>'('+a+' as f64).sqrt()', round:a=>'('+a+').round()',
+    minmax:(a,lo,hi)=>'('+a+').clamp('+lo+', '+hi+')',
+    decl:(n,v,r,i)=>'pub fn '+n+'(x: f64) -> f64 {\n'+v.map(p=>i+'let '+p[0]+' = '+p[1]+';\n').join('')+i+r+'\n}'},
+  python:{label:'Python', ind:'    ', ext:'py', head:'import math\n\n',
+    pow:(a,b)=>'(('+a+') ** ('+b+'))', exp:a=>'math.exp('+a+')', ln:a=>'math.log('+a+')',
+    sin:a=>'math.sin('+a+')', cos:a=>'math.cos('+a+')', sqrt:a=>'math.sqrt('+a+')', round:a=>'float(round('+a+'))',
+    minmax:(a,lo,hi)=>'max('+lo+', min('+hi+', '+a+'))',
+    decl:(n,v,r,i)=>'def '+n+'(x):\n'+v.map(p=>i+p[0]+' = '+p[1]+'\n').join('')+i+'return '+r},
+  gdscript:{label:'GDScript', ind:'\t', ext:'gd',
+    pow:(a,b)=>'pow('+a+', '+b+')', exp:a=>'exp('+a+')', ln:a=>'log('+a+')',
+    sin:a=>'sin('+a+')', cos:a=>'cos('+a+')', sqrt:a=>'sqrt('+a+')', round:a=>'round('+a+')',
+    minmax:(a,lo,hi)=>'clamp('+a+', '+lo+', '+hi+')',
+    decl:(n,v,r,i)=>'func '+n+'(x: float) -> float:\n'+v.map(p=>i+'var '+p[0]+': float = '+p[1]+'\n').join('')+i+'return '+r},
+};
+
+function genCode(model, langKey, opts){
+  const L = LANGS[langKey];
+  const b = model.build(L, model.p);
+  let ret = b.ret;
+  if(opts.clamp) ret = L.minmax(ret, fmt(opts.lo), fmt(opts.hi));
+  if(opts.round) ret = L.round(ret);
+  const clean = s=>s.replace(/\+ -/g,'- ').replace(/- -/g,'+ ');
+  ret = clean(ret);
+  const vars = b.vars.map(v=>[v[0], clean(v[1])]);
+  const comment = {lua:'-- ',python:'# ',gdscript:'# '}[langKey] || '// ';
+  const s=model.stats;
+  const banner = comment+model.label+'  ·  max error '+(s.maxAbs<1e-9?'0':s.maxAbs.toPrecision(3))
+                 +'  ·  max '+(s.maxRel*100<1e-9?'0':(s.maxRel*100).toPrecision(3))+'%\n'
+               + comment+model.pretty(model.p).replace(/\+ -/g,'− ')+'\n'
+               + comment+'generated by Curve Forge\n';
+  return (L.head||'') + banner + L.decl(opts.name, vars, ret, L.ind);
+}
+/* ============================================================
+   BETWEEN-POINTS MODE (interpolation)
+
+   No fitting. The function passes through every number you give,
+   exactly, and you choose how it travels between them.
+   Values and slopes are baked into arrays at generation time, so the
+   pasted function is just a table lookup plus arithmetic — not a
+   long if/elseif chain per value.
+   ============================================================ */
+
+/* Catmull-Rom slopes: smoothest, but can overshoot past your values. */
+function tangentsCatmull(xs, ys){
+  const n=xs.length, m=new Array(n);
+  for(let i=0;i<n;i++){
+    if(i===0)        m[i]=(ys[1]-ys[0])/(xs[1]-xs[0]);
+    else if(i===n-1) m[i]=(ys[n-1]-ys[n-2])/(xs[n-1]-xs[n-2]);
+    else             m[i]=(ys[i+1]-ys[i-1])/(xs[i+1]-xs[i-1]);
+  }
+  return m;
+}
+/* Fritsch-Carlson slopes: smooth AND guaranteed never to overshoot,
+   so a curve through 0,3,4 can't dip below 0 or bulge above 4. */
+function tangentsMonotone(xs, ys){
+  const n=xs.length, d=new Array(n-1), m=new Array(n);
+  for(let i=0;i<n-1;i++) d[i]=(ys[i+1]-ys[i])/(xs[i+1]-xs[i]);
+  m[0]=d[0]; m[n-1]=d[n-2];
+  for(let i=1;i<n-1;i++) m[i]=(d[i-1]*d[i]<=0)?0:(d[i-1]+d[i])/2;
+  for(let i=0;i<n-1;i++){
+    if(d[i]===0){ m[i]=0; m[i+1]=0; continue; }
+    const a=m[i]/d[i], b=m[i+1]/d[i], s=a*a+b*b;
+    if(s>9){ const tau=3/Math.sqrt(s); m[i]=tau*a*d[i]; m[i+1]=tau*b*d[i]; }
+  }
+  return m;
+}
+
+const INTERP=[
+  {id:'linear', label:'Linear', cubic:false,
+   blurb:'Straight lines between points. Exact, but the slope jumps at each point.',
+   vars:[], ret:'YS[i] + (YS[i + 1] - YS[i]) * t'},
+  {id:'smooth', label:'Smoothstep', cubic:false,
+   blurb:'Eases in and out of every point. Never overshoots, but flattens at each one.',
+   vars:[['s','t * t * (3.0 - 2.0 * t)']], ret:'YS[i] + (YS[i + 1] - YS[i]) * s'},
+  {id:'monotone', label:'Cubic — no overshoot', cubic:true,
+   blurb:'Smooth curve through every point that never bulges past your values.',
+   vars:[['t2','t * t'],['t3','t2 * t']],
+   ret:'(2.0 * t3 - 3.0 * t2 + 1.0) * YS[i] + (t3 - 2.0 * t2 + t) * h * MS[i]'+
+       ' + (3.0 * t2 - 2.0 * t3) * YS[i + 1] + (t3 - t2) * h * MS[i + 1]'},
+  {id:'catmull', label:'Cubic — smoothest', cubic:true,
+   blurb:'The roundest curve through your points. May overshoot on sharp changes.',
+   vars:[['t2','t * t'],['t3','t2 * t']],
+   ret:'(2.0 * t3 - 3.0 * t2 + 1.0) * YS[i] + (t3 - 2.0 * t2 + t) * h * MS[i]'+
+       ' + (3.0 * t2 - 2.0 * t3) * YS[i + 1] + (t3 - t2) * h * MS[i + 1]'},
+  {id:'hold', label:'Hold (step)', cubic:false,
+   blurb:'Keeps the previous value until the next point. A staircase.',
+   vars:[], ret:'YS[i]'},
+];
+
+function slopesFor(method, xs, ys){
+  if(method==='catmull')  return tangentsCatmull(xs,ys);
+  if(method==='monotone') return tangentsMonotone(xs,ys);
+  return null;
+}
+
+/* evaluator used for the on-screen preview — mirrors the generated code exactly */
+function interpAt(method, xs, ys, ms, x, extrap){
+  const n=xs.length;
+  if(n===0) return NaN;
+  if(n===1) return ys[0];
+  const s0=(ys[1]-ys[0])/(xs[1]-xs[0]);
+  const s1=(ys[n-1]-ys[n-2])/(xs[n-1]-xs[n-2]);
+  if(x<=xs[0])   return extrap ? ys[0]+(x-xs[0])*s0     : ys[0];
+  if(x>=xs[n-1]) return extrap ? ys[n-1]+(x-xs[n-1])*s1 : ys[n-1];
+  let i=0; while(i<n-2 && x>=xs[i+1]) i++;
+  const h=xs[i+1]-xs[i], t=(x-xs[i])/h;
+  if(method==='hold')   return ys[i];
+  if(method==='linear') return ys[i]+(ys[i+1]-ys[i])*t;
+  if(method==='smooth'){ const s=t*t*(3-2*t); return ys[i]+(ys[i+1]-ys[i])*s; }
+  const t2=t*t, t3=t2*t;
+  return (2*t3-3*t2+1)*ys[i] + (t3-2*t2+t)*h*ms[i]
+       + (3*t2-2*t3)*ys[i+1] + (t3-t2)*h*ms[i+1];
+}
+
+/* ---- per-language syntax for the table-lookup function ----
+   The interpolation expressions themselves (XS[i], YS[i + 1], h, t ...)
+   are identical text in every language, so only the scaffolding differs.
+   Lua keeps i 1-based, which makes XS[i] / XS[i + 1] line up too.
+
+   arr/con  = declaration when the tables sit outside the function
+   arrIn/conIn = declaration when they sit inside it (falls back to arr/con
+   when the language spells it the same way). `alloc:true` means putting the
+   tables inside costs a fresh allocation on every call; C/C++/Rust can mark
+   them static/const so it costs nothing.                                    */
+const ISYN={
+  javascript:{ext:'js',cmt:'// ',ind:'  ',alloc:true,
+    arr:(n,v)=>'const '+n+' = ['+v+'];',
+    con:(n,v)=>'const '+n+' = '+v+';',
+    open:n=>'function '+n+'(x) {', close:'}',
+    nDecl:()=>'const n = XS.length;', fX:'XS[0]', fY:'YS[0]', lX:'XS[n - 1]', lY:'YS[n - 1]',
+    iInit:'let i = 0;', loop:['while (i < n - 2 && x >= XS[i + 1]) i++;'],
+    v:(n,e)=>'const '+n+' = '+e+';', ret:e=>'return '+e+';',
+    ifret:(c,e)=>'if ('+c+') return '+e+';'},
+  typescript:{ext:'ts',cmt:'// ',ind:'  ',alloc:true,
+    arr:(n,v)=>'const '+n+': number[] = ['+v+'];',
+    con:(n,v)=>'const '+n+' = '+v+';',
+    open:n=>'export function '+n+'(x: number): number {', close:'}',
+    nDecl:()=>'const n = XS.length;', fX:'XS[0]', fY:'YS[0]', lX:'XS[n - 1]', lY:'YS[n - 1]',
+    iInit:'let i = 0;', loop:['while (i < n - 2 && x >= XS[i + 1]) i++;'],
+    v:(n,e)=>'const '+n+' = '+e+';', ret:e=>'return '+e+';',
+    ifret:(c,e)=>'if ('+c+') return '+e+';'},
+  lua:{ext:'lua',cmt:'-- ',ind:'  ',alloc:true,
+    arr:(n,v)=>'local '+n+' = {'+v+'}',
+    con:(n,v)=>'local '+n+' = '+v,
+    open:n=>'local function '+n+'(x)', close:'end',
+    nDecl:()=>'local n = #XS', fX:'XS[1]', fY:'YS[1]', lX:'XS[n]', lY:'YS[n]',
+    iInit:'local i = 1', loop:['while i < n - 1 and x >= XS[i + 1] do i = i + 1 end'],
+    v:(n,e)=>'local '+n+' = '+e, ret:e=>'return '+e,
+    ifret:(c,e)=>'if '+c+' then return '+e+' end'},
+  python:{ext:'py',cmt:'# ',ind:'    ',alloc:true,
+    arr:(n,v)=>n+' = ['+v+']',
+    con:(n,v)=>n+' = '+v,
+    open:n=>'def '+n+'(x):', close:'',
+    nDecl:()=>'n = len(XS)', fX:'XS[0]', fY:'YS[0]', lX:'XS[n - 1]', lY:'YS[n - 1]',
+    iInit:'i = 0', loop:['while i < n - 2 and x >= XS[i + 1]:','    i += 1'],
+    v:(n,e)=>n+' = '+e, ret:e=>'return '+e,
+    ifret:(c,e)=>'if '+c+': return '+e},
+  c:{ext:'c',cmt:'// ',ind:'    ',head:'#include <math.h>\n\n',alloc:false,
+    arr:(n,v,len)=>'static const double '+n+'['+len+'] = {'+v+'};',
+    con:(n,v)=>'static const double '+n+' = '+v+';',
+    open:n=>'double '+n+'(double x) {', close:'}',
+    nDecl:len=>'const int n = '+len+';', fX:'XS[0]', fY:'YS[0]', lX:'XS[n - 1]', lY:'YS[n - 1]',
+    iInit:'int i = 0;', loop:['while (i < n - 2 && x >= XS[i + 1]) i++;'],
+    v:(n,e)=>'double '+n+' = '+e+';', ret:e=>'return '+e+';',
+    ifret:(c,e)=>'if ('+c+') return '+e+';'},
+  cpp:{ext:'cpp',cmt:'// ',ind:'    ',head:'#include <cmath>\n\n',alloc:false,
+    arr:(n,v,len)=>'static const double '+n+'['+len+'] = {'+v+'};',
+    con:(n,v)=>'static const double '+n+' = '+v+';',
+    open:n=>'double '+n+'(double x) {', close:'}',
+    nDecl:len=>'const int n = '+len+';', fX:'XS[0]', fY:'YS[0]', lX:'XS[n - 1]', lY:'YS[n - 1]',
+    iInit:'int i = 0;', loop:['while (i < n - 2 && x >= XS[i + 1]) i++;'],
+    v:(n,e)=>'double '+n+' = '+e+';', ret:e=>'return '+e+';',
+    ifret:(c,e)=>'if ('+c+') return '+e+';'},
+  csharp:{ext:'cs',cmt:'// ',ind:'    ',head:'using System;\n\n',alloc:true,
+    arr:(n,v)=>'static readonly double[] '+n+' = { '+v+' };',
+    arrIn:(n,v)=>'double[] '+n+' = { '+v+' };',
+    con:(n,v)=>'const double '+n+' = '+v+';',
+    open:n=>'public static double '+n+'(double x)\n{', close:'}',
+    nDecl:()=>'int n = XS.Length;', fX:'XS[0]', fY:'YS[0]', lX:'XS[n - 1]', lY:'YS[n - 1]',
+    iInit:'int i = 0;', loop:['while (i < n - 2 && x >= XS[i + 1]) i++;'],
+    v:(n,e)=>'double '+n+' = '+e+';', ret:e=>'return '+e+';',
+    ifret:(c,e)=>'if ('+c+') return '+e+';'},
+  java:{ext:'java',cmt:'// ',ind:'    ',alloc:true,
+    arr:(n,v)=>'private static final double[] '+n+' = { '+v+' };',
+    arrIn:(n,v)=>'final double[] '+n+' = { '+v+' };',
+    con:(n,v)=>'private static final double '+n+' = '+v+';',
+    conIn:(n,v)=>'final double '+n+' = '+v+';',
+    open:n=>'public static double '+n+'(double x) {', close:'}',
+    nDecl:()=>'int n = XS.length;', fX:'XS[0]', fY:'YS[0]', lX:'XS[n - 1]', lY:'YS[n - 1]',
+    iInit:'int i = 0;', loop:['while (i < n - 2 && x >= XS[i + 1]) i++;'],
+    v:(n,e)=>'double '+n+' = '+e+';', ret:e=>'return '+e+';',
+    ifret:(c,e)=>'if ('+c+') return '+e+';'},
+  rust:{ext:'rs',cmt:'// ',ind:'    ',alloc:false,
+    arr:(n,v,len)=>'const '+n+': [f64; '+len+'] = ['+v+'];',
+    con:(n,v)=>'const '+n+': f64 = '+v+';',
+    open:n=>'pub fn '+n+'(x: f64) -> f64 {', close:'}',
+    nDecl:len=>'let n = '+len+'usize;', fX:'XS[0]', fY:'YS[0]', lX:'XS[n - 1]', lY:'YS[n - 1]',
+    iInit:'let mut i = 0usize;', loop:['while i < n - 2 && x >= XS[i + 1] { i += 1; }'],
+    v:(n,e)=>'let '+n+' = '+e+';', ret:e=>e,
+    ifret:(c,e)=>'if '+c+' { return '+e+'; }'},
+  gdscript:{ext:'gd',cmt:'# ',ind:'\t',alloc:true,
+    arr:(n,v)=>'const '+n+' = ['+v+']',
+    arrIn:(n,v)=>'var '+n+' := ['+v+']',
+    con:(n,v)=>'const '+n+' = '+v,
+    conIn:(n,v)=>'var '+n+': float = '+v,
+    open:n=>'func '+n+'(x: float) -> float:', close:'',
+    nDecl:()=>'var n: int = XS.size()', fX:'XS[0]', fY:'YS[0]', lX:'XS[n - 1]', lY:'YS[n - 1]',
+    iInit:'var i: int = 0', loop:['while i < n - 2 and x >= XS[i + 1]:','\ti += 1'],
+    v:(n,e)=>'var '+n+': float = '+e, ret:e=>'return '+e,
+    ifret:(c,e)=>'if '+c+': return '+e},
+};
+
+function genInterpCode(langKey, o){
+  const S=ISYN[langKey], L=LANGS[langKey];
+  const {name, xs, ys, method, extrap, round, inside}=o;
+  const M=INTERP.find(m=>m.id===method)||INTERP[0];
+  const n=xs.length;
+  const ms=slopesFor(method, xs, ys);
+  const list=a=>a.map(fmt).join(', ');
+  const R=e=>round ? L.round(e) : e;
+  const mkArr = inside ? (S.arrIn||S.arr) : S.arr;
+  const mkCon = inside ? (S.conIn||S.con) : S.con;
+
+  const decls=[];
+  decls.push(mkArr('XS', list(xs), n));
+  decls.push(mkArr('YS', list(ys), n));
+  if(ms) decls.push(mkArr('MS', list(ms), n));
+  const s0=(ys[1]-ys[0])/(xs[1]-xs[0]), s1=(ys[n-1]-ys[n-2])/(xs[n-1]-xs[n-2]);
+  if(extrap){ decls.push(mkCon('S0', fmt(s0))); decls.push(mkCon('S1', fmt(s1))); }
+
+  const body=[];
+  if(inside) decls.forEach(d=>body.push(d));
+  body.push(S.nDecl(n));
+  body.push(S.ifret('x <= '+S.fX, R(extrap ? S.fY+' + (x - '+S.fX+') * S0' : S.fY)));
+  body.push(S.ifret('x >= '+S.lX, R(extrap ? S.lY+' + (x - '+S.lX+') * S1' : S.lY)));
+  body.push(S.iInit);
+  S.loop.forEach(l=>body.push(l));
+  body.push(S.v('h','XS[i + 1] - XS[i]'));
+  body.push(S.v('t','(x - XS[i]) / h'));
+  M.vars.forEach(v=>body.push(S.v(v[0], v[1])));
+  body.push(S.ret(R(M.ret)));
+
+  const banner=S.cmt+M.label+' interpolation through '+n+' points  ·  exact at every point\n'
+    +S.cmt+(extrap?'outside the range it continues at the end slope':'outside the range it holds the end values')+'\n'
+    +S.cmt+'generated by Curve Forge\n';
+
+  return (S.head||'') + banner
+       + (inside ? '' : decls.join('\n')+'\n\n')
+       + S.open(name) + '\n' + body.map(l=>S.ind+l).join('\n') + (S.close?'\n'+S.close:'');
+}
+// ===== MATH CORE END =====
+
+/* ============================================================
+   UI
+   ============================================================ */
+(function(){
+  const $ = id=>document.getElementById(id);
+  const el = {data:$('data'),start:$('start'),fname:$('fname'),lang:$('lang'),metric:$('metric'),prio:$('prio'),
+    doRound:$('doRound'),doClamp:$('doClamp'),autoPick:$('autoPick'),models:$('models'),code:$('code'),
+    formula:$('formula'),stats:$('stats'),tbl:$('tbl'),plot:$('plot'),tryX:$('tryX'),tryOut:$('tryOut'),
+    fitErr:$('fitErr'),mcount:$('mcount'),extrapWarn:$('extrapWarn'),metricNote:$('metricNote'),proj:$('proj'),
+    imethod:$('imethod'),iExtrap:$('iExtrap'),imethodNote:$('imethodNote'),
+    iInside:$('iInside'),insideNote:$('insideNote'),
+    modeNote:$('modeNote'),projNote:$('projNote')};
+
+  let state={xs:[],ys:[],models:[],sel:0,mode:'fit'};
+
+  el.imethod.innerHTML = INTERP.map(m=>'<option value="'+m.id+'">'+m.label+'</option>').join('');
+  el.imethod.value='monotone';
+  const curMethod=()=>INTERP.find(m=>m.id===el.imethod.value)||INTERP[0];
+
+  function interpFn(){
+    const p=parseData(el.data.value, parseFloat(el.start.value)||0);
+    const method=el.imethod.value, extrap=el.iExtrap.checked, round=el.doRound.checked;
+    const ms=slopesFor(method, p.xs, p.ys);
+    return {xs:p.xs, ys:p.ys, ms, method, extrap,
+      f:x=>{ const v=interpAt(method,p.xs,p.ys,ms,x,extrap); return round?Math.round(v):v; }};
+  }
+
+  function setMode(mode){
+    state.mode=mode;
+    [].forEach.call(document.querySelectorAll('.tab'),b=>b.classList.toggle('on',b.dataset.mode===mode));
+    [].forEach.call(document.querySelectorAll('.modeFit'),n=>n.hidden = mode!=='fit');
+    [].forEach.call(document.querySelectorAll('.modeInterp'),n=>n.hidden = mode!=='interp');
+    el.modeNote.textContent = mode==='fit'
+      ? 'Finds one maths formula that approximates your numbers. Compact, but not exact.'
+      : 'Passes through every number exactly, and you choose how it moves between them.';
+    if(mode==='fit') scheduleFit(); else renderInterp();
+  }
+
+  /* ---- between-points mode render ---- */
+  function renderInterp(){
+    const I=interpFn(), M=curMethod();
+    $('hFit').textContent='Between points';
+    $('hTbl').textContent='Your points, and the halfway values';
+    el.imethodNote.textContent=M.blurb;
+
+    if(I.xs.length<2){
+      el.fitErr.innerHTML='<div class="err">Need at least 2 numbers.</div>';
+      el.code.textContent='—'; el.formula.textContent='—'; el.stats.innerHTML='';
+      el.tbl.innerHTML=''; el.proj.innerHTML=''; drawPlot(null); return;
+    }
+    el.fitErr.innerHTML='';
+    state.xs=I.xs; state.ys=I.ys;
+
+    el.formula.textContent = M.label+' through '+I.xs.length+' points — exact at every one';
+    el.stats.innerHTML='<span>error at your points <b class="ok">0</b></span>'+
+      '<span>points <b>'+I.xs.length+'</b></span>'+
+      '<span>table size <b>'+(I.xs.length*(I.ms?3:2))+'</b> numbers</span>'+
+      (I.extrap?'<span class="warn">continues past ends</span>':'<span class="ok">holds past ends</span>');
+    const inside=el.iInside.checked;
+    el.code.textContent = genInterpCode(el.lang.value,
+      {name:safeName(el.fname.value), xs:I.xs, ys:I.ys, method:I.method,
+       extrap:I.extrap, round:el.doRound.checked, inside:inside});
+
+    const S=ISYN[el.lang.value];
+    el.insideNote.innerHTML = !inside
+      ? 'Tables sit next to the function — copy both.'
+      : S.alloc
+        ? '<span style="color:var(--warn)">Heads up:</span> in '+LANGS[el.lang.value].label+
+          ' this rebuilds the table on every call. Fine for menus and setup; if you call this every frame, untick it and hoist the tables out.'
+        : 'Free here — '+LANGS[el.lang.value].label+' marks them <code>static</code>/<code>const</code>, so they are built once.';
+
+    // does the chosen method overshoot between points?
+    let over=0;
+    for(let i=0;i<I.xs.length-1;i++){
+      const lo=Math.min(I.ys[i],I.ys[i+1]), hi=Math.max(I.ys[i],I.ys[i+1]);
+      for(let k=1;k<12;k++){
+        const v=I.f(I.xs[i]+(I.xs[i+1]-I.xs[i])*k/12);
+        over=Math.max(over, v-hi, lo-v);
+      }
+    }
+    const yr=Math.max(1e-9,Math.max.apply(null,I.ys)-Math.min.apply(null,I.ys));
+    el.extrapWarn.innerHTML = over>yr*0.02
+      ? '<div class="warnbox">This curve bulges up to '+human(over)+' beyond your values between points. '+
+        'Switch to <b>Cubic — no overshoot</b> or <b>Linear</b> if that matters (e.g. a weight that must never go negative).</div>'
+      : '';
+
+    // each point, plus the halfway value after it — that is what "between" means
+    let rows='<tr><th>x</th><th>f(x)</th><th></th></tr>';
+    for(let i=0;i<I.xs.length;i++){
+      rows+='<tr><td>'+human(I.xs[i])+'</td><td class="ok">'+human(I.f(I.xs[i]))+'</td><td style="color:var(--dim)">point</td></tr>';
+      if(i<I.xs.length-1){
+        const mx=(I.xs[i]+I.xs[i+1])/2;
+        rows+='<tr><td style="color:var(--dim)">'+human(mx)+'</td><td style="color:var(--acc2)">'+human(I.f(mx))+
+              '</td><td style="color:var(--dim)">halfway</td></tr>';
+      }
+    }
+    el.tbl.innerHTML=rows;
+
+    const xmax=Math.max.apply(null,I.xs), xmin=Math.min.apply(null,I.xs);
+    const span=Math.max(1e-9,xmax-xmin);
+    let prows='<tr><th>x</th><th>f(x)</th></tr>';
+    for(let i=1;i<=5;i++){
+      const x = xmax>0 ? xmax*Math.pow(2,i) : xmax+span*Math.pow(2,i);
+      const v=I.f(x);
+      prows+='<tr><td title="'+x+'">'+human(x)+'</td><td class="'+(isFinite(v)?'ok':'bad')+'" title="'+v+'">'+human(v)+'</td></tr>';
+    }
+    el.proj.innerHTML=prows;
+    el.projNote.textContent = I.extrap
+      ? 'Continuing at the end slope, so it keeps rising or falling forever.'
+      : 'Holding the end value, so it stays flat past your last point.';
+
+    drawPlot({predict:I.f});
+    updateTry();
+  }
+
+  function activeFn(){
+    if(state.mode==='interp') return interpFn().f;
+    const m=state.models[state.sel];
+    if(!m) return null;
+    const o=opts();
+    return x=>{
+      let v=m.predict(x);
+      if(o.clamp) v=Math.max(o.lo,Math.min(o.hi,v));
+      if(o.round) v=Math.round(v);
+      return v;
+    };
+  }
+
+  function safeName(s){ s=(s||'curve').trim().replace(/[^A-Za-z0-9_]/g,'_'); if(/^[0-9]/.test(s)) s='_'+s; return s||'curve'; }
+  function opts(){
+    const lo=Math.min.apply(null,state.ys), hi=Math.max.apply(null,state.ys);
+    return {round:el.doRound.checked, clamp:el.doClamp.checked, name:safeName(el.fname.value), lo, hi};
+  }
+  const trim = human;   // plain decimals, exponents only at extremes
+  function pct(v){ return v*100<1e-9 ? '0%' : (v*100).toPrecision(3)+'%'; }
+
+  let timer=null;
+  function scheduleFit(){
+    el.models.classList.add('busy');
+    clearTimeout(timer);
+    timer=setTimeout(recompute, 30);   // let the UI paint before the heavy fit
+  }
+
+  function recompute(){
+    const p = parseData(el.data.value, parseFloat(el.start.value)||0);
+    state.xs=p.xs; state.ys=p.ys;
+    el.fitErr.innerHTML='';
+    if(p.xs.length<2){
+      el.fitErr.innerHTML='<div class="err">Need at least 2 numbers.</div>';
+      state.models=[]; el.models.classList.remove('busy'); render(); return;
+    }
+    if(new Set(p.xs).size!==p.xs.length)
+      el.fitErr.innerHTML='<div class="err">Two entries share the same x — no function can return two different values for one input.</div>';
+    state.metric = resolveMetric(el.metric.value, p.ys);
+    state.models = fitAll(p.xs, p.ys, el.metric.value, el.prio.value);
+    el.models.classList.remove('busy');
+
+    const r = relIsSane(p.ys);
+    let note='';
+    if(el.metric.value==='auto')
+      note = 'Auto chose <b>'+(state.metric==='rel'?'percentage':'absolute')+' error</b> — '+
+        (r.hasZero ? 'your data contains zeros, and "percent off" is undefined at zero.'
+         : r.mixedSign ? 'your data crosses zero, so percentages are unstable there.'
+         : r.ratio<=20 ? 'your values are all a similar size, so percentage and absolute agree anyway.'
+         : 'your values span '+Math.round(r.ratio)+'×, so equal <em>proportional</em> accuracy matters more.');
+    else if(el.metric.value==='rel' && !r.ok)
+      note = '<span style="color:var(--warn)">Percentage error is ill-defined here ('+
+        (r.hasZero?'your data contains zeros':'your data crosses zero')+
+        '). Weights are capped so those points cannot dominate, but Auto or Absolute will fit better.</span>';
+    el.metricNote.innerHTML = note ? '<div class="note">'+note+'</div>' : '';
+    if(!state.models.length){ el.fitErr.innerHTML='<div class="err">Could not fit any curve to this data.</div>'; render(); return; }
+    if(el.autoPick.checked) state.sel=0;
+    if(state.sel>=state.models.length) state.sel=0;
+    render();
+  }
+
+  function render(){
+    if(state.mode!=='fit') return;
+    $('hFit').textContent='Fit';
+    $('hTbl').textContent='Accuracy per point';
+    const rel = state.metric==='rel';
+    el.models.innerHTML = state.models.map((m,i)=>{
+      const perfect = m.stats.maxRel<1e-9 && m.stats.maxAbs<1e-9;
+      const shown = rel ? pct(m.stats.maxRel) : '±'+trim(m.stats.maxAbs);
+      const tag = !m.sane.stable ? '<span style="color:var(--bad);font-size:11px"> ·unstable</span>'
+                : !m.sane.tail   ? '<span style="color:var(--warn);font-size:11px"> ·wild past end</span>'
+                : !m.sane.monoOK ? '<span style="color:var(--warn);font-size:11px"> ·not monotonic</span>'
+                : m.stats.adj===-Infinity ? '<span style="color:var(--dim);font-size:11px"> ·exact</span>' : '';
+      return '<div class="m'+(i===state.sel?' on':'')+'" data-i="'+i+'" title="'+m.k+' parameters">'+
+        '<span>'+m.label+tag+'</span>'+
+        '<span class="r2'+(perfect?' perfect':'')+'">'+shown+'</span></div>';
+    }).join('') || '<div class="m" style="color:var(--dim)">no fits</div>';
+    el.mcount.textContent = state.models.length ? state.models.length+' models' : '';
+    [].forEach.call(el.models.querySelectorAll('.m[data-i]'),d=>{
+      d.onclick=()=>{ state.sel=+d.dataset.i; el.autoPick.checked=false; render(); };
+    });
+
+    const m = state.models[state.sel];
+    if(!m){ el.code.textContent='—'; el.formula.textContent='—'; el.stats.textContent='';
+            el.tbl.innerHTML=''; el.extrapWarn.innerHTML=''; drawPlot(null); el.tryOut.textContent=''; return; }
+
+    el.formula.textContent = m.pretty(m.p).replace(/\+ -/g,'− ');
+    const s=m.stats;
+    const cls = v=>v<0.001?'ok':v<0.02?'warn':'bad';
+    el.stats.innerHTML = (rel
+        ? '<span>max error <b class="'+cls(s.maxRel)+'">'+pct(s.maxRel)+'</b></span><span>abs <b>'+(s.maxAbs<1e-9?'0':s.maxAbs.toPrecision(3))+'</b></span>'
+        : '<span>max error <b class="'+cls(s.rmse/(Math.max.apply(null,state.ys)-Math.min.apply(null,state.ys)||1))+'">±'+(s.maxAbs<1e-9?'0':s.maxAbs.toPrecision(3))+'</b></span><span>typical ±<b>'+s.rmse.toPrecision(3)+'</b></span>')+
+      '<span>R² <b>'+s.r2.toFixed(6)+'</b></span>'+
+      '<span>params <b>'+m.k+'</b>/'+state.xs.length+' pts</span>';
+
+    const o=opts();
+    el.code.textContent = genCode(m, el.lang.value, o);
+
+    const risk=extrapolationRisk(m, state.xs, state.ys);
+    let warn='';
+    if(!m.sane.stable)
+      warn='This curve has a pole or blow-up <em>between</em> your own data points — it hits your values but goes to infinity somewhere in the gaps. Pick a different model.';
+    else if(risk.blew || risk.ratio>25)
+      warn='Matches your points, but goes wild outside them'
+        +(risk.blew?' (undefined in places)':' — it moves ~'+Math.round(risk.ratio)+'× your data range just past the last point')
+        +'. Fine if you only ever call it inside your data range; otherwise try priority "Simplest curve".';
+    else if(!m.sane.monoOK && m.sane.dataMono)
+      warn='Your data only ever goes one direction, but this curve turns around inside the range. Fine if that is what you want — otherwise pick a model without this tag.';
+    el.extrapWarn.innerHTML = warn ? '<div class="warnbox">'+warn+'</div>' : '';
+
+    const applied = x=>{
+      let v=m.predict(x);
+      if(o.clamp) v=Math.max(o.lo,Math.min(o.hi,v));
+      if(o.round) v=Math.round(v);
+      return v;
+    };
+    let rows='<tr><th>x</th><th>your y</th><th>f(x)</th><th>diff</th><th>%</th></tr>';
+    for(let i=0;i<state.xs.length;i++){
+      const v=applied(state.xs[i]), d=v-state.ys[i];
+      const r=state.ys[i]!==0?Math.abs(d/state.ys[i]):(d===0?0:Infinity);
+      const c = Math.abs(d)<1e-9?'ok':r<0.02?'warn':'bad';
+      rows+='<tr><td>'+trim(state.xs[i])+'</td><td>'+trim(state.ys[i])+'</td><td>'+trim(v)+'</td>'+
+            '<td class="'+c+'">'+(d===0?'0':(d>0?'+':'')+trim(d))+'</td>'+
+            '<td class="'+c+'">'+(isFinite(r)?pct(r):'—')+'</td></tr>';
+    }
+    el.tbl.innerHTML=rows;
+
+    // ---- projections: 5 doublings past the largest x ----
+    const xmax=Math.max.apply(null,state.xs);
+    const xmin=Math.min.apply(null,state.xs);
+    const span=Math.max(1e-9,xmax-xmin);
+    const short=v=>{
+      if(!isFinite(v)) return '—';
+      const a=Math.abs(v);
+      if(a>=1e5||(a<1e-3&&a>0)) return v.toExponential(1).replace('e+','e');
+      return String(Math.round(v*100)/100);
+    };
+    let prows='<tr><th>x</th><th>f(x)</th><th>vs last</th></tr>';
+    const lastY=applied(xmax);
+    for(let i=1;i<=5;i++){
+      const x = xmax>0 ? xmax*Math.pow(2,i) : xmax+span*Math.pow(2,i);
+      let v; try{ v=applied(x); }catch(e){ v=NaN; }
+      const okv=isFinite(v);
+      const growth = (okv && Math.abs(lastY)>1e-9) ? (v/lastY) : NaN;
+      const cl = !okv ? 'bad' : Math.abs(v)>Math.abs(lastY)*1000+1e6 ? 'bad'
+               : Math.abs(v)>Math.abs(lastY)*10+100 ? 'warn' : 'ok';
+      prows+='<tr><td title="'+x+'">'+short(x)+'</td>'+
+             '<td class="'+cl+'" title="'+(okv?v:'undefined')+'">'+(okv?short(v):'undef')+'</td>'+
+             '<td class="'+cl+'" title="'+growth+'">'+(isFinite(growth)?short(growth)+'×':'—')+'</td></tr>';
+    }
+    el.proj.innerHTML=prows;
+
+    drawPlot(m);
+    updateTry();
+  }
+
+  function updateTry(){
+    const fn=activeFn();
+    const x=parseFloat(el.tryX.value);
+    if(!fn||isNaN(x)){el.tryOut.textContent='';return;}
+    const v=fn(x);
+    el.tryOut.innerHTML='<span style="color:var(--dim)">f('+human(x)+') = </span><b style="color:var(--acc);margin-left:6px">'+human(v)+'</b>';
+  }
+
+  function drawPlot(m){
+    const cv=el.plot, ctx=cv.getContext('2d');
+    // render at the element's real size × device pixel ratio, so nothing is
+    // stretched and text stays crisp on hi-dpi screens
+    const dpr=window.devicePixelRatio||1;
+    const W=cv.clientWidth||600, H=cv.clientHeight||300;
+    if(cv.width!==Math.round(W*dpr)||cv.height!==Math.round(H*dpr)){
+      cv.width=Math.round(W*dpr); cv.height=Math.round(H*dpr);
+    }
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,W,H);
+    if(!state.xs.length) return;
+    const P=38;
+    const xmin=Math.min.apply(null,state.xs), xmax=Math.max.apply(null,state.xs);
+    const xr=Math.max(1e-9,xmax-xmin);
+    const vxMin=xmin-xr*0.08, vxMax=xmax+xr*0.3;
+
+    const samples=[];
+    if(m) for(let i=0;i<=700;i++){
+      const x=vxMin+(vxMax-vxMin)*i/700;
+      const v=m.predict(x);
+      samples.push([x, isFinite(v)?v:NaN]);
+    }
+    let ymin=Math.min.apply(null,state.ys), ymax=Math.max.apply(null,state.ys);
+    const dyRaw=Math.max(ymax-ymin,1);
+    samples.forEach(p=>{ if(isFinite(p[1])){ ymin=Math.min(ymin,p[1]); ymax=Math.max(ymax,p[1]); }});
+    ymax=Math.min(ymax, Math.max.apply(null,state.ys)+dyRaw*1.5);
+    ymin=Math.max(ymin, Math.min.apply(null,state.ys)-dyRaw*1.0);
+    let yr=ymax-ymin; if(yr<1e-9){yr=1;ymax+=0.5;ymin-=0.5;}
+    ymin-=yr*0.08; ymax+=yr*0.08; yr=ymax-ymin;
+
+    const L=52, R=14, T=14, B=26;
+    const X=x=>L+(x-vxMin)/(vxMax-vxMin)*(W-L-R);
+    const Y=y=>H-B-(y-ymin)/yr*(H-T-B);
+
+    ctx.strokeStyle='#1d242e'; ctx.lineWidth=1; ctx.fillStyle='#6b7887'; ctx.font='11px ui-monospace,monospace';
+    for(let i=0;i<=5;i++){
+      const y=ymin+yr*i/5, py=Y(y);
+      ctx.beginPath();ctx.moveTo(L,py);ctx.lineTo(W-R,py);ctx.stroke();
+      ctx.textAlign='right';ctx.fillText(trim(y),L-6,py+3.5);
+    }
+    for(let i=0;i<=6;i++){
+      const x=vxMin+(vxMax-vxMin)*i/6, px=X(x);
+      ctx.beginPath();ctx.moveTo(px,T);ctx.lineTo(px,H-B);ctx.stroke();
+      ctx.textAlign='center';ctx.fillText(trim(x),px,H-B+14);
+    }
+
+    if(m){
+      const drawSeg=(filter,color)=>{
+        ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();
+        let pen=false;
+        samples.forEach(p=>{
+          if(!filter(p[0])||!isFinite(p[1])||p[1]>ymax+yr*3||p[1]<ymin-yr*3){pen=false;return;}
+          const px=X(p[0]),py=Y(p[1]);
+          if(!pen){ctx.moveTo(px,py);pen=true;}else ctx.lineTo(px,py);
+        });
+        ctx.stroke();
+      };
+      drawSeg(x=>x<xmin||x>xmax,'#f0883e');
+      drawSeg(x=>x>=xmin&&x<=xmax,'#7ee787');
+    }
+
+    state.xs.forEach((x,i)=>{
+      const px=X(x),py=Y(state.ys[i]);
+      if(py<-50||py>H+50) return;
+      ctx.fillStyle='#79c0ff';ctx.beginPath();ctx.arc(px,py,3.5,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle='#0b0f14';ctx.lineWidth=1.5;ctx.stroke();
+    });
+  }
+
+  const redraw=()=>{ state.mode==='interp' ? renderInterp() : render(); };
+  const dataChanged=()=>{ state.mode==='interp' ? renderInterp() : scheduleFit(); };
+
+  ['input','change'].forEach(ev=>{
+    el.data.addEventListener(ev,dataChanged);
+    el.start.addEventListener(ev,dataChanged);
+  });
+  [el.metric,el.prio].forEach(n=>n.addEventListener('change',scheduleFit));
+  el.autoPick.addEventListener('change',()=>{ if(el.autoPick.checked) state.sel=0; render(); });
+  [el.fname,el.doRound,el.doClamp].forEach(n=>n.addEventListener('input',redraw));
+  el.lang.addEventListener('change',redraw);
+  el.tryX.addEventListener('input',updateTry);
+  [el.imethod,el.iExtrap,el.iInside].forEach(n=>n.addEventListener('change',renderInterp));
+  [].forEach.call(document.querySelectorAll('.tab'),b=>{ b.onclick=()=>setMode(b.dataset.mode); });
+  [].forEach.call(document.querySelectorAll('.chip'),c=>{
+    c.onclick=()=>{ el.data.value=c.dataset.set; dataChanged(); };
+  });
+  $('copy').onclick=function(){
+    const t=el.code.textContent, btn=this;
+    const done=()=>{btn.textContent='Copied';setTimeout(()=>btn.textContent='Copy',1200);};
+    navigator.clipboard.writeText(t).then(done,()=>{
+      const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);
+      ta.select();document.execCommand('copy');ta.remove();done();
+    });
+  };
+  $('dl').onclick=function(){
+    const L=LANGS[el.lang.value];
+    const blob=new Blob([el.code.textContent],{type:'text/plain'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob); a.download=safeName(el.fname.value)+'.'+L.ext;
+    a.click(); URL.revokeObjectURL(a.href);
+  };
+  window.addEventListener('resize',()=>{
+    if(state.mode==='interp') drawPlot({predict:interpFn().f});
+    else drawPlot(state.models[state.sel]);
+  });
+
+  setMode('fit');
+})();
+</script>
+</body>
+</html>
