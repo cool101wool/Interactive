@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UNICODE STAR GENERATOR</title>
+<style>
+  :root {
+    --paper: #f2efe6;
+    --ink: #1b1a17;
+    --muted: #7d7869;
+    --rule: #d6d0c0;
+    --hot: #2f4bd8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 40px 20px 80px;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  header { border-bottom: 2px solid var(--ink); padding-bottom: 14px; margin-bottom: 24px; }
+  h1 { font-size: 15px; letter-spacing: .18em; text-transform: uppercase; margin: 0 0 6px; }
+  header p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .field { margin-bottom: 22px; }
+  label.lead { display: block; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 8px; }
+  .amount { display: flex; align-items: center; gap: 14px; }
+  input[type=range] { flex: 1; accent-color: var(--hot); }
+  input[type=number], input.base {
+    font: inherit;
+    padding: 8px 10px;
+    border: 1px solid var(--ink);
+    background: #fff;
+    color: var(--ink);
+  }
+  input[type=number] { width: 90px; }
+  input.base { width: 120px; font-size: 18px; text-align: center; }
+  .checks { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+  .chk { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+  .chk input { accent-color: var(--hot); width: 16px; height: 16px; }
+  .chk .g { font-size: 20px; }
+  .chk .c { color: var(--muted); font-size: 11px; }
+  .toggle { display: flex; align-items: center; gap: 9px; font-size: 13px; }
+  .toggle input { accent-color: var(--hot); width: 16px; height: 16px; }
+  fieldset { border: 1px solid var(--rule); padding: 14px 16px; margin: 0; }
+  fieldset[disabled] { opacity: .4; }
+  legend { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; padding: 0 6px; }
+  .out {
+    margin: 0 0 12px;
+    font-size: 22px;
+    font-weight: 400;
+    line-height: 1.25;
+    min-height: 40px;
+    max-height: 140px;
+    overflow: hidden;
+    word-break: break-all;
+    cursor: pointer;
+    padding: 10px 12px;
+    background: #fff;
+    border: 1px solid var(--ink);
+  }
+  .out:focus-visible, .out.picked { outline: 2px solid var(--hot); outline-offset: 1px; }
+  .actions { display: flex; align-items: center; gap: 14px; }
+  .copy {
+    font: inherit;
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    padding: 11px 18px;
+    color: var(--paper);
+    background: var(--ink);
+    border: none;
+    cursor: pointer;
+  }
+  .copy:hover, .copy.done { background: var(--hot); }
+  .copy:focus-visible { outline: 2px solid var(--hot); outline-offset: 2px; }
+  .stat { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Unicode Star Generator</h1>
+    <p>Pick a base symbol, choose how many combining marks to pile on, and copy the result.</p>
+  </header>
+
+  <div class="field">
+    <label class="lead" for="base">Stack onto</label>
+    <input class="base" id="base" type="text" value="'" maxlength="8">
+  </div>
+
+  <div class="field">
+    <label class="lead" for="range">Total stackers</label>
+    <div class="amount">
+      <input id="range" type="range" min="0" max="3000" value="900">
+      <input id="num" type="number" min="0" max="3000" value="900">
+    </div>
+  </div>
+
+  <div class="field">
+    <label class="toggle"><input id="eff" type="checkbox"> Efficient mode (only the marks below)</label>
+  </div>
+
+  <div class="field">
+    <fieldset id="effset" disabled>
+      <legend>Efficient marks</legend>
+      <div class="checks">
+        <label class="chk"><input type="checkbox" data-cp="036d" checked><span class="g">&#x36d;</span><span class="c">U+036D</span></label>
+        <label class="chk"><input type="checkbox" data-cp="aa31" checked><span class="g">&#xaa31;</span><span class="c">U+AA31</span></label>
+        <label class="chk"><input type="checkbox" data-cp="a9e5" checked><span class="g">&#xa9e5;</span><span class="c">U+A9E5</span></label>
+      </div>
+    </fieldset>
+  </div>
+
+  <h6 class="out" id="out" tabindex="0" title="Click to select"></h6>
+  <div class="actions">
+    <button class="copy" id="copy" type="button">Copy</button>
+    <button class="copy" id="orig" type="button">The original star</button>
+    <span class="stat" id="stat"></span>
+  </div>
+</div>
+
+<script>
+  var FULL = ["\u0957","\ua9e5","\u0944","\u0ece","\uaa31","\u06d7","\u036d","\u07af","\u07ad"];
+
+  var baseEl = document.getElementById('base');
+  var range = document.getElementById('range');
+  var num = document.getElementById('num');
+  var eff = document.getElementById('eff');
+  var effset = document.getElementById('effset');
+  var effBoxes = effset.querySelectorAll('input[type=checkbox]');
+  var out = document.getElementById('out');
+  var stat = document.getElementById('stat');
+  var copy = document.getElementById('copy');
+
+  function activeMarks() {
+    if (!eff.checked) return FULL;
+    var picked = [];
+    effBoxes.forEach(function (b) {
+      if (b.checked) picked.push(String.fromCodePoint(parseInt(b.dataset.cp, 16)));
+    });
+    return picked;
+  }
+
+  function build() {
+    var base = baseEl.value || "'";
+    var n = parseInt(num.value, 10) || 0;
+    var marks = activeMarks();
+    var s = base;
+    if (marks.length) {
+      var per = Math.floor(n / marks.length);
+      var rem = n % marks.length;
+      for (var m = 0; m < marks.length; m++) {
+        var count = per + (m < rem ? 1 : 0);
+        for (var i = 0; i < count; i++) s += marks[m];
+      }
+    }
+    out.textContent = s;
+    stat.textContent = (marks.length ? n : 0) + ' marks · ' + s.length + ' code units';
+    return s;
+  }
+
+  function sync(from) {
+    var v = Math.max(0, Math.min(3000, parseInt(from.value, 10) || 0));
+    range.value = v; num.value = v; build();
+  }
+
+  range.addEventListener('input', function () { sync(range); });
+  num.addEventListener('input', function () { sync(num); });
+  baseEl.addEventListener('input', build);
+  eff.addEventListener('change', function () {
+    effset.disabled = !eff.checked;
+    build();
+  });
+  effBoxes.forEach(function (b) { b.addEventListener('change', build); });
+
+  out.addEventListener('click', function () {
+    var r = document.createRange();
+    r.selectNodeContents(out);
+    var sel = window.getSelection();
+    sel.removeAllRanges(); sel.addRange(r);
+    out.classList.add('picked');
+  });
+  document.addEventListener('selectionchange', function () {
+    if (window.getSelection().toString() !== out.textContent) out.classList.remove('picked');
+  });
+
+  copy.addEventListener('click', function () {
+    var text = out.textContent;
+    var done = function () {
+      copy.textContent = 'Copied';
+      copy.classList.add('done');
+      setTimeout(function () { copy.textContent = 'Copy'; copy.classList.remove('done'); }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { fb(text, done); });
+    } else { fb(text, done); }
+  });
+
+  var ORDER = ["\u0957","\ua9e5","\u0944","\u0ece","\uaa31","\u06d7","\u036d","\u07af","\u07ad"];
+  var ORIGINAL = "'";
+  ORDER.forEach(function (mk) { for (var i = 0; i < 100; i++) ORIGINAL += mk; });
+
+  var orig = document.getElementById('orig');
+  orig.addEventListener('click', function () {
+    var done = function () {
+      orig.textContent = 'Copied';
+      orig.classList.add('done');
+      setTimeout(function () { orig.textContent = 'The original star'; orig.classList.remove('done'); }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(ORIGINAL).then(done, function () { fb(ORIGINAL, done); });
+    } else { fb(ORIGINAL, done); }
+  });
+
+  function fb(text, done) {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); done(); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+
+  build();
+</script>
+</body>
+</html>
