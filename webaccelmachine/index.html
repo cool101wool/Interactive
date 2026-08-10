@@ -621,10 +621,25 @@ const spriteCache=new Map();
 // Every cell carries a rotation and shows it -- generator, mover, both
 // rotators, push, slide, enemy and trash. Only the wall has no oriented form.
 const normRot=(t,r)=>t===T_WALL?0:r;
+/* Sprites are baked at a fixed size and cached by that size. That is fine for a
+   ladder of ~24 fixed zoom levels, but pinch zoom is continuous: every frame
+   asks for a slightly different fractional size, so every frame baked nine
+   fresh canvases that were never reused and never freed -- a two-second pinch
+   allocated over a hundred of them. Sizes are therefore snapped to a small set
+   of rungs, and the caller scales the nearest rung to the exact size it wants.
+   Drawing a 37px cell from a 32px sprite costs one scaled blit; baking a
+   bespoke 37px sprite costs a full rasterisation plus permanent memory. */
+const SPRITE_RUNGS=[8,12,16,24,32,48,64,96,128];
+function spriteSize(size){
+  if(size<=SPRITE_RUNGS[0]) return Math.max(1,Math.round(size));
+  for(const r of SPRITE_RUNGS) if(size<=r) return r;
+  return SPRITE_RUNGS[SPRITE_RUNGS.length-1];
+}
 function spriteFor(t,r,size){
-  const key=t+"|"+normRot(t,r)+"|"+size;
+  const px=spriteSize(size);
+  const key=t+"|"+normRot(t,r)+"|"+px;
   let s=spriteCache.get(key);
-  if(!s){ s=makeSprite(t,r,size); spriteCache.set(key,s); }
+  if(!s){ s=makeSprite(t,r,px); spriteCache.set(key,s); }
   return s;
 }
 function makeSprite(t,r,size){
@@ -1597,7 +1612,7 @@ function drawPlus(px,py,z,color){
 function drawCell(w,i,t,c,px,py,z,al){
   const rf=al<1?w.rotFrom.get(i):undefined;
   if(rf===undefined||t===T_WALL){
-    X.drawImage(spriteFor(t,c&3,z),px,py);
+    X.drawImage(spriteFor(t,c&3,z),px,py,z,z);
     return;
   }
   let d=((c&3)-rf+4)&3;
@@ -1605,7 +1620,7 @@ function drawCell(w,i,t,c,px,py,z,al){
   X.save();
   X.translate(px+z/2,py+z/2);
   X.rotate((rf+d*al)*Math.PI/2);
-  X.drawImage(spriteFor(t,0,z),-z/2,-z/2);
+  X.drawImage(spriteFor(t,0,z),-z/2,-z/2,z,z);
   X.restore();
 }
 /* Below the size at which sprites are drawn, a cell is a flat block of colour --
@@ -1647,8 +1662,8 @@ function rasterLayer(g,sx,sy,z,x0,x1,y0,y1,al,doMove,clip){
     const py0=Math.max(y0,maskBox[1]), py1=Math.min(y1,maskBox[3]);
     for(let y=py0;y<=py1;y++)for(let x=px0;x<=px1;x++){
       if(!placeMask[y*world.W+x]) continue;
-      const qx0=Math.max(cx0,sx+x*z), qx1=Math.min(cx1,sx+x*z+z);
-      const qy0=Math.max(cy0,sy+y*z), qy1=Math.min(cy1,sy+y*z+z);
+      const qx0=Math.max(cx0,Math.round(sx+x*z)), qx1=Math.min(cx1,Math.round(sx+x*z+z));
+      const qy0=Math.max(cy0,Math.round(sy+y*z)), qy1=Math.min(cy1,Math.round(sy+y*z+z));
       for(let yy=qy0;yy<qy1;yy++){ let o=yy*W+qx0; for(let xx=qx0;xx<qx1;xx++) U32[o++]=PACK_PLUS; }
     }
   }
@@ -1701,8 +1716,13 @@ function rasterLayer(g,sx,sy,z,x0,x1,y0,y1,al,doMove,clip){
           }
         }
         const col=avgRGBA(t);
-        const ex0=Math.max(cx0,px), ex1=Math.min(cx1,px+z);
-        const ey0=Math.max(cy0,py), ey1=Math.min(cy1,py+z);
+        /* These index a flat pixel buffer, so they must be whole numbers. A
+           fractional start makes U32[o++] a non-integer index, which a typed
+           array discards without complaint -- the cell simply never appears.
+           Harmless while zoom was a ladder of integers; pinch zoom made it a
+           vanishing act. */
+        const ex0=Math.max(cx0,Math.round(px)), ex1=Math.min(cx1,Math.round(px+z));
+        const ey0=Math.max(cy0,Math.round(py)), ey1=Math.min(cy1,Math.round(py+z));
         for(let yy=ey0;yy<ey1;yy++){ let o=yy*W+ex0; for(let xx=ex0;xx<ex1;xx++) U32[o++]=col; }
       }
     }
@@ -1958,7 +1978,7 @@ function drawBoardOverlays(){
       const c=carry.cells[cy*carry.w+cx];
       if(!c) continue;
       const t2=c>>2;
-      if(z>=8) X.drawImage(spriteFor(t2,c&3,z),sx+(h.x+cx)*z,sy+(h.y+cy)*z);
+      if(z>=8) X.drawImage(spriteFor(t2,c&3,z),sx+(h.x+cx)*z,sy+(h.y+cy)*z,z,z);
       else{X.fillStyle=avgColor(t2);X.fillRect(sx+(h.x+cx)*z,sy+(h.y+cy)*z,z,z);}
     }
     X.globalAlpha=1;
@@ -1966,7 +1986,7 @@ function drawBoardOverlays(){
   if(dragCell){
     X.globalAlpha=.85;
     const t2=dragCell.c>>2;
-    if(z>=8) X.drawImage(spriteFor(t2,dragCell.c&3,z),Math.round(M.x-z/2),Math.round(M.y-z/2));
+    if(z>=8) X.drawImage(spriteFor(t2,dragCell.c&3,z),Math.round(M.x-z/2),Math.round(M.y-z/2),z,z);
     else{X.fillStyle=avgColor(t2);X.fillRect(M.x-z/2,M.y-z/2,z,z);}
     X.globalAlpha=1;
   }
@@ -2389,7 +2409,7 @@ function screenControls(){
   }
 }
 function paletteIcon(i,x,y,s){
-  if(i<9){ X.drawImage(spriteFor(PALETTE[i],selRot,s),x,y); return; }
+  if(i<9){ X.drawImage(spriteFor(PALETTE[i],selRot,s),x,y,s,s); return; }
   X.fillStyle="#111"; X.fillRect(x,y,s,s);
   X.strokeStyle="#444"; X.lineWidth=Math.max(1,U); X.strokeRect(x+U/2,y+U/2,s-U,s-U);
   X.fillStyle=WHITE;
@@ -2507,7 +2527,7 @@ function screenGame(dt){
     const hot=inRect(px,py,bs,bs);
     frame(px,py,bs,bs,hot);
     const isz=Math.round(bs*0.6);
-    if(selTool<9) X.drawImage(spriteFor(PALETTE[selTool],selRot,isz),px+(bs-isz)/2,py+(bs-isz)/2);
+    if(selTool<9) X.drawImage(spriteFor(PALETTE[selTool],selRot,isz),px+(bs-isz)/2,py+(bs-isz)/2,isz,isz);
     else paletteIcon(selTool,px+(bs-isz)/2,py+(bs-isz)/2,isz);
     if(hot&&M.click){selRot=(selRot+1)&3;sfx("click");}
     text("Q / E",px,py+bs+2*U,U,DIM,"left",1);
