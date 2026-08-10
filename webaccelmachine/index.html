@@ -91,6 +91,9 @@ function opaqueBwd(B,p){
 
 class World{
   constructor(w,h){
+    // Same reasoning as the importer: indices must fit a signed 32-bit int.
+    if((w+2)*(h+2)>=2**31)
+      throw new Error(`board too big to index: ${w}x${h}`);
     // counted so the UI can voice what the simulation did this tick
     this.evCreate=0; this.evDestroy=0;
     // Motion tracking for render interpolation: destination index -> the index
@@ -113,12 +116,10 @@ class World{
       this.bits.push(new Uint32Array(this.nwords));
       this.sum.push(new Uint32Array(this.nsum));
     }
-    this.tidx=new Int32Array(this.size); this.ridx=new Int32Array(this.size);
-    for(let yy=0;yy<this.strideT;yy++)
-      for(let xx=0;xx<this.stride;xx++){
-        const i=yy*this.stride+xx, t=xx*this.strideT+yy;
-        this.tidx[i]=t; this.ridx[t]=i;
-      }
+    // The transposed index used to be two Int32 lookup tables -- 8 bytes per
+    // cell, four fifths of the engine's memory. Computed instead: a divide is
+    // cheaper than 8 bytes x however many million cells, and it is only reached
+    // on a vertical push scan.
     // Everything starts BORDER or EMPTY, both opaque. Bits past `size` stay set
     // too: a forward scan must always terminate, and an over-set bit is safe
     // (the border stops us first) whereas an under-set one would run off the end.
@@ -127,6 +128,8 @@ class World{
     this.occ=new Uint32Array(this.nwords);
   }
   idx(x,y){return (y+1)*this.stride+(x+1);}
+  toT(i){ const y=(i/this.stride)|0; return (i-y*this.stride)*this.strideT+y; }
+  fromT(t){ const x=(t/this.strideT)|0; return (t-x*this.strideT)*this.stride+x; }
   clearMotion(){ this.motion.clear(); this.rotFrom.clear(); }
 
   static bucketOf(c){ return TBL_BUCKET[c]; }
@@ -153,7 +156,7 @@ class World{
     const dop=TBL_OPQ[o]^TBL_OPQ[c];
     if(dop){
       if(dop&1) this.obits[0][i>>5]^=(1<<(i&31));
-      if(dop&2){ const t=this.tidx[i]; this.obits[1][t>>5]^=(1<<(t&31)); }
+      if(dop&2){ const t=this.toT(i); this.obits[1][t>>5]^=(1<<(t&31)); }
     }
   }
   place(x,y,c){this.setCell(this.idx(x,y),c);}
@@ -172,7 +175,7 @@ class World{
     else if(t===T_MOVER){ this.bitClear(6+r,n); this.bitSet(6+nr,n); }
     else if(t===T_SLIDE){       // delta is odd, so the axis always flips
       this.obits[0][n>>5]^=(1<<(n&31));
-      const tt=this.tidx[n]; this.obits[1][tt>>5]^=(1<<(tt&31));
+      const tt=this.toT(n); this.obits[1][tt>>5]^=(1<<(tt&31));
     }
   }
 
@@ -193,9 +196,9 @@ class World{
           if(!(TBL_OPQ[c]&omask)){
             if(axis===0) j=fwd?opaqueFwd(this.obits[0],j):opaqueBwd(this.obits[0],j);
             else{
-              let t=this.tidx[j];
+              let t=this.toT(j);
               t=fwd?opaqueFwd(this.obits[1],t):opaqueBwd(this.obits[1],t);
-              j=this.ridx[t];
+              j=this.fromT(t);
             }
             c=g[j];
           }
@@ -352,10 +355,24 @@ function importCode(code,flip=true){
 
   const alloc=()=>{
     if(!(L.W>0&&L.H>0)) throw new Error("bad level dimensions");
-    if(L.W*L.H>4_000_000) throw new Error(`level too big (${L.W}x${L.H})`);
-    L.id=new Uint8Array(L.W*L.H).fill(9);
-    L.rot=new Uint8Array(L.W*L.H);
-    L.place=new Uint8Array(L.W*L.H);
+    /* The old 4-million cap was arbitrary. The genuine ceilings are: every cell
+       index must stay inside a signed 32-bit int, because the bitmaps address
+       cells with >>5 and 1<<(i&31); and the browser has to actually allocate the
+       arrays. Check the first, and let the second report itself rather than
+       guessing a number. */
+    const cells=L.W*L.H;
+    if((L.W+2)*(L.H+2)>=2**31)
+      throw new Error(`level too big to index: ${L.W}x${L.H} is `+
+                      `${cells.toLocaleString()} cells, limit is about 2.1 billion`);
+    try{
+      L.id=new Uint8Array(cells).fill(9);
+      L.rot=new Uint8Array(cells);
+      L.place=new Uint8Array(cells);
+    }catch(e){
+      throw new Error(`not enough memory for ${L.W}x${L.H} (`+
+                      `${cells.toLocaleString()} cells, needs about `+
+                      `${(cells*2.7/1e9).toFixed(1)} GB)`);
+    }
   };
   const put=(pos,v)=>{
     if(pos<0||pos>=L.id.length) return;
@@ -1045,37 +1062,37 @@ function b74e(n){
   let s=""; while(n>0){ s=B74[n%74]+s; n=Math.floor(n/74); }
   return s||"0";
 }
+/* Built in a typed array of base74 VALUES, not by growing a string. The old
+   version concatenated one character per cell and then indexed the result --
+   the same mistake that hung the importer on a 999x999 level, mirrored. On a
+   19-million-cell board that never returned. */
 function exportV3(w,mask,name){
-  let raw="";
-  for(let y=w.H-1;y>=0;y--)
+  const n=w.W*w.H, ST=w.stride;
+  const raw=new Uint8Array(n);
+  let k=0;
+  for(let y=w.H-1;y>=0;y--){                 // stored bottom-up
+    const base=(y+1)*ST+1, mrow=y*w.W;
     for(let x=0;x<w.W;x++){
-      const c=w.g[w.idx(x,y)], t=c>>2, p=mask&&mask[y*w.W+x]?1:0;
-      raw+=(t===T_EMPTY)?B74[72+p]:B74[T_TO_CM[t]*2+(c&3)*18+p];
+      const c=w.g[base+x], t=c>>2, p=mask&&mask[mrow+x]?1:0;
+      raw[k++]=(t===T_EMPTY)?72+p:T_TO_CM[t]*2+(c&3)*18+p;
     }
-  raw=raw.replace(/\{+$/,"");
-  let out="";
-  for(let i=0;i<raw.length;){
-    let j=i+1; while(j<raw.length&&raw[j]===raw[i]) j++;
-    const run=j-i;
-    if(run<4) out+=raw[i].repeat(run);
-    else if(run-1<74) out+=raw[i]+")0"+b74e(run-1);
-    else out+=raw[i]+"(0("+b74e(run-1)+")";
+  }
+  let end=n;
+  while(end>0&&raw[end-1]===72) end--;       // trailing empties are implied
+  const parts=[];
+  for(let i=0;i<end;){
+    let j=i+1;
+    const v=raw[i];
+    while(j<end&&raw[j]===v) j++;
+    const run=j-i, ch=B74[v];
+    if(run<4) parts.push(ch.repeat(run));
+    else if(run-1<74) parts.push(ch+")0"+b74e(run-1));
+    else parts.push(ch+"(0("+b74e(run-1)+")");
     i=j;
   }
-  return `V3;${b74e(w.W)};${b74e(w.H)};${out};;${(name||"").replace(/;/g,"")};0`;
+  return `V3;${b74e(w.W)};${b74e(w.H)};${parts.join("")};;${(name||"").replace(/;/g,"")};0`;
 }
-/* ---------------------------------------------------------------------------
-   STORAGE
 
-   Cookies capped a save at roughly 4KB, which a 100k-cell level blows straight
-   through. This is IndexedDB: hundreds of megabytes, and no per-record ceiling
-   worth worrying about.
-
-   It is asynchronous, so the UI keeps its own in-memory list and redraws from
-   that; the database is written behind it. If IndexedDB is unavailable -- which
-   includes Chrome on file:// pages, same as cookies -- everything still works
-   for the session and only persistence is lost, and the panels say so.
-   --------------------------------------------------------------------------- */
 const DB_NAME="webaccel", DB_VER=1;
 let db=null, dbFailed=false;
 let levelsMem=[], schemMem=[];          // what the UI draws
@@ -1320,6 +1337,48 @@ function checkWin(){
 const canEdit=()=>mode!=="level"||!started;
 let selTool=0, selRot=0;
 const cam={x:0,y:0,z:26};
+/* Zoom is snapped to whole pixels at 1x and above, so cells stay crisp. Below
+   1x a cell is smaller than a pixel, so it goes fractional and the renderer
+   samples instead -- the only way to see a board tens of thousands of cells
+   wide. The floor always allows the whole board to fit. */
+/* A fixed ladder rather than multiply-and-round: with rounding, some notches
+   landed back on the value they started from and the wheel appeared dead. Twelve
+   rungs sit below 1x, where a cell is smaller than a pixel. */
+const ZSTEPS=[1/64,1/48,1/32,1/24,1/16,1/12,1/8,1/6,1/4,1/3,1/2,2/3,
+              1,2,3,4,6,8,12,16,24,32,48,64];
+let camZi=ZSTEPS.indexOf(8);
+const zoomPx=()=>ZSTEPS[camZi];
+function zoomFit(){
+  if(!world) return 8;
+  return Math.min(W/world.W,H/world.H);
+}
+// lowest rung worth allowing: enough to fit the board, never sillier than that
+function zoomLo(){
+  const fit=zoomFit();
+  let lo=0;
+  for(let i=0;i<ZSTEPS.length;i++) if(ZSTEPS[i]<=fit) lo=i;
+  return Math.max(0,Math.min(lo,ZSTEPS.length-1));
+}
+function setZoom(i,ax,ay){
+  const lo=0;                      // the whole ladder; clampCam centres a board
+                                   // that ends up smaller than the window
+  const before=zoomPx();
+  camZi=Math.max(lo,Math.min(ZSTEPS.length-1,i));
+  const wx=(ax+cam.x)/before, wy=(ay+cam.y)/before;
+  cam.x=wx*zoomPx()-ax; cam.y=wy*zoomPx()-ay;
+  clampCam();
+}
+/* The screen centre must stay over the grid. That still lets you push a corner
+   of the board into the middle of the view -- useful when building at an edge --
+   while making it impossible to lose the board off-screen entirely. Anchoring
+   the centre rather than the edges also means it behaves the same whether the
+   board is larger or smaller than the window. */
+function clampCam(){
+  if(!world) return;
+  const z=zoomPx(), bw=world.W*z, bh=world.H*z;
+  cam.x=Math.max(-W/2,Math.min(bw-W/2,cam.x));
+  cam.y=Math.max(-H/2,Math.min(bh-H/2,cam.y));
+}
 const say=(m,bad)=>{toast=m;toastT=now;if(bad)sfx("err");};
 
 /* screen transitions: a short dip to black, so navigation reads as motion */
@@ -1335,8 +1394,12 @@ function newWorld(w,h){
   levelName=""; tickCount=0; playing=false; centreCam();
 }
 function centreCam(){
-  cam.z=Math.max(4,Math.min(40,Math.floor(Math.min(W*0.8/world.W,H*0.72/world.H))));
-  cam.x=(world.W*cam.z-W)/2; cam.y=(world.H*cam.z-H)/2;
+  const fit=Math.min(W*0.92/world.W,H*0.86/world.H);
+  let i=0;
+  for(let k=0;k<ZSTEPS.length;k++) if(ZSTEPS[k]<=fit) i=k;
+  camZi=Math.max(0,Math.min(ZSTEPS.length-1,i));
+  cam.x=(world.W*zoomPx()-W)/2; cam.y=(world.H*zoomPx()-H)/2;
+  clampCam();
 }
 function loadLevel(L){
   world=new World(L.W,L.H);
@@ -1443,6 +1506,32 @@ function rasterLayer(g,sx,sy,z,x0,x1,y0,y1,al,doMove,clip){
     }
   }
   const G=world.g, ST=world.stride, OCC=world.occ;
+  if(z<1){
+    /* A cell is now smaller than a pixel, so walking cells would mean touching
+       millions of them for a screen-sized picture. Walk pixels instead and
+       sample the block each one covers -- four probes, so a lone cell in a
+       sparse region still tends to show rather than being missed entirely. */
+    const inv=1/z;
+    const qx0=Math.max(cx0,Math.max(0,sx)), qx1=Math.min(cx1,Math.min(W,sx+world.W*z));
+    const qy0=Math.max(cy0,Math.max(0,sy)), qy1=Math.min(cy1,Math.min(H,sy+world.H*z));
+    const step=inv/2;
+    for(let py=qy0;py<qy1;py++){
+      const ca=Math.min(world.H-1,Math.max(0,Math.floor((py-sy)*inv)));
+      const cb=Math.min(world.H-1,Math.max(0,Math.floor((py-sy+0.5)*inv)));
+      const ra=(ca+1)*ST+1, rb=(cb+1)*ST+1;
+      let o=py*W+qx0;
+      for(let px=qx0;px<qx1;px++,o++){
+        const xa=Math.min(world.W-1,Math.max(0,Math.floor((px-sx)*inv)));
+        const xb=Math.min(world.W-1,Math.max(0,Math.floor((px-sx+0.5)*inv)));
+        let c=G[ra+xa];
+        if((c>>2)===T_EMPTY) c=G[ra+xb];
+        if((c>>2)===T_EMPTY) c=G[rb+xa];
+        if((c>>2)===T_EMPTY) c=G[rb+xb];
+        if((c>>2)!==T_EMPTY) U32[o]=avgRGBA(c>>2);
+      }
+    }
+    return;
+  }
   for(let y=y0;y<=y1;y++){
     const base=(y+1)*ST+1, lo=base+x0, hi=base+x1;
     const w0=lo>>5, w1=hi>>5;
@@ -1485,7 +1574,7 @@ function drawPlusHighlight(sx,sy,z,x0,x1,y0,y1){
 function drawBoardLayer(clip){
   X.fillStyle="#000"; X.fillRect(clip?clip.x:0,clip?clip.y:0,clip?clip.w:W,clip?clip.h:H);
   if(!world) return;
-  const z=Math.max(1,Math.round(cam.z));
+  const z=zoomPx();
   const sx=Math.round(-cam.x), sy=Math.round(-cam.y);
   // A clip rect lets us repaint just the strip a pan exposed instead of the
   // whole view.
@@ -1532,6 +1621,7 @@ function drawBoardLayer(clip){
     X.stroke();
   }
   const G=world.g, ST=world.stride, useSprites=z>=8, OCC=world.occ;
+  if(z<1) return;                 // handled by the raster path above
   // FAST GRAPHICS turns this off and nothing else; below 8px a sprite has no
   // room for its icon, so that fallback is unconditional.
   const al=alphaNow();
@@ -1658,7 +1748,7 @@ function noteMaskCell(x,y,on){
 function drawBoard(){
   if(!world){ X.fillStyle="#000"; X.fillRect(0,0,W,H); return; }
   const animating=interpOn()&&alphaNow()<1&&(world.motion.size>0||world.rotFrom.size>0);
-  const key=[world.W,world.H,Math.round(cam.x),Math.round(cam.y),Math.round(cam.z),
+  const key=[world.W,world.H,Math.round(cam.x),Math.round(cam.y),camZi,
              W,H,world.rev,maskRev,KEYS.has("b")?1:0].join(",");
   if(animating){
     bkey="";
@@ -1670,10 +1760,10 @@ function drawBoard(){
     }
     if(key!==bkey){
       // everything except the camera position
-      const stamp=[world.W,world.H,Math.round(cam.z),W,H,world.rev,maskRev,
+      const stamp=[world.W,world.H,camZi,W,H,world.rev,maskRev,
                    KEYS.has("b")?1:0].join(",");
       const dx=Math.round(cam.x)-lastCamX, dy=Math.round(cam.y)-lastCamY;
-      const zNow=Math.round(cam.z);
+      const zNow=zoomPx();
       const canScroll=bkey&&stamp===lastStamp&&
                       (dx!==0||dy!==0)&&Math.abs(dx)<W&&Math.abs(dy)<H;
       if(canScroll&&zNow<8&&rasterU32&&rasterW===W&&rasterH===H){
@@ -1705,7 +1795,7 @@ function drawBoard(){
   drawBoardOverlays();
 }
 function drawBoardOverlays(){
-  const z=Math.max(1,Math.round(cam.z));
+  const z=zoomPx();
   const sx=Math.round(-cam.x), sy=Math.round(-cam.y);
   const r=selDrag?normSel(selDrag):sel;
   if(r){
@@ -1742,13 +1832,13 @@ function drawBoardOverlays(){
 // a cell instead of vanishing.
 function hoverCellClamped(){
   if(!world) return null;
-  const z=Math.max(1,Math.round(cam.z));
+  const z=zoomPx();
   const x=Math.floor((M.x+cam.x)/z), y=Math.floor((M.y+cam.y)/z);
   return {x:Math.max(0,Math.min(world.W-1,x)),y:Math.max(0,Math.min(world.H-1,y))};
 }
 function hoverCell(){
   if(!world) return null;
-  const z=Math.max(1,Math.round(cam.z));
+  const z=zoomPx();
   const x=Math.floor((M.x+cam.x)/z), y=Math.floor((M.y+cam.y)/z);
   return (x>=0&&x<world.W&&y>=0&&y<world.H)?{x,y}:null;
 }
@@ -1827,16 +1917,10 @@ function boardInput(dt){
   const sp=520*dt*DPR;
   if(KEYS.has("a"))cam.x-=sp; if(KEYS.has("d"))cam.x+=sp;
   if(KEYS.has("w"))cam.y-=sp; if(KEYS.has("s"))cam.y+=sp;
-  if(M.wheel){
-    const z0=Math.max(1,Math.round(cam.z));
-    const wx=(M.x+cam.x)/z0, wy=(M.y+cam.y)/z0;
-    let z=Math.round(cam.z*(M.wheel<0?1.2:1/1.2));
-    if(z===Math.round(cam.z)) z+=(M.wheel<0?1:-1);
-    cam.z=Math.max(2,Math.min(64,z));
-    cam.x=wx*cam.z-M.x; cam.y=wy*cam.z-M.y;
-  }
+  clampCam();
+  if(M.wheel) setZoom(camZi+(M.wheel<0?1:-1),M.x,M.y);
   const panning=M.mdown;                 // panning is middle-drag only now
-  if(panning){cam.x-=M.pdx;cam.y-=M.pdy;return;}
+  if(panning){cam.x-=M.pdx;cam.y-=M.pdy;clampCam();return;}
   if(won) return;
 
   const h=hoverCell();
@@ -2568,8 +2652,8 @@ let fieldW="", fieldH="", focusField=null;   // typed boxes: sizes and searches
 let loadQuery="", schemQuery="";
 let loadScroll=0, schemScroll=0;
 const FIELD={
-  w:{get:()=>fieldW,set:v=>fieldW=v,numeric:true,max:3},
-  h:{get:()=>fieldH,set:v=>fieldH=v,numeric:true,max:3},
+  w:{get:()=>fieldW,set:v=>fieldW=v,numeric:true,max:4},
+  h:{get:()=>fieldH,set:v=>fieldH=v,numeric:true,max:4},
   loadq:{get:()=>loadQuery,set:v=>{loadQuery=v;loadScroll=0;},max:24},
   schemq:{get:()=>schemQuery,set:v=>{schemQuery=v;schemScroll=0;},max:24},
 };
@@ -2633,7 +2717,7 @@ function iconWorld(x,y,s){
 }
 function overlayWorld(){
   const m=8*U, hs=U*2;
-  const boxW=Math.max(26*U,textW("999",hs,2)+8*U), boxH=btnH(hs);
+  const boxW=Math.max(30*U,textW("9999",hs,2)+8*U), boxH=btnH(hs);
   const labW=Math.max(textW("WIDTH",hs,2),textW("HEIGHT",hs,2));
   const needW=Math.max(textW("WORLD SIZE",U*3,2),
                        textW("anchor - which corner stays put",U,1),
@@ -2644,7 +2728,7 @@ function overlayWorld(){
   const u=Math.max(1,Math.min(U,Math.floor(U*(H-8*U)/Math.max(1,needH))));
   const _k=u/U;
   const p=panelRect(needW*_k,needH*_k);
-  const HS=u*2, BW=Math.max(26*u,textW("999",HS,2)+8*u), BH=btnH(HS);
+  const HS=u*2, BW=Math.max(30*u,textW("9999",HS,2)+8*u), BH=btnH(HS);
   const LW=Math.max(textW("WIDTH",HS,2),textW("HEIGHT",HS,2));
   let ts=u*3;                       // keep the title clear of the close button
   while(ts>1&&textW("WORLD SIZE",ts,2)>p.w-2*m-14*u) ts--;
@@ -2680,10 +2764,19 @@ function overlayWorld(){
   }
   const by=p.y+p.h-m-btnH(HS);
   if(uiBtn(p.x+m,by,0,0,"APPLY",HS)){
-    const nw=Math.max(1,Math.min(999,parseInt(fieldW,10)||0));
-    const nh=Math.max(1,Math.min(999,parseInt(fieldH,10)||0));
+    // 9999 x 9999 is 100 million cells -- around 270 MB of engine state, which
+    // is heavy but real. Anything past the 32-bit index ceiling is refused by
+    // the World constructor rather than silently corrupting.
+    const nw=Math.max(1,Math.min(9999,parseInt(fieldW,10)||0));
+    const nh=Math.max(1,Math.min(9999,parseInt(fieldH,10)||0));
     if(!nw||!nh) say("enter a width and height",true);
-    else { resizeWorld(nw,nh,szAnchor); say(`world is ${nw} x ${nh}`); focusField=null; modal=null; }
+    else{
+      try{
+        resizeWorld(nw,nh,szAnchor);
+        say(`world is ${nw} x ${nh}`+(nw*nh>4e6?` (${(nw*nh/1e6).toFixed(1)}M cells)`:""));
+        focusField=null; modal=null;
+      }catch(e){ say("could not resize: "+e.message,true); }
+    }
   }
   if(uiBtn(p.x+p.w-m-btnW("CANCEL",HS),by,0,0,"CANCEL",HS)){ focusField=null; modal=null; }
 }
