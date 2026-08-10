@@ -1,0 +1,2877 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebAccel Machine</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{display:block;image-rendering:pixelated;cursor:default}
+  body{-webkit-user-select:none;user-select:none}
+</style>
+</head>
+<body>
+<canvas id="app"></canvas>
+<script>
+"use strict";
+/* ===========================================================================
+   CELL MODEL
+   Internal byte per cell: (type << 2) | rotation.
+   Rotation 0=Right 1=Down 2=Left 3=Up (screen coords, +y down) — this matches
+   the level-code convention exactly, so no remapping on import.
+   =========================================================================== */
+const T_EMPTY=0,T_PUSH=1,T_SLIDE=2,T_WALL=3,T_MOVER=4,T_GEN=5,T_CW=6,T_CCW=7,
+      T_ENEMY=8,T_TRASH=9,T_BORDER=10;
+const mk=(t,r)=>((t<<2)|r), ty=c=>c>>2, rt=c=>c&3;
+
+// level-code id -> internal type. ids: 0 gen,1 CW,2 CCW,3 mover,4 slide,
+// 5 push,6 wall,7 enemy,8 trash,9 empty
+const CM_TO_T=[T_GEN,T_CW,T_CCW,T_MOVER,T_SLIDE,T_PUSH,T_WALL,T_ENEMY,T_TRASH,T_EMPTY];
+const T_TO_CM={};CM_TO_T.forEach((t,i)=>{if(!(t in T_TO_CM))T_TO_CM[t]=i;});
+
+const DIR_ORDER=[0,2,3,1];              // Right, Left, Up, Down
+const descending=d=>d===0||d===1;       // front-first is high→low index for R and D
+
+/* ===========================================================================
+   ENGINE
+   10 subticks/tick: Gen R,L,U,D · CW · CCW · Mover R,L,U,D.
+   Each has its own occupancy bitmap plus an L1 summary (1 bit per 32-cell
+   word), so a pass visits only its own actors and skips empty space in
+   1024-cell strides. Bitmaps are maintained incrementally in setCell().
+
+   Push chains are skipped rather than walked. Most cells in a chain are
+   TRANSPARENT to the scan — push cells, generators, rotators and aligned
+   slides neither stop it nor change its force. Only empty/wall/border/trash/
+   enemy/mover/misaligned-slide are OPAQUE, and two extra bitmaps let the scan
+   jump opaque-to-opaque. obits[0] is row-major (horizontal pushes), obits[1]
+   is transposed (vertical), because slide alignment is axis-dependent.
+   Short chains still step directly — consulting the bitmap costs more than a
+   couple of byte reads, so it only pays once a chain proves long.
+   =========================================================================== */
+const NBUCKET=10;
+
+// Per-cell-byte lookup tables: a cell is only (type<<2)|rot, so every property
+// the hot loop needs is a table read instead of a switch.
+const TBL_BUCKET=new Int8Array(256), TBL_OPQ=new Uint8Array(256);
+(function(){
+  const bucket=c=>{
+    switch(c>>2){
+      case T_GEN: return c&3;
+      case T_CW: return 4;
+      case T_CCW: return 5;
+      case T_MOVER: return 6+(c&3);
+      default: return -1;
+    }
+  };
+  const opaque=(c,axis)=>{
+    switch(c>>2){
+      case T_PUSH: case T_GEN: case T_CW: case T_CCW: return false;
+      case T_SLIDE: return ((c&3)&1)!==axis;
+      default: return true;
+    }
+  };
+  for(let v=0;v<256;v++){
+    TBL_BUCKET[v]=bucket(v);
+    TBL_OPQ[v]=(opaque(v,0)?1:0)|(opaque(v,1)?2:0);
+  }
+})();
+
+// nearest opaque cell at/after and at/before p, in bitmap B's index space
+function opaqueFwd(B,p){
+  let w=p>>5, m=B[w]&((0xFFFFFFFF<<(p&31))>>>0);
+  while(m===0) m=B[++w];
+  return (w<<5)|(31-Math.clz32(m&-m));
+}
+function opaqueBwd(B,p){
+  let w=p>>5; const b=p&31;
+  let m=B[w]&(b===31?0xFFFFFFFF:((1<<(b+1))-1));
+  while(m===0) m=B[--w];
+  return (w<<5)|(31-Math.clz32(m));
+}
+
+class World{
+  constructor(w,h){
+    // counted so the UI can voice what the simulation did this tick
+    this.evCreate=0; this.evDestroy=0;
+    // Motion tracking for render interpolation: destination index -> the index
+    // the cell occupied when the tick began. Off unless the renderer asks, so a
+    // fast-forwarding board pays nothing for it.
+    this.rev=0;                      // bumped on every real change
+    // One bit per non-empty cell. The renderer walks these instead of reading
+    // every slot in view, which is what made a big sparse board crawl.
+    this.occ=null;
+    this.trackMotion=false; this.motion=new Map();
+    this.rotFrom=new Map();          // index -> rotation when the tick began
+    this.W=w; this.H=h; this.stride=w+2; this.strideT=h+2;
+    this.size=this.stride*this.strideT;
+    this.off=[1,this.stride,-1,-this.stride];
+    this.g=new Uint8Array(this.size).fill(mk(T_BORDER,0));
+    for(let y=0;y<h;y++) for(let x=0;x<w;x++) this.g[this.idx(x,y)]=0;
+    this.nwords=(this.size+31)>>5; this.nsum=(this.nwords+31)>>5;
+    this.bits=[]; this.sum=[];
+    for(let b=0;b<NBUCKET;b++){
+      this.bits.push(new Uint32Array(this.nwords));
+      this.sum.push(new Uint32Array(this.nsum));
+    }
+    this.tidx=new Int32Array(this.size); this.ridx=new Int32Array(this.size);
+    for(let yy=0;yy<this.strideT;yy++)
+      for(let xx=0;xx<this.stride;xx++){
+        const i=yy*this.stride+xx, t=xx*this.strideT+yy;
+        this.tidx[i]=t; this.ridx[t]=i;
+      }
+    // Everything starts BORDER or EMPTY, both opaque. Bits past `size` stay set
+    // too: a forward scan must always terminate, and an over-set bit is safe
+    // (the border stops us first) whereas an under-set one would run off the end.
+    this.obits=[new Uint32Array(this.nwords).fill(0xFFFFFFFF),
+                new Uint32Array(this.nwords).fill(0xFFFFFFFF)];
+    this.occ=new Uint32Array(this.nwords);
+  }
+  idx(x,y){return (y+1)*this.stride+(x+1);}
+  clearMotion(){ this.motion.clear(); this.rotFrom.clear(); }
+
+  static bucketOf(c){ return TBL_BUCKET[c]; }
+  bitSet(b,i){
+    const w=i>>5;
+    this.bits[b][w]|=(1<<(i&31));
+    this.sum[b][w>>5]|=(1<<(w&31));
+  }
+  bitClear(b,i){
+    const w=i>>5;
+    const v=this.bits[b][w]&~(1<<(i&31));
+    this.bits[b][w]=v;
+    if(v===0) this.sum[b][w>>5]&=~(1<<(w&31));
+  }
+  setCell(i,c){
+    const o=this.g[i];
+    if(o===c) return;
+    this.rev++;
+    if(((o>>2)===T_EMPTY)!==((c>>2)===T_EMPTY)) this.occ[i>>5]^=(1<<(i&31));
+    this.g[i]=c;
+    // when the bucket is unchanged the bit at i is already right -- skip both ops
+    const ob=TBL_BUCKET[o], nb=TBL_BUCKET[c];
+    if(ob!==nb){ if(ob>=0) this.bitClear(ob,i); if(nb>=0) this.bitSet(nb,i); }
+    const dop=TBL_OPQ[o]^TBL_OPQ[c];
+    if(dop){
+      if(dop&1) this.obits[0][i>>5]^=(1<<(i&31));
+      if(dop&2){ const t=this.tidx[i]; this.obits[1][t>>5]^=(1<<(t&31)); }
+    }
+  }
+  place(x,y,c){this.setCell(this.idx(x,y),c);}
+
+  /* Rotators only change a neighbour's rotation, never its type, so most of
+     setCell's work is provably unnecessary: opacity can only move for a slide
+     (whose axis flips) and the bucket only for a generator or mover. */
+  rotateCell(n,delta){
+    const c=this.g[n], t=c>>2;
+    if(t===T_EMPTY||t===T_BORDER) return;
+    const r=c&3, nr=(r+delta)&3;
+    this.rev++;
+    if(this.trackMotion&&!this.rotFrom.has(n)) this.rotFrom.set(n,r);
+    this.g[n]=mk(t,nr);
+    if(t===T_GEN){ this.bitClear(r,n); this.bitSet(nr,n); }
+    else if(t===T_MOVER){ this.bitClear(6+r,n); this.bitSet(6+nr,n); }
+    else if(t===T_SLIDE){       // delta is odd, so the axis always flips
+      this.obits[0][n>>5]^=(1<<(n&31));
+      const tt=this.tidx[n]; this.obits[1][tt>>5]^=(1<<(tt&31));
+    }
+  }
+
+  /* Walk the chain from i in direction d and shift it forward one cell.
+     `force` is the strength already committed by the initiator. */
+  push(i,d,force){
+    const g=this.g, o=this.off[d], opp=d^2;
+    const axis=d&1, omask=1<<axis, fwd=(d===0||d===1);
+    let j=i;
+    for(;;){
+      let c=g[j];
+      // Skip transparent cells. Short chains dominate, so step the first few
+      // directly; only once a chain proves long is the bitmap jump worth it.
+      if(!(TBL_OPQ[c]&omask)){
+        j+=o; c=g[j];
+        if(!(TBL_OPQ[c]&omask)){
+          j+=o; c=g[j];
+          if(!(TBL_OPQ[c]&omask)){
+            if(axis===0) j=fwd?opaqueFwd(this.obits[0],j):opaqueBwd(this.obits[0],j);
+            else{
+              let t=this.tidx[j];
+              t=fwd?opaqueFwd(this.obits[1],t):opaqueBwd(this.obits[1],t);
+              j=this.ridx[t];
+            }
+            c=g[j];
+          }
+        }
+      }
+      const t=c>>2;
+      if(t===T_EMPTY||t===T_TRASH||t===T_ENEMY) break;
+      if(t===T_WALL||t===T_BORDER) return false;
+      if(t===T_SLIDE){ if((((c&3)^d)&1)!==0) return false; }
+      else if(t===T_MOVER){
+        const r=c&3;
+        if(r===d) force++;
+        else if(r===opp){ if(--force<=0) return false; }
+      }
+      j+=o;
+    }
+    const endt=g[j]>>2;
+    let k=j;
+    if(endt!==T_EMPTY){
+      this.evDestroy++;
+      if(j===i){                      // nothing in the chain: the incoming cell is eaten
+        if(endt===T_ENEMY) this.setCell(i,0);
+        return false;
+      }
+      if(endt===T_ENEMY) this.setCell(j,0);
+      k=j-o;
+      if(k===i){ this.setCell(i,0); return true; }
+    }
+    if(this.trackMotion){
+      for(let q=k;q!==i;q-=o){
+        const src=this.motion.get(q-o);            // compose repeated moves
+        this.motion.set(q,src===undefined?q-o:src);
+        this.motion.delete(q-o);
+        const rf=this.rotFrom.get(q-o);            // ...and carry the rotation with it
+        if(rf!==undefined){ this.rotFrom.set(q,rf); this.rotFrom.delete(q-o); }
+        else this.rotFrom.delete(q);
+      }
+    }
+    for(;k!==i;k-=o) this.setCell(k,g[k-o]);
+    this.setCell(i,0);
+    return true;
+  }
+
+  actGen(i,d){
+    const o=this.off[d], src=this.g[i-o], st=src>>2;
+    if(st===T_EMPTY||st===T_BORDER) return;
+    const t=i+o;
+    if((this.g[t]>>2)===T_BORDER) return;
+    if(this.push(t,d,1)){
+      // a freshly generated cell has no history: drop anything stale at this slot
+      if(this.trackMotion){ this.motion.delete(t); this.rotFrom.delete(t); }
+      this.setCell(t,src); this.evCreate++;
+    }
+  }
+  actRot(i,delta){
+    this.rotateCell(i+this.off[0],delta); this.rotateCell(i+this.off[1],delta);
+    this.rotateCell(i+this.off[2],delta); this.rotateCell(i+this.off[3],delta);
+  }
+  dispatch(b,i){
+    if(b<4) this.actGen(i,b);
+    else if(b===4) this.actRot(i,1);
+    else if(b===5) this.actRot(i,3);
+    else this.push(i,b-6,0);
+  }
+
+  /* Bitmap sweep. Words are re-read after every action so the scan sees the
+     live grid, matching a naive linear scan without any snapshot copy. */
+  sweep(b,desc){
+    const bits=this.bits[b], sum=this.sum[b];
+    if(desc){
+      for(let sw=this.nsum-1;sw>=0;sw--){
+        let s=sum[sw];
+        while(s!==0){
+          const sb=31-Math.clz32(s), w=(sw<<5)|sb;
+          let m=bits[w];
+          while(m!==0){
+            const bb=31-Math.clz32(m);
+            this.dispatch(b,(w<<5)|bb);
+            m=bits[w]&(bb===0?0:(0xFFFFFFFF>>>(32-bb)));
+          }
+          s=sum[sw]&(sb===0?0:(0xFFFFFFFF>>>(32-sb)));
+        }
+      }
+    }else{
+      for(let sw=0;sw<this.nsum;sw++){
+        let s=sum[sw];
+        while(s!==0){
+          const sb=31-Math.clz32(s&-s), w=(sw<<5)|sb;
+          let m=bits[w];
+          while(m!==0){
+            const bb=31-Math.clz32(m&-m);
+            this.dispatch(b,(w<<5)|bb);
+            m=bits[w]&(bb===31?0:((0xFFFFFFFF<<(bb+1))>>>0));
+          }
+          s=sum[sw]&(sb===31?0:((0xFFFFFFFF<<(sb+1))>>>0));
+        }
+      }
+    }
+  }
+  tick(){
+    for(let k=0;k<4;k++){const d=DIR_ORDER[k]; this.sweep(d,descending(d));}
+    this.sweep(4,false);
+    this.sweep(5,false);
+    for(let k=0;k<4;k++){const d=DIR_ORDER[k]; this.sweep(6+d,descending(d));}
+  }
+}
+
+/* ===========================================================================
+   LEVEL CODE IMPORTER  (V1 / V2 / V3)
+
+   V1;w;h;placeables;cells;name;wallEffect
+       decimal. placeables "x.y", cells "id.rot.x.y", comma separated.
+   V2;w;h;cellData;tutorial;name;wallEffect
+       base74, one char per cell row-major, run-length escapes:
+         X)N     X repeated N+1 times      X(NNN)  same, multi-char count
+   V3;w;h;cellData;tutorial;name;wallEffect
+       as V2 but LZ-style BACK-REFERENCES into the text decoded so far:
+         )OD     copy D chars from O+1 back
+         (OOO)D  multi-char offset         (OOO(DDD)  multi-char offset+distance
+
+   Char value: id*2 + rot*18 + placeable, or 72+placeable for empty.
+
+   NOTE: the common Python reference implementation computes the row as
+   `i // height`, which silently corrupts every non-square level. Correct is
+   `i / width`, used here.
+
+   ORIGIN: cell index 0 is the BOTTOM-left of the level as the game draws it —
+   the stored grid is y-up. Verified against a Mystic Mod screenshot of a known
+   15x13 level. Decoding top-down reverses every row and, worse, silently
+   inverts vertical movement, because rotation 1 means "down the screen" while
+   an un-flipped grid has +y going up. So rows are flipped on import and the
+   engine works in screen coordinates with +y down, which is what the rotation
+   constants already assume.
+   =========================================================================== */
+const B74="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!$%&+-.=?^{}";
+function b74(s){
+  if(s==="") throw new Error("empty base74 number");
+  let r=0;
+  for(const ch of s){
+    const v=B74.indexOf(ch);
+    if(v<0) throw new Error(`invalid base74 character '${ch}'`);
+    r=r*74+v;
+  }
+  return r;
+}
+
+function importCode(code,flip=true){
+  const f=code.trim().split(";");
+  if(f.length<6) throw new Error("not enough ';' fields — is the whole code pasted?");
+  const L={version:f[0],name:"",tutorial:"",wallEffect:0,W:0,H:0,
+           id:null,rot:null,place:null,maxId:0,nPlaceable:0,fields:f.length,flip};
+  // stored (x,y) -> screen-coordinate offset
+  const at=(x,y)=>(L.flip?(L.H-1-y):y)*L.W+x;
+
+  const alloc=()=>{
+    if(!(L.W>0&&L.H>0)) throw new Error("bad level dimensions");
+    if(L.W*L.H>4_000_000) throw new Error(`level too big (${L.W}x${L.H})`);
+    L.id=new Uint8Array(L.W*L.H).fill(9);
+    L.rot=new Uint8Array(L.W*L.H);
+    L.place=new Uint8Array(L.W*L.H);
+  };
+  const put=(pos,v)=>{
+    if(pos<0||pos>=L.id.length) return;
+    const o=at(pos%L.W,Math.floor(pos/L.W));
+    if(v>71){ L.place[o]=v&1; return; }
+    const cid=Math.floor(v/2)%9, r=Math.floor(v/18)%4;
+    L.id[o]=cid; L.rot[o]=r; L.place[o]=v&1;
+    if(cid>L.maxId) L.maxId=cid;
+  };
+  const wallEff=v=>{const n=parseInt(v,10); return (n>=0&&n<=3)?n:0;};
+
+  if(f[0]==="V1"){
+    L.W=parseInt(f[1],10); L.H=parseInt(f[2],10); alloc();
+    L.name=f[5]; L.wallEffect=f[6]?wallEff(f[6]):0;
+    for(const p of f[3].split(",")){
+      if(!p) continue;
+      const q=p.split("."); if(q.length!==2) throw new Error(`bad placeable '${p}'`);
+      const x=+q[0],y=+q[1];
+      if(x>=0&&x<L.W&&y>=0&&y<L.H) L.place[at(x,y)]=1;
+    }
+    for(const p of f[4].split(",")){
+      if(!p) continue;
+      const q=p.split("."); if(q.length!==4) throw new Error(`bad cell '${p}'`);
+      const cid=+q[0], r=+q[1], x=+q[2], y=+q[3];
+      if(x<0||x>=L.W||y<0||y>=L.H) continue;
+      const o=at(x,y);
+      L.id[o]=cid; L.rot[o]=r&3;
+      if(cid>L.maxId) L.maxId=cid;
+    }
+  }else if(f[0]==="V2"||f[0]==="V3"){
+    L.W=b74(f[1]); L.H=b74(f[2]); alloc();
+    L.tutorial=f[4]; L.name=f[5]; L.wallEffect=f[6]?wallEff(f[6]):0;
+    const d=f[3];
+
+    if(f[0]==="V2"){
+      const data=d+"0";                       // sentinel keeps lookahead valid
+      let c=0,pos=0;
+      while(d.length&&c<data.length-1){
+        let repeat=1,add=1;
+        if(data[c+1]===")"){
+          if(c+2>=data.length) throw new Error("truncated ')' run");
+          repeat=b74(data[c+2])+1; add=3;
+        }else if(data[c+1]==="("){
+          const e=data.indexOf(")",c+2);
+          if(e<0) throw new Error("unterminated '(' run");
+          const s=data.slice(c+2,e);
+          repeat=b74(s)+1; add=3+s.length;
+        }
+        const v=b74(data[c]);
+        for(let i=0;i<repeat;i++) put(pos+i,v);
+        c+=add; pos+=repeat;
+      }
+    }else{
+      // Expand back-references into a typed array of cell VALUES, never a string.
+      // Building the output with `out += out[src]` looks harmless but is fatal:
+      // V8 represents the growing string as a rope and has to flatten it on every
+      // indexed read, so the whole expansion is O(n^2). A 999x999 level is one
+      // ~500k-long back-reference, which hung the page. Native std::string is
+      // O(1) per op, which is why only the web build died on it.
+      const cap=L.W*L.H;
+      const out=new Uint8Array(cap);
+      let n=0,i=0;
+      while(i<d.length&&n<cap){
+        const ch=d[i];
+        if(ch!=="("&&ch!==")"){
+          const v=B74.indexOf(ch);
+          if(v<0) throw new Error(`invalid base74 character '${ch}'`);
+          out[n++]=v; i++; continue;
+        }
+        let offs="",dist="";
+        if(d[i]===")"){
+          if(i+2>=d.length) throw new Error("truncated back-reference");
+          offs=d[i+1]; dist=d[i+2]; i+=3;
+        }else{
+          i++;
+          while(i<d.length&&d[i]!=="("&&d[i]!==")") offs+=d[i++];
+          if(i>=d.length) throw new Error("truncated back-reference offset");
+          if(d[i]===")"){
+            if(i+1>=d.length) throw new Error("truncated back-reference distance");
+            dist=d[i+1]; i+=2;
+          }else{
+            i++;
+            while(i<d.length&&d[i]!==")") dist+=d[i++];
+            if(i>=d.length) throw new Error("unterminated back-reference distance");
+            i++;
+          }
+        }
+        const o=b74(offs), cnt=b74(dist);
+        for(let k=0;k<cnt&&n<cap;k++){
+          const src=n-o-1;
+          if(src<0) throw new Error("back-reference points before start of data");
+          out[n++]=out[src];
+        }
+      }
+      for(let k=0;k<n;k++) put(k,out[k]);
+    }
+  }else{
+    throw new Error(`unknown format '${f[0]}' — this reads V1, V2 and V3`);
+  }
+
+  for(let i=0;i<L.id.length;i++) if(L.place[i]) L.nPlaceable++;
+  return L;
+}
+
+/* --- What build is it from? -------------------------------------------------
+   Honest answer: the code does not say. Only the format version, field shape
+   and id range are evidence, and CMMM / CMMM+ / CMMM+MM read and write
+   overlapping formats. So we surface the evidence and ask, rather than guess
+   silently. */
+const VARIANTS=[
+  {id:"vanilla", name:"Vanilla Cell Machine", by:"Sam Hogan",
+   note:"9 cells: generator, rotators, mover, slide, push, wall, enemy, trash."},
+  {id:"cmmm",    name:"CMMM", by:"Cell Machine: Mystic Mod",
+   note:"Adds cells beyond id 8, wall effects (wrap/delete/flip), and the V2/V3 codes."},
+  {id:"cmmm+",   name:"CMMM+", by:"Mystic Mod Plus",
+   note:"Reads V1/V3/MP1 and exports MP1 by default. Its own extended id table."},
+  {id:"cmmm+mm", name:"CMMM+MM", by:"Mystic Mod Plus + Mystic Mod cells",
+   note:"Widest id table of the four."},
+];
+function detectVariant(L){
+  let guess="cmmm", conf="ambiguous", why=[];
+  if(L.version==="V1"&&L.fields<=6){
+    guess="vanilla"; conf="likely";
+    why.push("V1 code with no wall-effect field, which predates the Mystic Mod additions.");
+  }else if(L.version==="V1"){
+    guess="cmmm"; conf="weak";
+    why.push("V1 code carrying a wall-effect field — that field was added by the Mystic Mod.");
+  }else if(L.version==="V2"){
+    guess="cmmm"; conf="likely";
+    why.push("V2 was the Mystic Mod's format and was superseded by V3.");
+  }else{
+    guess="cmmm"; conf="ambiguous";
+    why.push("V3 is read and written by all three mod builds; CMMM+ only defaults to MP1 on <em>export</em>, so a V3 code narrows nothing.");
+  }
+  if(L.maxId>8)
+    why.push(`Contains cell id <code>${L.maxId}</code>, above vanilla's 0–8 — so it is <b>not</b> from vanilla.`);
+  if(L.wallEffect)
+    why.push(`Wall effect <code>${L.wallEffect}</code> (${["stop","wrap","delete","flip"][L.wallEffect]}) is a Mystic Mod feature.`);
+  return {guess,conf,why};
+}
+
+/* ===========================================================================
+   RENDERING
+   =========================================================================== */
+const COLORS={};
+COLORS[T_GEN]="#2f9e5a"; COLORS[T_CW]="#cf7726"; COLORS[T_CCW]="#26a08f";
+COLORS[T_MOVER]="#3d6fc4"; COLORS[T_SLIDE]="#c2a03c"; COLORS[T_PUSH]="#a8862f";
+COLORS[T_WALL]="#4d4d4d"; COLORS[T_ENEMY]="#a52836"; COLORS[T_TRASH]="#8f2fb2";
+const NAMES={};
+NAMES[T_GEN]="Generator";NAMES[T_CW]="CW rotator";NAMES[T_CCW]="CCW rotator";
+NAMES[T_MOVER]="Mover";NAMES[T_SLIDE]="Slide";NAMES[T_PUSH]="Push";
+NAMES[T_WALL]="Wall";NAMES[T_ENEMY]="Enemy";NAMES[T_TRASH]="Trash";
+
+/* --- sprites ---------------------------------------------------------------
+   Each cell is a bevelled tile plus a drawn icon, rendered once per (type,
+   rotation, size) into an offscreen canvas and then blitted. Drawing the icon
+   per cell per frame would be hopeless on a 999x999 board; drawing it 36 times
+   per resize costs nothing. Below ~8px a tile is too small for an icon to read,
+   so those fall back to a flat fill and skip the cache entirely. */
+const ICON="#eff3f7";
+function shade(hex,amt){
+  const n=parseInt(hex.slice(1),16);
+  let r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  const f=v=>Math.max(0,Math.min(255,Math.round(amt>0?v+(255-v)*amt:v*(1+amt))));
+  return `rgb(${f(r)},${f(g)},${f(b)})`;
+}
+// icons are drawn in a 16x16 space centred on (0,0), i.e. coordinates -8..8
+const ICONS={};
+ICONS[T_GEN]=c=>{                       // hollow box feeding an arrow
+  c.lineWidth=1.7; c.strokeStyle=ICON; c.strokeRect(-6,-3.2,5,6.4);
+  c.fillStyle=ICON; c.fillRect(-0.6,-1.1,4,2.2);
+  c.beginPath(); c.moveTo(2.6,-3.9); c.lineTo(6.8,0); c.lineTo(2.6,3.9); c.closePath(); c.fill();
+};
+ICONS[T_MOVER]=c=>{                     // solid triangle
+  c.fillStyle=ICON;
+  c.beginPath(); c.moveTo(-3.4,-5); c.lineTo(5.2,0); c.lineTo(-3.4,5); c.closePath(); c.fill();
+};
+const rotIcon=cw=>c=>{                  // two arcs chasing each other round a ring
+  c.save(); if(!cw) c.scale(-1,1);
+  c.strokeStyle=ICON; c.lineWidth=1.9; c.lineCap="butt";
+  for(const a of [0,Math.PI]){
+    c.beginPath(); c.arc(0,0,4.4,a+0.42,a+Math.PI-0.30); c.stroke();
+  }
+  c.fillStyle=ICON;
+  const head=(ax,ay,dx,dy)=>{           // arrowhead as a triangle on the tangent
+    c.beginPath(); c.moveTo(ax+dx*2.6,ay+dy*2.6);
+    c.lineTo(ax-dy*2.5-dx*0.6,ay+dx*2.5-dy*0.6);
+    c.lineTo(ax+dy*2.5-dx*0.6,ay-dx*2.5-dy*0.6);
+    c.closePath(); c.fill();
+  };
+  head(4.4*Math.cos(0.42),4.4*Math.sin(0.42),Math.sin(0.42),-Math.cos(0.42));
+  head(-4.4*Math.cos(0.42),-4.4*Math.sin(0.42),-Math.sin(0.42),Math.cos(0.42));
+  c.restore();
+};
+ICONS[T_CW]=rotIcon(true);
+ICONS[T_CCW]=rotIcon(false);
+ICONS[T_PUSH]=c=>{                      // # lattice
+  c.strokeStyle=ICON; c.lineWidth=1.7; c.beginPath();
+  for(const v of [-2.3,2.3]){
+    c.moveTo(v,-6); c.lineTo(v,6);
+    c.moveTo(-6,v); c.lineTo(6,v);
+  }
+  c.stroke();
+};
+ICONS[T_SLIDE]=c=>{                     // rails along the axis it slides on
+  c.strokeStyle=ICON; c.lineWidth=1.9; c.beginPath();
+  for(const v of [-2.4,2.4]){ c.moveTo(-6,v); c.lineTo(6,v); }
+  c.stroke();
+};
+ICONS[T_ENEMY]=c=>{                     // angry face
+  c.fillStyle=ICON;
+  c.beginPath(); c.moveTo(-6,-3.4); c.lineTo(-1.4,-0.6); c.lineTo(-1.4,1.6);
+  c.lineTo(-6,-0.4); c.closePath(); c.fill();
+  c.beginPath(); c.moveTo(6,-3.4); c.lineTo(1.4,-0.6); c.lineTo(1.4,1.6);
+  c.lineTo(6,-0.4); c.closePath(); c.fill();
+  c.lineWidth=1.7; c.strokeStyle=ICON; c.beginPath();
+  c.moveTo(-4.2,4.2); c.lineTo(-1.4,2.9); c.lineTo(1.4,4.4); c.lineTo(4.2,3.1);
+  c.stroke();
+};
+ICONS[T_TRASH]=c=>{                     // bin with a lid and slots
+  c.fillStyle=ICON;
+  c.fillRect(-1.9,-6.4,3.8,1.5);
+  c.fillRect(-5.6,-4.6,11.2,1.9);
+  c.beginPath(); c.moveTo(-4.5,-2.1); c.lineTo(4.5,-2.1);
+  c.lineTo(3.4,6.2); c.lineTo(-3.4,6.2); c.closePath(); c.fill();
+};
+ICONS[T_WALL]=c=>{                      // riveted plate
+  c.fillStyle=shade(COLORS[T_WALL],0.55);
+  for(const [x,y] of [[-4.3,-4.3],[4.3,-4.3],[-4.3,4.3],[4.3,4.3]])
+    c.fillRect(x-1.1,y-1.1,2.2,2.2);
+  c.fillStyle=shade(COLORS[T_WALL],0.18);
+  c.fillRect(-2.6,-2.6,5.2,5.2);
+};
+// trash gets dark slots cut back out of its bin
+const OVERLAY={};
+OVERLAY[T_TRASH]=(c,base)=>{
+  c.fillStyle=shade(base,-0.5);
+  for(const x of [-1.9,0,1.9]) c.fillRect(x-0.45,-0.9,0.9,5.5);
+};
+
+const spriteCache=new Map();
+// rotation only reads on cells that have one; slide has two states, not four
+// Every cell carries a rotation and shows it -- generator, mover, both
+// rotators, push, slide, enemy and trash. Only the wall has no oriented form.
+const normRot=(t,r)=>t===T_WALL?0:r;
+function spriteFor(t,r,size){
+  const key=t+"|"+normRot(t,r)+"|"+size;
+  let s=spriteCache.get(key);
+  if(!s){ s=makeSprite(t,r,size); spriteCache.set(key,s); }
+  return s;
+}
+function makeSprite(t,r,size){
+  const rr=normRot(t,r);
+  const s=document.createElement("canvas"); s.width=s.height=size;
+  const c=s.getContext("2d");
+  const base=COLORS[t]||"#ff00ff";
+  const b=Math.max(1,Math.round(size/16));
+  c.fillStyle=shade(base,-0.5); c.fillRect(0,0,size,size);          // outline
+  c.fillStyle=base;             c.fillRect(b,b,size-2*b,size-2*b);  // face
+  c.fillStyle=shade(base,0.30);                                     // lit edges
+  c.fillRect(b,b,size-2*b,b); c.fillRect(b,b,b,size-2*b);
+  c.fillStyle=shade(base,-0.28);                                    // shaded edges
+  c.fillRect(b,size-2*b,size-2*b,b); c.fillRect(size-2*b,b,b,size-2*b);
+  const icon=ICONS[t];
+  if(icon){
+    c.save();
+    c.translate(size/2,size/2);
+    c.scale(size/20,size/20);        // icons are authored in a 16-unit box
+    c.rotate(rr*Math.PI/2);
+    c.lineJoin="miter";
+    icon(c);
+    if(OVERLAY[t]) OVERLAY[t](c,base);
+    c.restore();
+  }
+  return s;
+}
+
+
+/* ===========================================================================
+   PIXEL FONT
+   The IBM VGA 8x16 CP437 face -- the ROM font that Perfect DOS VGA 437
+   reproduces. One byte per row, 95 glyphs (ASCII 32..126), packed base64.
+   Taken from the system's VGA console font rather than the TTF, because the
+   glyph bitmaps are the font; a TTF would only wrap the same pixels and would
+   have to be downloaded at runtime. Strings render once into an offscreen
+   canvas and are cached; integer scales only, so scaling stays nearest-neighbour.
+   =========================================================================== */
+const FONT_B64="AAAAAAAAAAAAAAAAAAAAAAAAGDw8PBgYGAAYGAAAAAAAZmZmJAAAAAAAAAAAAAAAAAAAbGz+bGxs/mxsAAAAABgYfMbCwHwGBobGfBgYAAAAAAAAwsYMGDBgxoYAAAAAAAA4bGw4dtzMzMx2AAAAAAAwMDAgAAAAAAAAAAAAAAAAAAwYMDAwMDAwGAwAAAAAAAAwGAwMDAwMDBgwAAAAAAAAAAAAZjz/PGYAAAAAAAAAAAAAABgYfhgYAAAAAAAAAAAAAAAAAAAAGBgYMAAAAAAAAAAAAAD+AAAAAAAAAAAAAAAAAAAAAAAAGBgAAAAAAAAAAAIGDBgwYMCAAAAAAAAAOGzGxtbWxsZsOAAAAAAAABg4eBgYGBgYGH4AAAAAAAB8xgYMGDBgwMb+AAAAAAAAfMYGBjwGBgbGfAAAAAAAAAwcPGzM/gwMDB4AAAAAAAD+wMDA/AYGBsZ8AAAAAAAAOGDAwPzGxsbGfAAAAAAAAP7GBgYMGDAwMDAAAAAAAAB8xsbGfMbGxsZ8AAAAAAAAfMbGxn4GBgYMeAAAAAAAAAAAGBgAAAAYGAAAAAAAAAAAABgYAAAAGBgwAAAAAAAAAAYMGDBgMBgMBgAAAAAAAAAAAH4AAH4AAAAAAAAAAAAAYDAYDAYMGDBgAAAAAAAAfMbGDBgYGAAYGAAAAAAAAAB8xsbe3t7cwHwAAAAAAAAQOGzGxv7GxsbGAAAAAAAA/GZmZnxmZmZm/AAAAAAAADxmwsDAwMDCZjwAAAAAAAD4bGZmZmZmZmz4AAAAAAAA/mZiaHhoYGJm/gAAAAAAAP5mYmh4aGBgYPAAAAAAAAA8ZsLAwN7GxmY6AAAAAAAAxsbGxv7GxsbGxgAAAAAAADwYGBgYGBgYGDwAAAAAAAAeDAwMDAzMzMx4AAAAAAAA5mZmbHh4bGZm5gAAAAAAAPBgYGBgYGBiZv4AAAAAAADG7v7+1sbGxsbGAAAAAAAAxub2/t7OxsbGxgAAAAAAAHzGxsbGxsbGxnwAAAAAAAD8ZmZmfGBgYGDwAAAAAAAAfMbGxsbGxtbefAwOAAAAAPxmZmZ8bGZmZuYAAAAAAAB8xsZgOAwGxsZ8AAAAAAAAfn5aGBgYGBgYPAAAAAAAAMbGxsbGxsbGxnwAAAAAAADGxsbGxsbGbDgQAAAAAAAAxsbGxtbW1v7ubAAAAAAAAMbGbHw4OHxsxsYAAAAAAABmZmZmPBgYGBg8AAAAAAAA/saGDBgwYMLG/gAAAAAAADwwMDAwMDAwMDwAAAAAAAAAgMDgcDgcDgYCAAAAAAAAPAwMDAwMDAwMPAAAAAAQOGzGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP8AADAwGAAAAAAAAAAAAAAAAAAAAAAAAHgMfMzMzHYAAAAAAADgYGB4bGZmZmZ8AAAAAAAAAAAAfMbAwMDGfAAAAAAAABwMDDxszMzMzHYAAAAAAAAAAAB8xv7AwMZ8AAAAAAAAOGxkYPBgYGBg8AAAAAAAAAAAAHbMzMzMzHwMzHgAAADgYGBsdmZmZmbmAAAAAAAAGBgAOBgYGBgYPAAAAAAAAAYGAA4GBgYGBgZmZjwAAADgYGBmbHh4bGbmAAAAAAAAOBgYGBgYGBgYPAAAAAAAAAAAAOz+1tbW1sYAAAAAAAAAAADcZmZmZmZmAAAAAAAAAAAAfMbGxsbGfAAAAAAAAAAAANxmZmZmZnxgYPAAAAAAAAB2zMzMzMx8DAweAAAAAAAA3HZmYGBg8AAAAAAAAAAAAHzGYDgMxnwAAAAAAAAQMDD8MDAwMDYcAAAAAAAAAAAAzMzMzMzMdgAAAAAAAAAAAGZmZmZmPBgAAAAAAAAAAADGxtbW1v5sAAAAAAAAAAAAxmw4ODhsxgAAAAAAAAAAAMbGxsbGxn4GDPgAAAAAAAD+zBgwYMb+AAAAAAAADhgYGHAYGBgYDgAAAAAAABgYGBgYGBgYGBgAAAAAAABwGBgYDhgYGBhwAAAAAAAAdtwAAAAAAAAAAAAAAAA=";
+const FONT_W=8, FONT_H=16;
+const FONT_BYTES=(()=>{const s=atob(FONT_B64),a=new Uint8Array(s.length);
+  for(let i=0;i<s.length;i++)a[i]=s.charCodeAt(i);return a;})();
+
+const textCache=new Map();
+function textCanvas(str,scale,color,sp){
+  sp=sp|0; scale=Math.max(1,scale|0);
+  const key=str+"|"+scale+"|"+color+"|"+sp;
+  let c=textCache.get(key); if(c) return c;
+  const adv=FONT_W+sp;
+  c=document.createElement("canvas");
+  c.width=Math.max(1,str.length*adv*scale); c.height=FONT_H*scale;
+  const g=c.getContext("2d"); g.imageSmoothingEnabled=false; g.fillStyle=color;
+  for(let i=0;i<str.length;i++){
+    const code=str.charCodeAt(i);
+    if(code<32||code>126) continue;
+    const base=(code-32)*FONT_H;
+    for(let r=0;r<FONT_H;r++){
+      const v=FONT_BYTES[base+r]; if(!v) continue;
+      let run=-1;
+      for(let b=0;b<=FONT_W;b++){
+        const on=b<FONT_W&&((v>>(FONT_W-1-b))&1);
+        if(on&&run<0) run=b;
+        else if(!on&&run>=0){ g.fillRect((i*adv+run)*scale,r*scale,(b-run)*scale,scale); run=-1; }
+      }
+    }
+  }
+  if(textCache.size>800) textCache.clear();
+  textCache.set(key,c); return c;
+}
+const textW=(s,sc,sp)=>s.length*(FONT_W+(sp|0))*Math.max(1,sc|0);
+
+/* ---------------------------------------------------------------------------
+   TEXT FITTING  (after Roblox's TextScaled / TextFits)
+
+   Labels were being drawn at a scale chosen by hand and then clipped by
+   whatever box they landed in. These take the box instead and pick the largest
+   whole-number scale that fits it -- whole numbers because the font is a
+   bitmap, and a fractional scale would resample it into mush. If even scale 1
+   is too wide the string is trimmed and ".." appended, so it degrades instead
+   of running out of its frame.
+   --------------------------------------------------------------------------- */
+function fitScale(str,w,h,sp,max){
+  let s=Math.max(1,max|0||U*4);
+  while(s>1&&(textW(str,s,sp)>w||textH(s)>h)) s--;
+  return s;
+}
+const textFits=(str,w,h,sc,sp)=>textW(str,sc,sp)<=w&&textH(sc)<=h;
+function clipText(str,w,sc,sp){
+  if(textW(str,sc,sp)<=w) return str;
+  // Work from how many glyphs actually fit. Trimming until "x.." fits fails on
+  // a box narrower than three glyphs -- the marker itself then overflows.
+  const cw=(FONT_W+(sp|0))*Math.max(1,sc|0);
+  const n=Math.floor(w/cw);
+  if(n<=0) return "";
+  if(n<=2) return str.slice(0,n);        // no room for the marker
+  return str.slice(0,n-2)+"..";
+}
+// draw inside a box, scaled down until it fits, vertically centred
+function textFit(str,x,y,w,h,color,align,sp,max){
+  const sc=fitScale(str,w,h,sp,max);
+  const out=clipText(str,w,sc,sp);
+  const ty=y+Math.max(0,Math.round((h-textH(sc))/2));
+  const tx=align==="center"?x+w/2:align==="right"?x+w:x;
+  text(out,tx,ty,sc,color,align,sp);
+  return sc;
+}
+function wrapWords(str,w,sc,sp){
+  const words=String(str).split(" "), out=[];
+  let cur="";
+  for(const wd of words){
+    const t=cur?cur+" "+wd:wd;
+    if(textW(t,sc,sp)<=w||!cur) cur=t; else { out.push(cur); cur=wd; }
+  }
+  if(cur) out.push(cur);
+  return out;
+}
+// wrap onto as many lines as needed, shrinking until the block fits the box
+function textWrapFit(str,x,y,w,h,color,align,sp,max){
+  let sc=Math.max(1,max|0||U*3), lines;
+  for(;;){
+    lines=wrapWords(str,w,sc,sp);
+    if(sc<=1||lines.length*textH(sc)<=h) break;
+    sc--;
+  }
+  const total=lines.length*textH(sc);
+  let ly=y+Math.max(0,Math.round((h-total)/2));
+  for(const ln of lines){
+    const tx=align==="center"?x+w/2:align==="right"?x+w:x;
+    text(clipText(ln,w,sc,sp),tx,ly,sc,color,align,sp);
+    ly+=textH(sc);
+  }
+  return sc;
+}
+const textH=sc=>FONT_H*Math.max(1,sc|0);
+function text(str,x,y,scale,color,align,sp){
+  const c=textCanvas(str,scale,color,sp);
+  let px=x;
+  if(align==="center") px=x-c.width/2; else if(align==="right") px=x-c.width;
+  X.drawImage(c,Math.round(px),Math.round(y));   // integer -> no resampling
+}
+
+/* ===========================================================================
+   CANVAS
+   Drawn at native device resolution with no global scale transform. The old
+   build rendered into a fixed 960x640 box and scaled it to fit, which is what
+   produced both the black borders and the softness: a fractional scale forces
+   the browser to resample everything. Now the UI anchors to the window edges
+   and only sizes are scaled, by a whole number.
+   =========================================================================== */
+const app=document.getElementById("app");
+let X=app.getContext("2d",{alpha:false});
+let W=960,H=640,U=2,DPR=1;
+function resize(){
+  DPR=Math.max(1,Math.min(3,Math.round(window.devicePixelRatio||1)));
+  const cw=Math.max(1,innerWidth), ch=Math.max(1,innerHeight);
+  app.width=Math.floor(cw*DPR); app.height=Math.floor(ch*DPR);
+  app.style.width=cw+"px"; app.style.height=ch+"px";
+  W=app.width; H=app.height;
+  // The layout scale is decided in CSS pixels and only then multiplied by DPR.
+  // Deriving it from device pixels made everything twice as large again on a
+  // HiDPI screen, which is what pushed the text off the edges.
+  const L=Math.max(1,Math.min(3,Math.floor(Math.min(cw/380,ch/280))));
+  U=L*DPR;
+  X.imageSmoothingEnabled=false;
+}
+addEventListener("resize",resize); resize();
+
+const M={x:-9e9,y:-9e9,down:false,click:false,rdown:false,rclick:false,mdown:false,
+         wheel:0,pdx:0,pdy:0,pressUI:false,rpressUI:false};
+const KEYS=new Set();
+const toV=e=>({x:e.clientX*DPR,y:e.clientY*DPR});
+app.addEventListener("contextmenu",e=>e.preventDefault());
+app.addEventListener("mousemove",e=>{const p=toV(e);M.pdx=p.x-M.x;M.pdy=p.y-M.y;M.x=p.x;M.y=p.y;});
+app.addEventListener("mousedown",e=>{
+  const p=toV(e);M.x=p.x;M.y=p.y;audioUnlock();
+  // Latch whether the press began on a widget. Checking only where the pointer
+  // is now meant dragging off the tps slider onto the board started painting.
+  const onUI=overUI();
+  if(modal!=="world"&&modal!=="load"&&!schemOpen) focusField=null;
+  if(e.button===0){M.down=true;M.click=true;M.pressUI=onUI;}
+  if(e.button===1){M.mdown=true;e.preventDefault();}
+  if(e.button===2){M.rdown=true;M.rclick=true;M.rpressUI=onUI;}
+});
+addEventListener("mouseup",e=>{
+  if(e.button===0){M.down=false;M.pressUI=false;}
+  if(e.button===1)M.mdown=false;
+  if(e.button===2){M.rdown=false;M.rpressUI=false;}
+});
+app.addEventListener("wheel",e=>{M.wheel+=Math.sign(e.deltaY);e.preventDefault();},{passive:false});
+addEventListener("keydown",e=>{
+  // a focused size box swallows the keyboard, so digits cannot reach the game
+  if(focusField&&FIELD[focusField]){
+    const f=FIELD[focusField], v=f.get();
+    if(e.key==="Backspace") f.set(v.slice(0,-1));
+    else if(e.key==="Enter"||e.key==="Escape") focusField=null;
+    else if(e.key==="Tab"&&(focusField==="w"||focusField==="h")) focusField=focusField==="w"?"h":"w";
+    else if(e.key.length===1&&v.length<(f.max||24)){
+      if(!f.numeric||/[0-9]/.test(e.key)) f.set(v+e.key);
+    }
+    e.preventDefault(); return;
+  }
+  KEYS.add(e.key.toLowerCase()); audioUnlock();
+  if(e.key==="Escape"){ if(scr==="game"&&!modal) paused=!paused; else if(modal) modal=null; else if(scr!=="title") back(); }
+  if(scr==="game"&&!paused&&!modal&&!won){
+    const k=e.key.toLowerCase();
+    if(k===" ") togglePlay();
+    if(k==="r") restoreInitial();
+    if(carry&&e.key==="Escape"){
+      if(carry.from) stampAt(carry,carry.from.x,carry.from.y);
+      carry=null;
+    }
+    if(mode!=="level"){
+      if(k==="q"){ if(carry) rotateCarry(3); else selRot=(selRot+3)&3; sfx("click"); }
+      if(k==="e"){ if(carry) rotateCarry(1); else selRot=(selRot+1)&3; sfx("click"); }
+      const n=parseInt(e.key,10); if(n>=1&&n<=9) setTool(n-1);
+    }
+  }
+  if([" ","w","a","s","d","q","e","r","b"].includes(e.key.toLowerCase())) e.preventDefault();
+});
+addEventListener("keyup",e=>KEYS.delete(e.key.toLowerCase()));
+
+/* ===========================================================================
+   WIDGETS
+   =========================================================================== */
+const WHITE="#fff", BLUE="#2f45ff", DIM="#8a8a8a";
+const inRect=(x,y,w,h)=>M.x>=x&&M.x<x+w&&M.y>=y&&M.y<y+h;
+let uiZones=[];
+const reserve=(x,y,w,h)=>uiZones.push([x,y,w,h]);
+const overUI=()=>uiZones.some(([x,y,w,h])=>inRect(x,y,w,h));
+
+function frame(x,y,w,h,hot,bg){
+  if(bg!==false){X.fillStyle=hot?"rgba(255,255,255,.18)":"rgba(0,0,0,.72)";X.fillRect(x,y,w,h);}
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  X.strokeRect(x+U/2,y+U/2,w-U,h-U);
+}
+const btnW=(l,sc)=>textW(l,sc,1)+8*U, btnH=sc=>textH(sc)+7*U;
+function uiBtn(x,y,w,h,label,scale){
+  const boxed=w>0&&h>0;
+  if(label&&!boxed){ w=btnW(label,scale); h=btnH(scale); }
+  x=Math.round(x);y=Math.round(y);w=Math.round(w);h=Math.round(h);
+  reserve(x,y,w,h);
+  const hot=inRect(x,y,w,h);
+  frame(x,y,w,h,hot);
+  if(label) textFit(label,x+3*U,y,w-6*U,h,WHITE,"center",1,scale);
+  return hot&&M.click&&(sfx("click"),true);
+}
+function uiText(x,y,label,scale,color,align,sp){
+  const w=textW(label,scale,sp), h=textH(scale);
+  const px=align==="center"?x-w/2:align==="right"?x-w:x;
+  reserve(px,y,w,h);
+  const hot=inRect(px,y,w,h);
+  text(label,x,y,scale,hot?WHITE:(color||DIM),align,sp);
+  if(hot){X.fillStyle=WHITE;X.fillRect(px,y+h+U,w,U);}
+  return hot&&M.click&&(sfx("click"),true);
+}
+let dragId=null;
+/* A panel drawn in the same frame as the click that opened it would otherwise
+   receive that very click -- which is why opening LOAD instantly picked
+   whichever row happened to sit under the pointer. */
+function consumeClick(){ M.click=false; M.rclick=false; }
+function openModal(name){ modal=name; focusField=null; consumeClick(); }
+function uiSlider(id,x,y,w,val){
+  reserve(x-3*U,y-3*U,w+6*U,6*U);
+  const hot=M.y>y-5*U&&M.y<y+5*U&&M.x>x-5*U&&M.x<x+w+5*U;
+  if(M.down&&dragId===null&&hot) dragId=id;
+  if(dragId===id){ if(!M.down) dragId=null; else val=Math.max(0,Math.min(1,(M.x-x)/w)); }
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  X.beginPath(); X.moveTo(x,Math.round(y)+.5); X.lineTo(x+w,Math.round(y)+.5); X.stroke();
+  const kx=Math.round(x+w*val), r=3*U;
+  X.fillStyle="#000"; X.fillRect(kx-r,y-r,r*2,r*2);
+  X.strokeRect(kx-r+.5,y-r+.5,r*2-1,r*2-1);
+  X.fillStyle=WHITE; X.fillRect(kx-U,y-U,U*2,U*2);
+  return val;
+}
+function uiToggle(x,y,on){
+  const w=16*U,h=8*U; reserve(x,y,w,h);
+  const hot=inRect(x,y,w,h);
+  X.fillStyle=hot?"rgba(255,255,255,.18)":"#000"; X.fillRect(x,y,w,h);
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U); X.strokeRect(x+U/2,y+U/2,w-U,h-U);
+  X.fillStyle=WHITE; X.fillRect(on?x+w-6*U:x+2*U,y+2*U,4*U,h-4*U);
+  return hot&&M.click?(sfx("click"),!on):on;
+}
+function backArrow(){
+  const w=24*U,h=18*U,x=W-w-7*U,y=7*U;
+  reserve(x,y,w,h);
+  const hot=inRect(x,y,w,h);
+  frame(x,y,w,h,hot);
+  X.fillStyle=WHITE; X.beginPath();
+  X.moveTo(x+w/2-4*U,y+h/2); X.lineTo(x+w/2+3*U,y+h/2-4*U); X.lineTo(x+w/2+3*U,y+h/2+4*U);
+  X.closePath(); X.fill();
+  return hot&&M.click&&(sfx("click"),true);
+}
+
+/* ===========================================================================
+   AUDIO  --  synthesised, no assets.
+   Deliberately low and small: a soft low thud when a cell is made, and a
+   short bit-crushed noise burst when one is destroyed. The crush is done two
+   ways at once -- the noise buffer is sample-and-held, which drops the
+   effective sample rate, and a waveshaper quantises it to a handful of
+   levels. Both stay well under the click and tick in level.
+   =========================================================================== */
+/* --- music -----------------------------------------------------------------
+   The supplied MIDI, flattened to note events at load time: 110bpm, 38 notes
+   over a 32-beat loop. The file's final note is NOT here -- it was a marker for
+   where the loop should return to, so its start time became the loop length and
+   the note itself was dropped. Encoded as "loopSeconds|t,dur,pitch,velocity;..."
+   Voiced with a short plucked square, matching the rest of the sound.
+   MUSIC_BOOST is the requested 3x lift; the file is written at velocity 50,
+   which is quiet. */
+const MUSIC_SRC="17.4545|0.000,0.136,64,50;0.273,0.136,62,50;0.818,0.136,57,50;1.636,0.136,55,50;1.636,0.136,60,50;2.727,0.136,62,50;3.818,0.136,52,50;3.818,0.136,57,50;4.364,0.136,64,50;4.636,0.136,62,50;5.182,0.136,57,50;6.000,0.136,55,50;6.000,0.136,60,50;6.818,0.136,57,50;7.091,0.136,62,50;7.364,0.136,69,50;7.636,0.136,57,50;8.182,0.136,52,50;8.727,0.136,64,50;9.000,0.136,62,50;9.545,0.136,57,50;10.364,0.136,55,50;10.364,0.136,60,50;11.454,0.136,62,50;12.545,0.136,52,50;12.545,0.136,57,50;13.091,0.136,64,50;13.364,0.136,62,50;13.909,0.136,57,50;14.727,0.136,55,50;14.727,0.136,60,50;15.545,0.136,57,50;15.818,0.136,62,50;16.091,0.136,69,50;16.364,0.136,52,50;16.636,0.136,69,50;16.909,0.136,62,50;17.182,0.136,57,50";
+const MUSIC_BOOST=3;
+const MUSIC=(()=>{
+  const [head,body]=MUSIC_SRC.split("|");
+  return {loop:parseFloat(head),
+          notes:body.split(";").map(n=>n.split(",").map(Number))};
+})();
+let musGain=null, musIdx=0, musBase=0, musOn=false;
+let AC=null, master=null, NOISE=null, CRUSH=null, VERB=null, verbGain=null;
+function audioUnlock(){
+  if(AC){ if(AC.state==="suspended") AC.resume(); return; }
+  try{
+    AC=new (window.AudioContext||window.webkitAudioContext)();
+    master=AC.createGain(); master.gain.value=1; master.connect(AC.destination);
+    musGain=AC.createGain(); musGain.gain.value=0; musGain.connect(AC.destination);
+    const len=Math.floor(AC.sampleRate*0.4);
+    NOISE=AC.createBuffer(1,len,AC.sampleRate);
+    const d=NOISE.getChannelData(0);
+    let v=0;
+    // hold each sample longer -> lower effective sample rate -> grittier
+    for(let i=0;i<len;i++){ if(i%14===0) v=Math.random()*2-1; d[i]=v; }
+    CRUSH=new Float32Array(256);
+    for(let i=0;i<256;i++){ const x=i/255*2-1; CRUSH[i]=Math.round(x*1.5)/1.5; } // ~2 bit
+    // Small room: exponentially decaying noise as an impulse response. Kept in
+    // its own try so that a browser without ConvolverNode loses the tail rather
+    // than all sound.
+    try{
+      const rl=Math.floor(AC.sampleRate*0.34);
+      const ir=AC.createBuffer(2,rl,AC.sampleRate);
+      for(let ch=0;ch<2;ch++){
+        const b=ir.getChannelData(ch);
+        for(let i=0;i<rl;i++) b[i]=(Math.random()*2-1)*Math.pow(1-i/rl,3.2);
+      }
+      VERB=AC.createConvolver(); VERB.buffer=ir;
+      verbGain=AC.createGain(); verbGain.gain.value=0.5;
+      VERB.connect(verbGain); verbGain.connect(AC.destination);
+    }catch(e){ VERB=null; }
+    musOn=true; musIdx=0; musBase=AC.currentTime+0.15;
+  }catch(e){ AC=null; }
+}
+
+function musicNote(when,dur,pitch,vel){
+  const f=440*Math.pow(2,(pitch-69)/12);
+  const o=AC.createOscillator(), g=AC.createGain(), lp=AC.createBiquadFilter();
+  o.type="square"; o.frequency.value=f;
+  lp.type="lowpass"; lp.frequency.value=Math.min(6000,f*6);
+  const peak=(vel/127)*0.22, end=when+Math.max(dur,0.09)+0.20;
+  g.gain.setValueAtTime(0.0001,when);
+  g.gain.exponentialRampToValueAtTime(peak,when+0.008);   // quick pluck
+  g.gain.exponentialRampToValueAtTime(0.0001,end);
+  o.connect(lp); lp.connect(g); g.connect(musGain);
+  o.start(when); o.stop(end+0.02);
+}
+// Scheduled ahead of the clock; the gain node is live so the slider responds
+// immediately rather than after the lookahead window.
+function musicPump(){
+  if(!AC||!musOn) return;
+  musGain.gain.value=S.musicVol*MUSIC_BOOST*0.25;
+  const ahead=AC.currentTime+0.7;
+  let guard=0;
+  while(guard++<400){
+    const n=MUSIC.notes[musIdx];
+    if(musBase+n[0]>=ahead) break;
+    if(S.musicVol>0) musicNote(musBase+n[0],n[1],n[2],n[3]);
+    if(++musIdx>=MUSIC.notes.length){ musIdx=0; musBase+=MUSIC.loop; }
+  }
+}
+function tone(freq,to,dur,type,gain,cut){
+  if(!AC||S.sfxVol<=0) return;
+  const t=AC.currentTime;
+  const o=AC.createOscillator(), g=AC.createGain(), f=AC.createBiquadFilter();
+  o.type=type; o.frequency.setValueAtTime(freq,t);
+  if(to) o.frequency.exponentialRampToValueAtTime(to,t+dur);
+  f.type="lowpass"; f.frequency.value=cut||800;
+  g.gain.setValueAtTime(Math.max(.0001,gain*S.sfxVol),t);
+  g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+  o.connect(f); f.connect(g); g.connect(master);
+  o.start(t); o.stop(t+dur+.02);
+}
+function crushBurst(gain,dur,cut0,cut1,wet){
+  if(!AC||S.sfxVol<=0) return;
+  const t=AC.currentTime;
+  const s=AC.createBufferSource(); s.buffer=NOISE;
+  s.playbackRate.value=0.55;
+  const ws=AC.createWaveShaper(); ws.curve=CRUSH; ws.oversample="none";
+  const f=AC.createBiquadFilter(); f.type="lowpass";
+  f.frequency.setValueAtTime(cut0,t); f.frequency.exponentialRampToValueAtTime(cut1,t+dur);
+  const g=AC.createGain();
+  g.gain.setValueAtTime(Math.max(.0001,gain*S.sfxVol),t);
+  g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+  s.connect(ws); ws.connect(f); f.connect(g); g.connect(master);
+  if(wet&&VERB){                       // a little tail, well under the dry signal
+    const send=AC.createGain(); send.gain.value=wet*S.sfxVol;
+    g.connect(send); send.connect(VERB);
+  }
+  s.start(t); s.stop(t+dur+.02);
+}
+const lastSfx={};
+function sfxThrottled(name,minMs){
+  if(now-(lastSfx[name]||-1e9)<minMs) return;
+  lastSfx[name]=now; sfx(name);
+}
+// Generators making cells and trash/enemies destroying them are the same two
+// sounds as placing and deleting by hand, but there can be thousands per tick,
+// so they collapse to at most one of each per interval.
+function voiceWorld(){
+  if(!world) return;
+  if(world.evCreate>0) sfxThrottled("place",70);
+  if(world.evDestroy>0) sfxThrottled("del",90);
+  world.evCreate=0; world.evDestroy=0;
+}
+function sfx(name){
+  if(!AC||S.sfxVol<=0) return;
+  switch(name){
+    case "place": tone(132,84,.085,"square",.20,520); break;   // low thud
+    case "del":   crushBurst(.11,.15,820,120,.55); break;      // small crushed pop with a tail
+    case "click": tone(196,150,.035,"square",.10,700); break;
+    case "err":   crushBurst(.14,.22,500,90,.3); break;
+  }
+}
+
+/* ===========================================================================
+   LEVEL CODE EXPORT (V3)
+   Runs become back-references with offset 0, an escape the decoder already
+   understands, so no new syntax. Rows are written bottom-up like the game.
+   =========================================================================== */
+function b74e(n){
+  if(n<74) return B74[n];
+  let s=""; while(n>0){ s=B74[n%74]+s; n=Math.floor(n/74); }
+  return s||"0";
+}
+function exportV3(w,mask,name){
+  let raw="";
+  for(let y=w.H-1;y>=0;y--)
+    for(let x=0;x<w.W;x++){
+      const c=w.g[w.idx(x,y)], t=c>>2, p=mask&&mask[y*w.W+x]?1:0;
+      raw+=(t===T_EMPTY)?B74[72+p]:B74[T_TO_CM[t]*2+(c&3)*18+p];
+    }
+  raw=raw.replace(/\{+$/,"");
+  let out="";
+  for(let i=0;i<raw.length;){
+    let j=i+1; while(j<raw.length&&raw[j]===raw[i]) j++;
+    const run=j-i;
+    if(run<4) out+=raw[i].repeat(run);
+    else if(run-1<74) out+=raw[i]+")0"+b74e(run-1);
+    else out+=raw[i]+"(0("+b74e(run-1)+")";
+    i=j;
+  }
+  return `V3;${b74e(w.W)};${b74e(w.H)};${out};;${(name||"").replace(/;/g,"")};0`;
+}
+/* ---------------------------------------------------------------------------
+   STORAGE
+
+   Cookies capped a save at roughly 4KB, which a 100k-cell level blows straight
+   through. This is IndexedDB: hundreds of megabytes, and no per-record ceiling
+   worth worrying about.
+
+   It is asynchronous, so the UI keeps its own in-memory list and redraws from
+   that; the database is written behind it. If IndexedDB is unavailable -- which
+   includes Chrome on file:// pages, same as cookies -- everything still works
+   for the session and only persistence is lost, and the panels say so.
+   --------------------------------------------------------------------------- */
+const DB_NAME="webaccel", DB_VER=1;
+let db=null, dbFailed=false;
+let levelsMem=[], schemMem=[];          // what the UI draws
+let storeReady=false;
+
+function dbOpen(){
+  return new Promise(res=>{
+    let req;
+    try{ req=indexedDB.open(DB_NAME,DB_VER); }catch(e){ dbFailed=true; return res(null); }
+    req.onupgradeneeded=()=>{
+      const d=req.result;
+      if(!d.objectStoreNames.contains("levels")) d.createObjectStore("levels",{keyPath:"name"});
+      if(!d.objectStoreNames.contains("schematics")) d.createObjectStore("schematics",{keyPath:"name"});
+    };
+    req.onsuccess=()=>res(req.result);
+    req.onerror=()=>{ dbFailed=true; res(null); };
+    req.onblocked=()=>{ dbFailed=true; res(null); };
+  });
+}
+function dbAll(store){
+  return new Promise(res=>{
+    if(!db) return res([]);
+    try{
+      const r=db.transaction(store,"readonly").objectStore(store).getAll();
+      r.onsuccess=()=>res(r.result||[]);
+      r.onerror=()=>res([]);
+    }catch(e){ res([]); }
+  });
+}
+function dbPut(store,rec){
+  return new Promise(res=>{
+    if(!db) return res("no storage available - this save will not survive a reload");
+    try{
+      const tx=db.transaction(store,"readwrite");
+      tx.objectStore(store).put(rec);
+      tx.oncomplete=()=>res(null);
+      tx.onerror=()=>res("the browser refused to store this ("+
+        (tx.error&&tx.error.name||"unknown")+")");
+      tx.onabort=()=>res("storage quota exceeded");
+    }catch(e){ res("storage error: "+e.message); }
+  });
+}
+function dbDel(store,name){
+  return new Promise(res=>{
+    if(!db) return res();
+    try{
+      const tx=db.transaction(store,"readwrite");
+      tx.objectStore(store).delete(name);
+      tx.oncomplete=()=>res(); tx.onerror=()=>res();
+    }catch(e){ res(); }
+  });
+}
+async function storeInit(){
+  db=await dbOpen();
+  if(db){
+    levelsMem=await dbAll("levels");
+    schemMem=await dbAll("schematics");
+    // ask the browser not to evict us; harmless if unsupported
+    try{
+      if(navigator.storage&&navigator.storage.persisted){
+        storagePersistent=await navigator.storage.persisted();
+        if(!storagePersistent&&navigator.storage.persist)
+          storagePersistent=await navigator.storage.persist();
+      }
+    }catch(e){}
+    // did anything cross a session boundary?
+    let hadSession=false;
+    try{
+      hadSession=!!sessionStorage.getItem("wam_session");
+      sessionStorage.setItem("wam_session","1");
+    }catch(e){ hadSession=false; }
+    const marked=levelsMem.some(e=>e.name==="__mark")||schemMem.some(e=>e.name==="__mark");
+    if(marked&&!hadSession) persistedAcrossSessions=true;
+    if(!marked){
+      // invisible marker so the next session can tell
+      dbPut("levels",{name:"__mark",code:""});
+      levelsMem.push({name:"__mark",code:""});
+    }
+    storageChecked=true;
+  }
+  storeReady=true;
+}
+storeInit();
+
+// The UI reads these synchronously; writes update memory first, then the store.
+const cookieList=()=>levelsMem.filter(e=>e.name!=="__mark").sort((a,b)=>a.name<b.name?-1:1);
+const schemList=()=>schemMem.filter(e=>e.name!=="__mark").sort((a,b)=>a.name<b.name?-1:1);
+function saveRec(list,store,name,code,cb){
+  const i=list.findIndex(e=>e.name===name);
+  const rec={name,code};
+  if(i>=0) list[i]=rec; else list.push(rec);
+  dbPut(store,rec).then(err=>{ if(cb) cb(err); });
+}
+/* Served from a real domain, IndexedDB is permanent -- that is the intended
+   home for this. On a file:// page the browser gives the document no origin and
+   refuses storage outright, so a "save" there would be lost the moment the tab
+   closed. Rather than hand back something that looks saved and is not, saving
+   is refused and says why. */
+/* Whether storage works is DETECTED, never assumed from the URL. file:// pages
+   do get IndexedDB in some browsers and not others, and asserting otherwise was
+   simply wrong. Saving is refused only when opening the database actually failed.
+
+   Surviving a refresh does not prove surviving a restart, so a marker is kept in
+   sessionStorage (which dies with the tab) alongside one in IndexedDB (which
+   should not). Finding the database marker without the session one means the
+   data genuinely crossed a session boundary -- the only honest way to report it. */
+const NO_STORE="storage unavailable here - saving is disabled";
+const storageBlocked=()=>storeReady&&(dbFailed||!db);
+let persistedAcrossSessions=false, storagePersistent=false, storageChecked=false;
+function storageStatus(){
+  if(!storeReady) return {text:"checking storage...",colour:"#222"};
+  if(storageBlocked()) return {text:"saving disabled - this browser gives the page no storage",colour:"#a33"};
+  if(persistedAcrossSessions)
+    return {text:"storage confirmed: saves survived a previous session",colour:"#2a7"};
+  if(storagePersistent)
+    return {text:"storage granted as persistent by the browser",colour:"#2a7"};
+  return {text:"storage works, but a restart has not been observed yet",colour:"#666"};
+}
+const cookieSave=(name,code)=>{
+  if(storageBlocked()) return NO_STORE;
+  saveRec(levelsMem,"levels",name,code,err=>{ if(err) say(err,true); });
+  return null;
+};
+const schemSave=(name,code)=>{
+  if(storageBlocked()) return NO_STORE;
+  saveRec(schemMem,"schematics",name,code,err=>{ if(err) say(err,true); });
+  return null;
+};
+const cookieDrop=n=>{ levelsMem=levelsMem.filter(e=>e.name!==n); dbDel("levels",n); };
+const schemDrop =n=>{ schemMem =schemMem .filter(e=>e.name!==n); dbDel("schematics",n); };
+
+async function copyText(t){
+  try{ await navigator.clipboard.writeText(t); return true; }
+  catch(e){
+    try{
+      const ta=document.createElement("textarea");
+      ta.value=t; ta.style.position="fixed"; ta.style.opacity="0";
+      document.body.appendChild(ta); ta.select();
+      const ok=document.execCommand("copy"); ta.remove(); return ok;
+    }catch(e2){ return false; }
+  }
+}
+
+/* ===========================================================================
+   STATE
+   =========================================================================== */
+const S={musicVol:.8,sfxVol:.8,fast:false};
+let scr="title", paused=false, modal=null, pending=null, toast="", toastT=-1e9;
+let world=null, placeMask=null, levelName="", tickCount=0;
+let playing=false, tpsIdx=3, acc=0, now=0;
+// Interpolation. The grid always holds the post-tick state; moved cells are
+// drawn back toward where they came from and slide into place as the next tick
+// approaches, so motion reads as continuous instead of stepping.
+let tickAt=-1e9, tickDur=0;
+const interpOn=()=>!S.fast;
+const alphaNow=()=>tickDur>0?Math.min(1,(now-tickAt)/tickDur):1;
+const TPS=[1,2,3,5,10,20,30,60,120,600,Infinity];
+const tpsLabel=()=>TPS[tpsIdx]===Infinity?"max tps":TPS[tpsIdx]+" tps";
+const PALETTE=[T_GEN,T_MOVER,T_CW,T_CCW,T_PUSH,T_SLIDE,T_ENEMY,T_TRASH,T_WALL];
+// 9 = drag cells around, 10 = pan the camera, 11 = rectangle select
+const TOOL_PLUS=9,TOOL_DRAG=10,TOOL_SELECT=11;   // middle-drag still pans
+
+/* --- initial state ----------------------------------------------------------
+   "Initial state" is whatever the board looked like the moment Play was first
+   pressed. Everything edited before that counts as part of the level; edits
+   after it are live and are thrown away on reset. R restores it and puts you
+   back in the editing phase, so you can rearrange and run again. */
+let mode="editable";          // "level" locks the building tools away
+let started=false;            // has the run begun since the last reset?
+let won=false, hadEnemies=false, winCheckAt=-1e9;
+let initG=null, initMask=null;
+let dragCell=null;            // {c,fromX,fromY} while dragging one cell
+let sel=null, selDrag=null, carry=null;   // rectangle select + clipboard
+// switching away from select drops what was selected, so a stale box cannot
+// linger over the board while you are painting
+function setTool(i){
+  if(selTool===TOOL_SELECT&&i!==TOOL_SELECT){ sel=null; selDrag=null; }
+  selTool=i;
+}
+let importedLevel=null;
+let schemOpen=false;
+
+/* Saving has to capture the level, not the run. Once Play is pressed the board
+   is a mid-simulation mess -- generators have flooded it, enemies are gone --
+   and reloading that is not the level you built. These read the snapshot taken
+   when the run began; before that, the snapshot is the live board anyway. */
+function initialWorld(){
+  if(!initG||!world) return world;
+  if(!started) return world;                 // nothing has run yet
+  const W0=world.W,H0=world.H,st=W0+2;
+  const w=new World(W0,H0);
+  for(let y=0;y<H0;y++)for(let x=0;x<W0;x++){
+    const c=initG[(y+1)*st+(x+1)];
+    if(c) w.setCell(w.idx(x,y),c);
+  }
+  return w;
+}
+const initialMask=()=>(started&&initMask)?initMask:placeMask;
+function snapshotInitial(){
+  if(!world) return;
+  initG=world.g.slice(); initMask=placeMask.slice();
+}
+function restoreInitial(){
+  if(!initG||!world) return;
+  const W0=world.W,H0=world.H,st=W0+2;
+  const w=new World(W0,H0);
+  for(let y=0;y<H0;y++)for(let x=0;x<W0;x++){
+    const c=initG[(y+1)*st+(x+1)];
+    if(c) w.setCell(w.idx(x,y),c);
+  }
+  world=w; placeMask=initMask.slice();
+  rescanMask();
+  tickCount=0; playing=false; won=false; started=false; acc=0; tickDur=0;
+  sel=null; selDrag=null; carry=null; dragCell=null;
+}
+function beginRun(){ if(!started){ snapshotInitial(); started=true; } }
+function togglePlay(){ if(!world) return; if(!playing) beginRun(); playing=!playing; acc=0; }
+function afterLoad(m){
+  mode=m||mode;
+  started=false; won=false; sel=null; carry=null; dragCell=null;
+  hadEnemies=false;
+  for(let y=0;y<world.H&&!hadEnemies;y++)
+    for(let x=0;x<world.W;x++)
+      if((world.g[world.idx(x,y)]>>2)===T_ENEMY){ hadEnemies=true; break; }
+  selTool=0;
+  snapshotInitial();
+}
+// Scanning for enemies every tick would be silly on a big board, so the win
+// check is throttled; it only runs in level mode and only if the level had an
+// enemy to begin with.
+function checkWin(){
+  if(mode!=="level"||won||!hadEnemies||!world) return;
+  if(now-winCheckAt<150) return;
+  winCheckAt=now;
+  const G=world.g, ST=world.stride;
+  for(let y=0;y<world.H;y++){
+    const b=(y+1)*ST+1;
+    for(let x=0;x<world.W;x++) if((G[b+x]>>2)===T_ENEMY) return;
+  }
+  won=true; playing=false;
+}
+const canEdit=()=>mode!=="level"||!started;
+let selTool=0, selRot=0;
+const cam={x:0,y:0,z:26};
+const say=(m,bad)=>{toast=m;toastT=now;if(bad)sfx("err");};
+
+/* screen transitions: a short dip to black, so navigation reads as motion */
+let fade=0, fadeTo=null;
+function nav(target){ fadeTo=target; fade=0.0001; }
+function back(){ nav(scr==="controls"?"options":"title"); }
+// keep a fresh sandbox consistent with the initial-state rules
+
+
+function newWorld(w,h){
+  world=new World(w,h); placeMask=new Uint8Array(w*h);   // no plus tiles by default
+  rescanMask();
+  levelName=""; tickCount=0; playing=false; centreCam();
+}
+function centreCam(){
+  cam.z=Math.max(4,Math.min(40,Math.floor(Math.min(W*0.8/world.W,H*0.72/world.H))));
+  cam.x=(world.W*cam.z-W)/2; cam.y=(world.H*cam.z-H)/2;
+}
+function loadLevel(L){
+  world=new World(L.W,L.H);
+  for(let y=0;y<L.H;y++)for(let x=0;x<L.W;x++){
+    const cid=L.id[y*L.W+x]; if(cid===9) continue;
+    world.place(x,y,cid>9?mk(T_WALL,0):mk(CM_TO_T[cid],L.rot[y*L.W+x]));
+  }
+  placeMask=L.place; levelName=L.name||""; tickCount=0; playing=false; centreCam();
+  rescanMask();
+}
+
+/* ===========================================================================
+   BOARD  --  fills the window; the UI floats over it
+   =========================================================================== */
+// A placeable tile as the game draws it: a faintly lighter tile with a plus
+// on it. A cell sitting on top hides it, which is what B is for.
+// Below the size where a sprite can show its icon, a cell is drawn flat. Rather
+// than a hand-picked colour, average the sprite's own pixels so the zoomed-out
+// board is a faithful low-resolution version of the zoomed-in one.
+const avgCache={};
+function avgColor(t){
+  if(avgCache[t]) return avgCache[t];
+  let out=COLORS[t]||"#f0f";
+  try{
+    const sp=makeSprite(t,0,16);
+    const d=sp.getContext("2d").getImageData(0,0,16,16).data;
+    let r=0,g=0,b=0,n=0;
+    for(let i=0;i<d.length;i+=4){
+      if(d[i+3]<8) continue;
+      r+=d[i]; g+=d[i+1]; b+=d[i+2]; n++;
+    }
+    if(n) out=`rgb(${Math.round(r/n)},${Math.round(g/n)},${Math.round(b/n)})`;
+  }catch(e){}                      // no pixel access (headless) -> keep the base colour
+  avgCache[t]=out;
+  return out;
+}
+function drawPlus(px,py,z,color){
+  const t=Math.max(1,Math.round(z*0.15)), L=Math.round(z*0.60);
+  const cx=Math.round(px+z/2), cy=Math.round(py+z/2);
+  X.fillStyle=color;
+  X.fillRect(cx-((t/2)|0),cy-((L/2)|0),t,L);
+  X.fillRect(cx-((L/2)|0),cy-((t/2)|0),L,t);
+}
+// Draws one cell, easing its rotation if a rotator turned it during this tick.
+// The base (rotation 0) sprite is spun by canvas transform rather than swapping
+// between the four pre-rendered ones, which is the only way to show a partial
+// turn. Smoothing stays off, so the spin is chunky rather than blurred.
+function drawCell(w,i,t,c,px,py,z,al){
+  const rf=al<1?w.rotFrom.get(i):undefined;
+  if(rf===undefined||t===T_WALL){
+    X.drawImage(spriteFor(t,c&3,z),px,py);
+    return;
+  }
+  let d=((c&3)-rf+4)&3;
+  if(d===3) d=-1;                      // a single anticlockwise step, not three
+  X.save();
+  X.translate(px+z/2,py+z/2);
+  X.rotate((rf+d*al)*Math.PI/2);
+  X.drawImage(spriteFor(t,0,z),-z/2,-z/2);
+  X.restore();
+}
+/* Below the size at which sprites are drawn, a cell is a flat block of colour --
+   and a full board means hundreds of thousands of them. One fillRect per cell
+   costs more than the pixels do, so the whole layer is composed in a pixel
+   buffer and pushed once. Falls back to the vector path if ImageData is
+   unavailable. */
+const packHex=h=>{const s=h.replace("#","");
+  return ((255<<24)|(parseInt(s.slice(4,6),16)<<16)|(parseInt(s.slice(2,4),16)<<8)|parseInt(s.slice(0,2),16))>>>0;};
+const PACK_BG=packHex("#000000"), PACK_BOARD=packHex("#0d0d0d"), PACK_PLUS=packHex("#191919");
+const rgbaCache={};
+function avgRGBA(t){
+  if(rgbaCache[t]!==undefined) return rgbaCache[t];
+  const m=/rgb\((\d+),(\d+),(\d+)\)/.exec(avgColor(t));
+  let v;
+  if(m) v=((255<<24)|(+m[3]<<16)|(+m[2]<<8)|+m[1])>>>0;
+  else v=packHex(COLORS[t]||"#ff00ff");
+  return rgbaCache[t]=v;
+}
+let rasterImg=null, rasterU32=null, rasterW=0, rasterH=0;
+function rasterLayer(g,sx,sy,z,x0,x1,y0,y1,al,doMove,clip){
+  if(!rasterImg||rasterW!==W||rasterH!==H){
+    rasterImg=g.createImageData(W,H);
+    rasterU32=new Uint32Array(rasterImg.data.buffer);
+    rasterW=W; rasterH=H;
+  }
+  const U32=rasterU32;
+  const cx0=clip?Math.max(0,clip.x):0, cy0=clip?Math.max(0,clip.y):0;
+  const cx1=clip?Math.min(W,clip.x+clip.w):W, cy1=clip?Math.min(H,clip.y+clip.h):H;
+  const bx0=Math.max(cx0,sx), by0=Math.max(cy0,sy);
+  const bx1=Math.min(cx1,sx+world.W*z), by1=Math.min(cy1,sy+world.H*z);
+  if(!clip&&bx0<=0&&by0<=0&&bx1>=W&&by1>=H) U32.fill(PACK_BOARD);   // board covers the view
+  else{
+    for(let y=cy0;y<cy1;y++){ let o=y*W+cx0; for(let x=cx0;x<cx1;x++) U32[o++]=PACK_BG; }
+    for(let y=by0;y<by1;y++){ let o=y*W+bx0; for(let x=bx0;x<bx1;x++) U32[o++]=PACK_BOARD; }
+  }
+  if(maskCount>0){
+    const px0=Math.max(x0,maskBox[0]), px1=Math.min(x1,maskBox[2]);
+    const py0=Math.max(y0,maskBox[1]), py1=Math.min(y1,maskBox[3]);
+    for(let y=py0;y<=py1;y++)for(let x=px0;x<=px1;x++){
+      if(!placeMask[y*world.W+x]) continue;
+      const qx0=Math.max(cx0,sx+x*z), qx1=Math.min(cx1,sx+x*z+z);
+      const qy0=Math.max(cy0,sy+y*z), qy1=Math.min(cy1,sy+y*z+z);
+      for(let yy=qy0;yy<qy1;yy++){ let o=yy*W+qx0; for(let xx=qx0;xx<qx1;xx++) U32[o++]=PACK_PLUS; }
+    }
+  }
+  const G=world.g, ST=world.stride, OCC=world.occ;
+  for(let y=y0;y<=y1;y++){
+    const base=(y+1)*ST+1, lo=base+x0, hi=base+x1;
+    const w0=lo>>5, w1=hi>>5;
+    for(let wi=w0;wi<=w1;wi++){
+      let m=OCC[wi];
+      if(wi===w0) m&=(0xFFFFFFFF<<(lo&31));
+      if(wi===w1&&(hi&31)!==31) m&=~(0xFFFFFFFF<<((hi&31)+1));
+      while(m!==0){
+        const bit=31-Math.clz32(m&-m); m&=m-1;
+        const idx=(wi<<5)|bit, x=idx-base;
+        const c=G[idx], t=c>>2;
+        if(t===T_EMPTY) continue;
+        let px=sx+x*z, py=sy+y*z;
+        if(doMove){
+          const src=world.motion.get(idx);
+          if(src!==undefined){
+            const ox=(src%ST)-1, oy=((src/ST)|0)-1;
+            px=Math.round(sx+(ox+(x-ox)*al)*z);
+            py=Math.round(sy+(oy+(y-oy)*al)*z);
+          }
+        }
+        const col=avgRGBA(t);
+        const ex0=Math.max(cx0,px), ex1=Math.min(cx1,px+z);
+        const ey0=Math.max(cy0,py), ey1=Math.min(cy1,py+z);
+        for(let yy=ey0;yy<ey1;yy++){ let o=yy*W+ex0; for(let xx=ex0;xx<ex1;xx++) U32[o++]=col; }
+      }
+    }
+  }
+}
+function drawPlusHighlight(sx,sy,z,x0,x1,y0,y1){
+  if(!KEYS.has("b")||maskCount<=0) return;
+  const bx0=Math.max(x0,maskBox[0]), bx1=Math.min(x1,maskBox[2]);
+  const by0=Math.max(y0,maskBox[1]), by1=Math.min(y1,maskBox[3]);
+  for(let y=by0;y<=by1;y++)for(let x=bx0;x<=bx1;x++)
+    if(placeMask[y*world.W+x]){
+      X.fillStyle="rgba(0,0,0,.45)"; X.fillRect(sx+x*z,sy+y*z,z,z);
+      drawPlus(sx+x*z,sy+y*z,z,"#6ec6ff");
+    }
+}
+function drawBoardLayer(clip){
+  X.fillStyle="#000"; X.fillRect(clip?clip.x:0,clip?clip.y:0,clip?clip.w:W,clip?clip.h:H);
+  if(!world) return;
+  const z=Math.max(1,Math.round(cam.z));
+  const sx=Math.round(-cam.x), sy=Math.round(-cam.y);
+  // A clip rect lets us repaint just the strip a pan exposed instead of the
+  // whole view.
+  const rx0=clip?clip.x:0, ry0=clip?clip.y:0;
+  const rx1=clip?clip.x+clip.w:W, ry1=clip?clip.y+clip.h:H;
+  if(clip){ X.save(); X.beginPath(); X.rect(rx0,ry0,clip.w,clip.h); X.clip(); }
+  // Derived from sx/sy, not cam.x/cam.y. The camera is fractional but cells are
+  // drawn at a rounded origin; mixing the two drops an edge column or row, which
+  // showed up as thin blank seams where a scrolled strip met the old image.
+  const x0=Math.max(0,Math.floor((rx0-sx)/z)), x1=Math.min(world.W-1,Math.floor((rx1-1-sx)/z));
+  const y0=Math.max(0,Math.floor((ry0-sy)/z)), y1=Math.min(world.H-1,Math.floor((ry1-1-sy)/z));
+  if(x1<x0||y1<y0){ if(clip) X.restore(); return; }
+  if(x1<x0||y1<y0) return;
+  const al0=alphaNow();
+  const anim0=interpOn()&&al0<1;
+  if(z<8){
+    try{
+      rasterLayer(X,sx,sy,z,x0,x1,y0,y1,al0,anim0&&world.motion.size>0,clip);
+      X.putImageData(rasterImg,0,0);
+      X.strokeStyle="#3c3c3c"; X.lineWidth=Math.max(1,U);
+      X.strokeRect(sx-U/2,sy-U/2,world.W*z+U,world.H*z+U);
+      drawPlusHighlight(sx,sy,z,x0,x1,y0,y1);
+      if(clip) X.restore();
+      return;
+    }catch(e){ /* no ImageData -- fall through to the vector path */ }
+  }
+  X.fillStyle="#0d0d0d"; X.fillRect(sx,sy,world.W*z,world.H*z);
+  // Plus tiles are usually a small patch, so keep a bounding box and never scan
+  // outside it -- and skip the pass entirely when the level has none.
+  if(z>=3&&maskCount>0){
+    const px0=Math.max(x0,maskBox[0]), px1=Math.min(x1,maskBox[2]);
+    const py0=Math.max(y0,maskBox[1]), py1=Math.min(y1,maskBox[3]);
+    for(let y=py0;y<=py1;y++)for(let x=px0;x<=px1;x++){
+      if(!placeMask[y*world.W+x]) continue;
+      X.fillStyle="#191919"; X.fillRect(sx+x*z,sy+y*z,z,z);
+      if(z>=10&&(world.g[(y+1)*world.stride+1+x]>>2)===T_EMPTY)
+        drawPlus(sx+x*z,sy+y*z,z,"#3d3d3d");
+    }
+  }
+  if(z>=9){
+    X.strokeStyle="#202020"; X.lineWidth=1; X.beginPath();
+    for(let x=x0;x<=x1+1;x++){X.moveTo(sx+x*z+.5,sy);X.lineTo(sx+x*z+.5,sy+world.H*z);}
+    for(let y=y0;y<=y1+1;y++){X.moveTo(sx,sy+y*z+.5);X.lineTo(sx+world.W*z,sy+y*z+.5);}
+    X.stroke();
+  }
+  const G=world.g, ST=world.stride, useSprites=z>=8, OCC=world.occ;
+  // FAST GRAPHICS turns this off and nothing else; below 8px a sprite has no
+  // room for its icon, so that fallback is unconditional.
+  const al=alphaNow();
+  // Movement and rotation are gated separately. They were both hung off
+  // motion.size, so a tick that only turned cells -- rotators facing each
+  // other, a mover pinned against a wall -- snapped instead of easing.
+  const anim=interpOn()&&al<1;
+  const doMove=anim&&world.motion.size>0;
+  const doSpin=anim&&world.rotFrom.size>0;
+  for(let y=y0;y<=y1;y++){
+    const base=(y+1)*ST+1;
+    // walk the occupancy bits for this row's visible span
+    const lo=base+x0, hi=base+x1;
+    let w0=lo>>5, w1=hi>>5;
+    for(let wi=w0;wi<=w1;wi++){
+      let m=OCC[wi];
+      if(wi===w0) m&=(0xFFFFFFFF<<(lo&31));
+      if(wi===w1&&(hi&31)!==31) m&=~(0xFFFFFFFF<<((hi&31)+1));
+      while(m!==0){
+      const bit=31-Math.clz32(m&-m);
+      m&=m-1;
+      const idx=(wi<<5)|bit, x=idx-base;
+      const c=G[idx], t=c>>2;
+      if(t===T_EMPTY) continue;
+      let px=sx+x*z, py=sy+y*z;
+      if(doMove){
+        const src=world.motion.get(idx);
+        if(src!==undefined){
+          const ox=(src%ST)-1, oy=((src/ST)|0)-1;
+          px=Math.round(sx+(ox+(x-ox)*al)*z);
+          py=Math.round(sy+(oy+(y-oy)*al)*z);
+        }
+      }
+      if(useSprites) drawCell(world,idx,t,c,px,py,z,doSpin?al:1);
+      else{X.fillStyle=avgColor(t);X.fillRect(px,py,z,z);}
+      }
+    }
+  }
+  X.strokeStyle="#3c3c3c"; X.lineWidth=Math.max(1,U);
+  X.strokeRect(sx-U/2,sy-U/2,world.W*z+U,world.H*z+U);
+  drawPlusHighlight(sx,sy,z,x0,x1,y0,y1);
+  if(clip) X.restore();
+}
+
+/* The cells layer is expensive -- ten thousand sprites is ten thousand blits --
+   and on a paused board it is identical frame to frame. Cache it and redraw
+   only when the world, the camera or the window actually changes. While cells
+   are mid-interpolation the picture changes every frame, so the cache is
+   bypassed rather than thrashed. */
+let bcache=null, bkey="", maskRev=0;
+let scratch=null;
+let lastCamX=0, lastCamY=0, lastStamp="";
+function invalidateBoardCache(){ bkey=""; lastStamp=""; }
+/* Panning exposes at most one vertical and one horizontal strip. Rather than
+   repaint every cell in view -- which on a dense board is tens of thousands of
+   sprite blits -- shift the cached image by the delta and repaint only what
+   scrolled into frame. Only worth it for the sprite path; the pixel-buffer path
+   below sprite size is already cheap enough to redo wholesale. */
+function scrollRaster(dx,dy,sx,sy,z){
+  const U32=rasterU32;
+  if(dy>0){ for(let y=0;y<H-dy;y++) U32.copyWithin(y*W,(y+dy)*W,(y+dy)*W+W); }
+  else if(dy<0){ for(let y=H-1;y>=-dy;y--) U32.copyWithin(y*W,(y+dy)*W,(y+dy)*W+W); }
+  if(dx>0){ for(let y=0;y<H;y++) U32.copyWithin(y*W,y*W+dx,y*W+W); }
+  else if(dx<0){ for(let y=0;y<H;y++) U32.copyWithin(y*W-dx,y*W,y*W+W+dx); }
+  const strips=[];
+  if(dx>0) strips.push({x:W-dx,y:0,w:dx,h:H});
+  else if(dx<0) strips.push({x:0,y:0,w:-dx,h:H});
+  if(dy>0) strips.push({x:0,y:H-dy,w:W,h:dy});
+  else if(dy<0) strips.push({x:0,y:0,w:W,h:-dy});
+  for(const c of strips){
+    const rx1=c.x+c.w, ry1=c.y+c.h;
+    const x0=Math.max(0,Math.floor((c.x-sx)/z)), x1=Math.min(world.W-1,Math.floor((rx1-1-sx)/z));
+    const y0=Math.max(0,Math.floor((c.y-sy)/z)), y1=Math.min(world.H-1,Math.floor((ry1-1-sy)/z));
+    if(x1<x0||y1<y0){
+      for(let y=c.y;y<ry1;y++){ let o=y*W+c.x; for(let x=c.x;x<rx1;x++) U32[o++]=PACK_BG; }
+      continue;
+    }
+    rasterLayer(null,sx,sy,z,x0,x1,y0,y1,1,false,c);
+  }
+}
+function scrollCache(dx,dy){
+  if(!scratch||scratch.width!==W||scratch.height!==H){
+    scratch=document.createElement("canvas"); scratch.width=W; scratch.height=H;
+  }
+  const sg=scratch.getContext("2d");
+  sg.imageSmoothingEnabled=false;
+  sg.setTransform(1,0,0,1,0,0);
+  sg.clearRect(0,0,W,H);
+  sg.drawImage(bcache,0,0);
+  const g=bcache.getContext("2d");
+  g.imageSmoothingEnabled=false;
+  g.setTransform(1,0,0,1,0,0);
+  g.clearRect(0,0,W,H);
+  g.drawImage(scratch,-dx,-dy);
+  const prev=X; X=g;
+  try{
+    if(dx>0) drawBoardLayer({x:W-dx,y:0,w:dx,h:H});
+    else if(dx<0) drawBoardLayer({x:0,y:0,w:-dx,h:H});
+    if(dy>0) drawBoardLayer({x:0,y:H-dy,w:W,h:dy});
+    else if(dy<0) drawBoardLayer({x:0,y:0,w:W,h:-dy});
+  } finally { X=prev; }
+}
+let maskCount=0, maskBox=[0,0,-1,-1];      // count + bounding box of plus tiles
+function rescanMask(){
+  maskCount=0; maskBox=[1e9,1e9,-1,-1];
+  if(!placeMask||!world) { maskBox=[0,0,-1,-1]; return; }
+  for(let y=0;y<world.H;y++)for(let x=0;x<world.W;x++){
+    if(!placeMask[y*world.W+x]) continue;
+    maskCount++;
+    if(x<maskBox[0])maskBox[0]=x; if(y<maskBox[1])maskBox[1]=y;
+    if(x>maskBox[2])maskBox[2]=x; if(y>maskBox[3])maskBox[3]=y;
+  }
+  if(!maskCount) maskBox=[0,0,-1,-1];
+  maskRev++;
+}
+function noteMaskCell(x,y,on){
+  if(on){ maskCount++;
+    if(maskBox[2]<maskBox[0]) maskBox=[x,y,x,y];
+    else{ if(x<maskBox[0])maskBox[0]=x; if(y<maskBox[1])maskBox[1]=y;
+          if(x>maskBox[2])maskBox[2]=x; if(y>maskBox[3])maskBox[3]=y; }
+  } else maskCount=Math.max(0,maskCount-1);   // box stays conservative
+  maskRev++;
+}
+function drawBoard(){
+  if(!world){ X.fillStyle="#000"; X.fillRect(0,0,W,H); return; }
+  const animating=interpOn()&&alphaNow()<1&&(world.motion.size>0||world.rotFrom.size>0);
+  const key=[world.W,world.H,Math.round(cam.x),Math.round(cam.y),Math.round(cam.z),
+             W,H,world.rev,maskRev,KEYS.has("b")?1:0].join(",");
+  if(animating){
+    bkey="";
+    drawBoardLayer();
+  }else{
+    if(!bcache||bcache.width!==W||bcache.height!==H){
+      bcache=document.createElement("canvas"); bcache.width=W; bcache.height=H;
+      bkey="";
+    }
+    if(key!==bkey){
+      // everything except the camera position
+      const stamp=[world.W,world.H,Math.round(cam.z),W,H,world.rev,maskRev,
+                   KEYS.has("b")?1:0].join(",");
+      const dx=Math.round(cam.x)-lastCamX, dy=Math.round(cam.y)-lastCamY;
+      const zNow=Math.round(cam.z);
+      const canScroll=bkey&&stamp===lastStamp&&
+                      (dx!==0||dy!==0)&&Math.abs(dx)<W&&Math.abs(dy)<H;
+      if(canScroll&&zNow<8&&rasterU32&&rasterW===W&&rasterH===H){
+        // shift the pixel buffer, repaint the strips, push once
+        scrollRaster(dx,dy,Math.round(-cam.x),Math.round(-cam.y),zNow);
+        const g=bcache.getContext("2d");
+        g.imageSmoothingEnabled=false; g.setTransform(1,0,0,1,0,0);
+        g.putImageData(rasterImg,0,0);
+        const prev=X; X=g;
+        try{
+          X.strokeStyle="#3c3c3c"; X.lineWidth=Math.max(1,U);
+          X.strokeRect(Math.round(-cam.x)-U/2,Math.round(-cam.y)-U/2,
+                       world.W*zNow+U,world.H*zNow+U);
+        } finally { X=prev; }
+      }
+      else if(canScroll&&zNow>=8) scrollCache(dx,dy);
+      else{
+        const g=bcache.getContext("2d");
+        g.imageSmoothingEnabled=false;
+        g.setTransform(1,0,0,1,0,0);
+        const prev=X; X=g;          // drawCell/drawPlus draw through this binding
+        try{ drawBoardLayer(); } finally { X=prev; }
+      }
+      lastStamp=stamp; lastCamX=Math.round(cam.x); lastCamY=Math.round(cam.y);
+      bkey=key;
+    }
+    X.drawImage(bcache,0,0);
+  }
+  drawBoardOverlays();
+}
+function drawBoardOverlays(){
+  const z=Math.max(1,Math.round(cam.z));
+  const sx=Math.round(-cam.x), sy=Math.round(-cam.y);
+  const r=selDrag?normSel(selDrag):sel;
+  if(r){
+    X.fillStyle="rgba(110,198,255,.18)";
+    X.fillRect(sx+r.x0*z,sy+r.y0*z,(r.x1-r.x0+1)*z,(r.y1-r.y0+1)*z);
+    X.strokeStyle="#6ec6ff"; X.lineWidth=Math.max(1,U);
+    X.strokeRect(sx+r.x0*z+U/2,sy+r.y0*z+U/2,(r.x1-r.x0+1)*z-U,(r.y1-r.y0+1)*z-U);
+  }
+  const h=hoverCell();
+  if(carry&&h){
+    X.globalAlpha=.75;
+    for(let cy=0;cy<carry.h;cy++)for(let cx=0;cx<carry.w;cx++){
+      const c=carry.cells[cy*carry.w+cx];
+      if(!c) continue;
+      const t2=c>>2;
+      if(z>=8) X.drawImage(spriteFor(t2,c&3,z),sx+(h.x+cx)*z,sy+(h.y+cy)*z);
+      else{X.fillStyle=avgColor(t2);X.fillRect(sx+(h.x+cx)*z,sy+(h.y+cy)*z,z,z);}
+    }
+    X.globalAlpha=1;
+  }
+  if(dragCell){
+    X.globalAlpha=.85;
+    const t2=dragCell.c>>2;
+    if(z>=8) X.drawImage(spriteFor(t2,dragCell.c&3,z),Math.round(M.x-z/2),Math.round(M.y-z/2));
+    else{X.fillStyle=avgColor(t2);X.fillRect(M.x-z/2,M.y-z/2,z,z);}
+    X.globalAlpha=1;
+  }
+  if(h&&!overUI()&&!carry){
+    X.strokeStyle="rgba(255,255,255,.8)"; X.lineWidth=Math.max(1,U);
+    X.strokeRect(sx+h.x*z+U/2,sy+h.y*z+U/2,z-U,z-U);
+  }
+}
+// Clamped to the board, so a selection dragged off the edge still resolves to
+// a cell instead of vanishing.
+function hoverCellClamped(){
+  if(!world) return null;
+  const z=Math.max(1,Math.round(cam.z));
+  const x=Math.floor((M.x+cam.x)/z), y=Math.floor((M.y+cam.y)/z);
+  return {x:Math.max(0,Math.min(world.W-1,x)),y:Math.max(0,Math.min(world.H-1,y))};
+}
+function hoverCell(){
+  if(!world) return null;
+  const z=Math.max(1,Math.round(cam.z));
+  const x=Math.floor((M.x+cam.x)/z), y=Math.floor((M.y+cam.y)/z);
+  return (x>=0&&x<world.W&&y>=0&&y<world.H)?{x,y}:null;
+}
+/* --- selection clipboard ---------------------------------------------------- */
+function normSel(r){
+  return {x0:Math.min(r.x0,r.x1),y0:Math.min(r.y0,r.y1),
+          x1:Math.max(r.x0,r.x1),y1:Math.max(r.y0,r.y1)};
+}
+function grabSel(clone){
+  if(!sel) return;
+  const {x0,y0,x1,y1}=sel, w=x1-x0+1, h=y1-y0+1;
+  const cells=new Uint8Array(w*h);
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+    cells[y*w+x]=world.g[world.idx(x0+x,y0+y)];
+    if(!clone) world.place(x0+x,y0+y,0);
+  }
+  carry={w,h,cells,from:clone?null:{x:x0,y:y0}};
+  sel=null; sfx("click");
+}
+// Rotating a block turns the layout and every cell's facing together, which is
+// what makes a rotated machine still work.
+function rotateCarry(step){
+  if(!carry) return;
+  const {w,h,cells}=carry;
+  const nw=h, nh=w, out=new Uint8Array(nw*nh);
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+    const c=cells[y*w+x];
+    if(!c) continue;
+    const nx = step===1 ? (h-1-y) : y;
+    const ny = step===1 ? x       : (w-1-x);
+    out[ny*nw+nx]=mk(c>>2,((c&3)+step)&3);
+  }
+  carry={w:nw,h:nh,cells:out,from:null};   // no longer lines up with where it came from
+}
+function stampAt(cy,ax,ay){
+  for(let y=0;y<cy.h;y++)for(let x=0;x<cy.w;x++){
+    const c=cy.cells[y*cy.w+x];
+    if(!c) continue;
+    const tx=ax+x, ty=ay+y;
+    if(tx>=0&&tx<world.W&&ty>=0&&ty<world.H) world.place(tx,ty,c);
+  }
+}
+// A selection exported as a standalone V3 level, so it pastes into anything
+// that reads Cell Machine codes.
+function selCode(name){
+  if(!sel) return null;
+  const src=initialWorld(), msk=initialMask();
+  const {x0,y0,x1,y1}=sel, w=x1-x0+1, h=y1-y0+1;
+  const tw=new World(w,h), tm=new Uint8Array(w*h);
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+    const c=src.g[src.idx(x0+x,y0+y)];
+    if(c) tw.setCell(tw.idx(x,y),c);
+    tm[y*w+x]=msk[(y0+y)*src.W+(x0+x)];
+  }
+  return exportV3(tw,tm,name||"");
+}
+function carryFromCode(code){
+  const L=importCode(code);
+  const cells=new Uint8Array(L.W*L.H);
+  for(let y=0;y<L.H;y++)for(let x=0;x<L.W;x++){
+    const cid=L.id[y*L.W+x];
+    if(cid===9) continue;
+    cells[y*L.W+x]=mk(cid>9?T_WALL:CM_TO_T[cid],L.rot[y*L.W+x]);
+  }
+  carry={w:L.W,h:L.H,cells,from:null};
+  sel=null;
+}
+function deleteSel(){
+  if(!sel) return;
+  for(let y=sel.y0;y<=sel.y1;y++)for(let x=sel.x0;x<=sel.x1;x++) world.place(x,y,0);
+  sel=null; sfx("del");
+}
+
+function boardInput(dt){
+  if(!world) return;
+  const sp=520*dt*DPR;
+  if(KEYS.has("a"))cam.x-=sp; if(KEYS.has("d"))cam.x+=sp;
+  if(KEYS.has("w"))cam.y-=sp; if(KEYS.has("s"))cam.y+=sp;
+  if(M.wheel){
+    const z0=Math.max(1,Math.round(cam.z));
+    const wx=(M.x+cam.x)/z0, wy=(M.y+cam.y)/z0;
+    let z=Math.round(cam.z*(M.wheel<0?1.2:1/1.2));
+    if(z===Math.round(cam.z)) z+=(M.wheel<0?1:-1);
+    cam.z=Math.max(2,Math.min(64,z));
+    cam.x=wx*cam.z-M.x; cam.y=wy*cam.z-M.y;
+  }
+  const panning=M.mdown;                 // panning is middle-drag only now
+  if(panning){cam.x-=M.pdx;cam.y-=M.pdy;return;}
+  if(won) return;
+
+  const h=hoverCell();
+  // a dragged cell has to land (or go home) even if released off the board
+  if(dragCell&&!M.down){
+    let placed=false;
+    if(h&&!overUI()){
+      const dest=world.idx(h.x,h.y);
+      const okDest=(world.g[dest]>>2)===T_EMPTY&&
+                   (mode!=="level"||placeMask[h.y*world.W+h.x]);
+      if(okDest){ world.place(h.x,h.y,dragCell.c); placed=true; sfx("place"); }
+    }
+    if(!placed) world.place(dragCell.fromX,dragCell.fromY,dragCell.c);
+    dragCell=null;
+  }
+  if(selDrag&&!M.down){ sel=normSel(selDrag); selDrag=null; }
+  if(overUI()) return;
+  if(selTool===TOOL_SELECT&&!carry){
+    const c=hoverCellClamped();
+    if(M.click&&!M.pressUI&&c){ selDrag={x0:c.x,y0:c.y,x1:c.x,y1:c.y}; sel=null; }
+    else if(M.down&&selDrag&&c){ selDrag.x1=c.x; selDrag.y1=c.y; }
+    if(M.rclick) sel=null;
+    return;
+  }
+  if(!h) return;
+
+  if(carry){
+    if(M.click&&!M.pressUI){ stampAt(carry,h.x,h.y); carry=null; sfx("place"); }
+    if(M.rclick&&!M.rpressUI){
+      if(carry.from) stampAt(carry,carry.from.x,carry.from.y);
+      carry=null;
+    }
+    return;
+  }
+
+  // level mode has no building tools: dragging cells that sit on a plus is all
+  // you get, and only before the run has started
+  if(mode==="level"||selTool===TOOL_DRAG){
+    if(M.click&&!M.pressUI&&canEdit()&&!dragCell){
+      const i=world.idx(h.x,h.y), c=world.g[i];
+      const onPlus=mode!=="level"||placeMask[h.y*world.W+h.x];
+      if((c>>2)!==T_EMPTY&&onPlus){
+        dragCell={c,fromX:h.x,fromY:h.y};
+        world.place(h.x,h.y,0);
+        sfx("click");
+      }
+    }
+    return;
+  }
+  if(selTool===TOOL_SELECT){
+    const c=hoverCellClamped();
+    if(M.click&&!M.pressUI&&c){ selDrag={x0:c.x,y0:c.y,x1:c.x,y1:c.y}; sel=null; }
+    else if(M.down&&selDrag&&c){ selDrag.x1=c.x; selDrag.y1=c.y; }
+    if(M.rclick) sel=null;
+    return;
+  }
+  if(selTool===TOOL_PLUS){                 // paint / erase the placeable region
+    const o2=h.y*world.W+h.x;
+    if(M.down&&!M.pressUI){ if(!placeMask[o2]){ placeMask[o2]=1; noteMaskCell(h.x,h.y,true); if(M.click) sfx("place"); } }
+    if(M.rdown&&!M.rpressUI){ if(placeMask[o2]){ placeMask[o2]=0; noteMaskCell(h.x,h.y,false); if(M.rclick) sfx("del"); } }
+    return;
+  }
+
+  const o=h.y*world.W+h.x;
+  if(M.down&&!M.pressUI){
+    world.place(h.x,h.y,mk(PALETTE[selTool],selRot));
+    if(M.click) sfx("place");
+  }
+  if(M.rdown&&!M.rpressUI&&world.g[world.idx(h.x,h.y)]){
+    world.place(h.x,h.y,0);
+    if(M.rclick) sfx("del");
+  }
+}
+
+/* ===========================================================================
+   SCREENS
+   =========================================================================== */
+/* The title decoration is a live board, not a picture: three sealed boxes each
+   holding a mover and a rotator, so the engine itself is the animation. */
+let titleW=null, titleAcc=0, titleAt=-1e9;
+const TITLE_TPS=5;
+function titleWorld(){
+  // The mockup arrangement, floating in a void -- no walls at all. It is a
+  // genuine 6-tick cycle: the mover crosses the gap, each corner rotator turns
+  // it ninety degrees as it arrives, and it returns to where it started.
+  const w=new World(5,2);
+  w.place(0,0,mk(T_CW,0)); w.place(4,0,mk(T_CW,0));
+  w.place(0,1,mk(T_CW,0)); w.place(4,1,mk(T_CW,0));
+  w.place(2,0,mk(T_MOVER,0));
+  return w;
+}
+function screenTitle(dt){
+  X.fillStyle="#000"; X.fillRect(0,0,W,H);
+  if(!titleW) titleW=titleWorld();
+  titleAcc+=dt*TITLE_TPS;
+  let ticked=false;
+  while(titleAcc>=1){
+    titleW.trackMotion=interpOn(); titleW.clearMotion();
+    titleW.tick(); titleW.trackMotion=false;
+    titleAcc-=1; ticked=true;
+  }
+  if(ticked) titleAt=now;
+  const tal=interpOn()?Math.min(1,(now-titleAt)/(1000/TITLE_TPS)):1;
+
+  // stacked top-down so nothing can overlap at any window size
+  const TITLE="WebAccel machine";
+  let tsc=U*5;
+  while(tsc>1&&textW(TITLE,tsc,2)>W*0.92) tsc--;
+  const psc0=Math.max(2,Math.round(tsc*0.85));
+  const bts0=Math.max(3,Math.min(U*30,Math.floor(W*0.055),Math.floor(W*0.5/titleW.W)));
+  const block=textH(tsc)+7*U+textH(psc0)+4*U+textH(U*2)+9*U+titleW.H*bts0;
+  let y=Math.round(Math.max(H*0.05,(H-block)/2-4*U));
+  text(TITLE,Math.round(W/2),y,tsc,WHITE,"center",2);
+  y+=textH(tsc)+7*U;
+
+  const psc=psc0;
+  const pw=textW("Play",psc,2), ph=textH(psc), px=Math.round(W/2-pw/2);
+  reserve(px,y,pw,ph);
+  const phot=inRect(px,y,pw,ph);
+  const pulse=0.70+0.30*Math.abs(Math.sin(now/560));
+  text("Play",Math.round(W/2),y,psc,phot?"#fff":"rgba(255,255,255,"+pulse.toFixed(3)+")","center",2);
+  if(phot&&M.click){ sfx("click"); nav("playmenu"); }
+  y+=ph+4*U;
+
+  if(uiText(Math.round(W/2),y,"options",U*2,DIM,"center",1)) nav("options");
+  y+=textH(U*2)+9*U;
+
+  const credit=Math.round(H-textH(U)-5*U);
+  const bts=Math.max(3,Math.min(bts0,Math.floor((credit-y-6*U)/titleW.H)));
+  const bx=Math.round(W/2-titleW.W*bts/2), by=Math.round(y);
+  const TST=titleW.stride;
+  for(let cy=0;cy<titleW.H;cy++)for(let cx=0;cx<titleW.W;cx++){
+    const idx=titleW.idx(cx,cy), c=titleW.g[idx], t=c>>2;
+    if(t===T_EMPTY) continue;
+    let px=bx+cx*bts, py=by+cy*bts;
+    if(tal<1){
+      const sI=titleW.motion.get(idx);
+      if(sI!==undefined){
+        const ox=(sI%TST)-1, oy=((sI/TST)|0)-1;
+        px=Math.round(bx+(ox+(cx-ox)*tal)*bts);
+        py=Math.round(by+(oy+(cy-oy)*tal)*bts);
+      }
+    }
+    if(bts>=8) drawCell(titleW,idx,t,c,px,py,bts,tal);
+    else{ X.fillStyle=avgColor(t); X.fillRect(px,py,bts,bts); }
+  }
+  text("a remake of Cell Machine by Sam Hogan",Math.round(W/2),credit,U,"#555","center",1);
+}
+async function doImport(){
+  let code=null;
+  try{ code=await navigator.clipboard.readText(); }catch(e){}
+  if(!code) code=prompt("Paste a level code:");
+  if(!code||!code.trim()) return;
+  try{
+    importedLevel=importCode(code.trim());
+    say(`imported ${importedLevel.W} x ${importedLevel.H}`);
+  }catch(e){ importedLevel=null; say("import failed: "+e.message,true); }
+}
+function startWith(m){
+  if(!importedLevel){ say("import a code first",true); return; }
+  loadLevel(importedLevel); afterLoad(m); nav("game");
+}
+function screenPlayMenu(){
+  // total stack height at full scale; shrink until it fits
+  const _need=textH(U*4)+9*U+btnH(U*2)+4*U+textH(U)+9*U+textH(U*2)+7*U
+              +2*(btnH(U*2)+3*U)+textH(U)+11*U+btnH(U*2)+Math.round(H*0.26);
+  const u=Math.max(1,Math.min(U,Math.floor(U*H/Math.max(1,_need))));
+  X.fillStyle="#000"; X.fillRect(0,0,W,H);
+  if(backArrow()) nav("title");
+  const cx=Math.round(W/2);
+  let y=Math.round(H*0.13);
+  textFit("PLAY",4*u,y,W-8*u,textH(u*4),WHITE,"center",2,u*4); y+=textH(u*4)+9*u;
+
+  const ib="IMPORT FROM CLIPBOARD";
+  if(uiBtn(cx-btnW(ib,u*2)/2,y,0,0,ib,u*2)) doImport();
+  y+=btnH(u*2)+4*u;
+  const warn="only CMMM and CMMM+MM V3 codes have been tested";
+  textFit(warn,5*u,y,W-10*u,textH(u),DIM,"center",1,u);
+  y+=textH(u)+9*u;
+
+  textFit(importedLevel?`${importedLevel.W} x ${importedLevel.H} ready to load`
+                       :"nothing imported yet",
+          5*u,y,W-10*u,textH(u*2),importedLevel?"#6ec6ff":"#555","center",1,u*2);
+  y+=textH(u*2)+7*u;
+
+  const l1="Load as level", l2="Load as editable";
+  let bs2=u*2;                                   // shrink, then stack, before overflowing
+  while(bs2>1&&btnW(l1,bs2)+btnW(l2,bs2)+6*u>W-8*u) bs2--;
+  const w1=btnW(l1,bs2), w2=btnW(l2,bs2), gp=6*u;
+  const sideBySide=w1+w2+gp<=W-8*u;
+  if(sideBySide){
+    const bx=Math.round(cx-(w1+w2+gp)/2);
+    if(uiBtn(bx,y,0,0,l1,bs2)) startWith("level");
+    if(uiBtn(bx+w1+gp,y,0,0,l2,bs2)) startWith("editable");
+    y+=btnH(bs2)+3*u;
+  }else{
+    if(uiBtn(cx-w1/2,y,0,0,l1,bs2)) startWith("level");
+    y+=btnH(bs2)+3*u;
+    if(uiBtn(cx-w2/2,y,0,0,l2,bs2)) startWith("editable");
+    y+=btnH(bs2)+3*u;
+  }
+  const note="level mode: no building tools, only play/step/reset and dragging cells on a plus";
+  textFit(note,5*u,y,W-10*u,textH(u),"#444","center",1,u);
+  y+=textH(u)+11*u;
+
+  const nb="New sandbox";
+  if(uiBtn(cx-btnW(nb,u*2)/2,y,0,0,nb,u*2)){ newWorld(28,18); afterLoad("editable"); nav("game"); }
+}
+function overlayWin(){
+  const m=8*U;
+  const needW=Math.max(textW("LEVEL COMPLETE",U*3,2),btnW("RESET",U*2)+btnW("EXIT",U*2)+8*U)+2*m;
+  const needH=m+textH(U*3)+6*U+textH(U)+8*U+btnH(U*2)+m;
+    // shrink to fit the window height rather than running off the bottom
+  const u=Math.max(1,Math.min(U,Math.floor(U*(H-8*U)/Math.max(1,needH))));
+  const _k=u/U;
+const p=panelRect(needW*_k,needH*_k);
+  textFit("LEVEL COMPLETE",p.x+m,p.y+m,p.w-2*m,textH(u*3),WHITE,"center",2,u*3);
+  textFit("every enemy destroyed",p.x+m,p.y+m+textH(u*3)+4*u,p.w-2*m,textH(u),"#222","center",1,u);
+  const by=p.y+p.h-m-btnH(u*2);
+  if(uiBtn(p.x+m,by,0,0,"RESET",u*2)) restoreInitial();
+  if(uiBtn(p.x+p.w-m-btnW("EXIT",u*2),by,0,0,"EXIT",u*2)){ won=false; nav("title"); }
+}
+function screenOptions(){
+  X.fillStyle="#000"; X.fillRect(0,0,W,H);
+  if(backArrow()) nav("title");
+  const lx=10*U, ls=U*2, ns=U, right=W-12*U;
+  let y=12*U;
+  function row(label,note,ctl){
+    text(label,lx,y,ls,WHITE,"left",2);
+    const cx=lx+textW(label,ls,2)+8*U;
+    ctl(cx,y+textH(ls)/2,Math.max(24*U,Math.min(right-cx,150*U)));
+    y+=textH(ls)+3*U;
+    if(note){ textFit(note,lx,y,right-lx,textH(ns),DIM,"left",1,ns); y+=textH(ns); }
+    y+=9*U;
+  }
+  row("MUSIC VOL","a 32-beat loop, boosted 3x over the file",
+      (x,cy,w)=>{S.musicVol=uiSlider("m",x,cy,w,S.musicVol);});
+  row("SFX VOL",null,(x,cy,w)=>{S.sfxVol=uiSlider("s",x,cy,w,S.sfxVol);});
+  row("FAST GRAPHICS","turns off motion interpolation - cells jump between ticks",
+      (x,cy)=>{const f=uiToggle(x,cy-4*U,S.fast); if(f!==S.fast) S.fast=f;});
+  if(uiBtn(lx,H-btnH(U*2)-10*U,0,0,"VIEW CONTROLS",U*2)) nav("controls");
+}
+const CONTROLS=[["Q/E","Rotate the cell you will place"],["WASD","Move camera around"],
+  ["MIDDLE CLICK","Drag camera around"],["LEFT CLICK","Place cells"],
+  ["RIGHT CLICK","Delete cells"],["1-9","Pick a cell from the palette"],
+  ["HOLD B","Show plus blocks under cells"],
+  ["SPACE","Play / pause the simulation"],
+  ["R","Reset to the initial state"],
+  ["ESCAPE","Open pause menu"],["SCROLL","Zoom in/out"]];
+function screenControls(){
+  X.fillStyle="#000"; X.fillRect(0,0,W,H);
+  if(backArrow()) back();
+  const m=8*U, unit=FONT_W+2;                       // width of one glyph at scale 1
+  const keyU=Math.max(...CONTROLS.map(([k])=>k.length))*unit;
+  const descU=Math.max(...CONTROLS.map(([,d])=>d.length))*unit;
+  const gapU=3*unit;
+  const avail=W-2*m-28*U;                           // keep clear of the back arrow
+  let sc=U*2;
+  while(sc>1&&(keyU+gapU+descU)*sc>avail) sc--;
+  const lineH=textH(sc)+4*U;
+  let y=Math.max(m+20*U,Math.round((H-CONTROLS.length*lineH)/2));
+  const dx=m+(keyU+gapU)*sc;
+  for(const [k,d] of CONTROLS){
+    text(k,m,y,sc,WHITE,"left",2);
+    text(d,dx,y,sc,BLUE,"left",2);
+    y+=lineH;
+  }
+}
+function paletteIcon(i,x,y,s){
+  if(i<9){ X.drawImage(spriteFor(PALETTE[i],selRot,s),x,y); return; }
+  X.fillStyle="#111"; X.fillRect(x,y,s,s);
+  X.strokeStyle="#444"; X.lineWidth=Math.max(1,U); X.strokeRect(x+U/2,y+U/2,s-U,s-U);
+  X.fillStyle=WHITE;
+  const c=s/2, q=Math.max(2,s*0.09);
+  if(i===TOOL_DRAG){
+    X.beginPath();
+    for(let k=0;k<4;k++){
+      const a=k*Math.PI/2, dx=Math.cos(a), dy=Math.sin(a);
+      X.moveTo(x+c+dx*(c-s*0.1),y+c+dy*(c-s*0.1));
+      X.lineTo(x+c+dx*(c-s*0.26)-dy*s*0.1,y+c+dy*(c-s*0.26)+dx*s*0.1);
+      X.lineTo(x+c+dx*(c-s*0.26)+dy*s*0.1,y+c+dy*(c-s*0.26)-dx*s*0.1);
+    }
+    X.fill();
+    X.fillRect(x+c-q/2,y+s*0.24,q,s*0.52); X.fillRect(x+s*0.24,y+c-q/2,s*0.52,q);
+  }
+  if(i===TOOL_SELECT){ X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+    X.strokeRect(x+s*0.2,y+s*0.2,s*0.6,s*0.6); }
+  if(i===TOOL_PLUS){                       // the placeable tile, as drawn on the board
+    X.fillStyle="#191919"; X.fillRect(x+s*0.14,y+s*0.14,s*0.72,s*0.72);
+    X.strokeStyle="#555"; X.lineWidth=Math.max(1,U);
+    X.strokeRect(x+s*0.14,y+s*0.14,s*0.72,s*0.72);
+    drawPlus(x+s*0.14,y+s*0.14,s*0.72,"#8fa0b0");
+  }
+}
+function screenGame(dt){
+  drawBoard();
+  const pad=7*U;
+  const editing=mode!=="level";
+  // --- bottom bar
+  const n=12, ps=Math.max(16,Math.min(28*U,Math.floor((W-2*pad-2*U*36)/n)-2*U));
+  const gap=Math.max(2,Math.round(U*1.5));
+  const tot=n*(ps+gap)-gap;
+  const barH=editing?ps+6*U:0;
+  if(editing){
+    X.fillStyle="rgba(0,0,0,.72)"; X.fillRect(0,H-barH,W,barH);
+    reserve(0,H-barH,W,barH);
+    const bx=Math.round((W-tot)/2), by=Math.round(H-barH+3*U);
+    for(let i=0;i<n;i++){
+      const x=bx+i*(ps+gap);
+      paletteIcon(i,x,by,ps);
+      if(i===selTool){X.strokeStyle=WHITE;X.lineWidth=Math.max(2,U);X.strokeRect(x-U,by-U,ps+2*U,ps+2*U);}
+      if(inRect(x,by,ps,ps)&&M.click){setTool(i);sfx("click");}
+    }
+  }
+  // actions on a rectangle selection
+  if(editing&&sel&&!carry){
+    const is=Math.max(20,U*13), gp=4*U, totW=5*is+4*gp;
+    const transportRight=pad+3*(Math.max(26,U*26)+4*U)+6*U;
+    let axx=Math.max(transportRight,Math.round((W-totW)/2)), ay=H-barH-is-4*U;
+    if(axx+totW>W-pad) axx=Math.max(pad,W-pad-totW);
+    if(uiBtn(axx,ay,is,is,"",1)) grabSel(true);
+    iconCopy(axx,ay,is);
+    if(uiBtn(axx+is+gp,ay,is,is,"",1)) grabSel(false);
+    iconMove(axx+is+gp,ay,is);
+    if(uiBtn(axx+2*(is+gp),ay,is,is,"",1)) deleteSel();
+    iconTrash(axx+2*(is+gp),ay,is);
+    // copy the selection as a standalone V3 code
+    if(uiBtn(axx+3*(is+gp),ay,is,is,"",1)){
+      const code=selCode(levelName);
+      if(code) copyText(code).then(ok=>
+        say(ok?"selection copied as a V3 code":"could not copy - clipboard blocked",!ok));
+    }
+    iconClipboard(axx+3*(is+gp),ay,is);
+    // ...or keep it as a named schematic
+    if(uiBtn(axx+4*(is+gp),ay,is,is,"",1)){
+      if(storageBlocked()) say(NO_STORE,true);
+      else{
+        const code=selCode();
+        const nm=code&&prompt("Name this schematic:","");
+        if(nm){ const err=schemSave(nm,code);
+          if(err) say(err,true); else { say('schematic "'+nm+'" saved'); schemOpen=true; } }
+      }
+    }
+    iconClipCookie(axx+4*(is+gp),ay,is);
+    if(storageBlocked()){ X.fillStyle="rgba(0,0,0,.55)"; X.fillRect(axx+4*(is+gp),ay,is,is); }
+    textFit("q/e turns a picked-up block",axx,ay-textH(U)-2*U,
+            Math.max(totW,W-pad-axx),textH(U),DIM,"left",1,U);
+  }
+  // --- top left
+  if(uiBtn(pad,pad,0,0,"MENU",U*2)){ paused=true; consumeClick(); }
+  const ty0=pad+btnH(U*2)+3*U;
+  text(String(tickCount),pad+U,ty0,U*2,WHITE,"left",1);
+  if(levelName) textFit(levelName,pad+U,ty0+textH(U*2)+2*U,44*U,textH(U),DIM,"left",1,U);
+  // --- top right
+  const sw=Math.min(65*U,W*0.28);
+  const sx2=W-pad-sw;
+  text(tpsLabel(),sx2-4*U,pad+U,U*2,WHITE,"right",1);
+  const t=uiSlider("tps",sx2,pad+U+textH(U*2)/2,sw,tpsIdx/(TPS.length-1));
+  tpsIdx=Math.round(t*(TPS.length-1));
+  // --- left column: preview + transport
+  const bs=Math.max(28,U*30);
+  const px=pad, py=Math.round(H/2-bs/2);
+  if(editing){
+    reserve(px,py,bs,bs);
+    const hot=inRect(px,py,bs,bs);
+    frame(px,py,bs,bs,hot);
+    const isz=Math.round(bs*0.6);
+    if(selTool<9) X.drawImage(spriteFor(PALETTE[selTool],selRot,isz),px+(bs-isz)/2,py+(bs-isz)/2);
+    else paletteIcon(selTool,px+(bs-isz)/2,py+(bs-isz)/2,isz);
+    if(hot&&M.click){selRot=(selRot+1)&3;sfx("click");}
+    text("Q / E",px,py+bs+2*U,U,DIM,"left",1);
+  }else{
+    textFit("LEVEL",px,py,Math.max(30*U,bs),textH(U*2),"#6ec6ff","left",2,U*2);
+    textFit(started?"running - R resets":"drag cells on a plus",
+            px,py+textH(U*2)+2*U,Math.max(44*U,bs*2),textH(U),DIM,"left",1,U);
+  }
+  const tw=Math.max(26,U*26), th=Math.max(20,U*20), ty=H-barH-th-4*U;
+  if(uiBtn(pad,ty,tw,th,"",1)) togglePlay();
+  X.fillStyle=WHITE;
+  if(playing){X.fillRect(pad+tw*0.34,ty+th*0.26,tw*0.1,th*0.48);
+              X.fillRect(pad+tw*0.54,ty+th*0.26,tw*0.1,th*0.48);}
+  else{X.beginPath();X.moveTo(pad+tw*0.36,ty+th*0.24);X.lineTo(pad+tw*0.7,ty+th*0.5);
+       X.lineTo(pad+tw*0.36,ty+th*0.76);X.closePath();X.fill();}
+  const sx3=pad+tw+4*U;
+  if(uiBtn(sx3,ty,tw,th,"",1)){playing=false; beginRun();
+    world.trackMotion=interpOn(); world.clearMotion();
+    world.tick(); world.trackMotion=false;
+    if(interpOn()){ tickAt=now; tickDur=190; } else tickDur=0;
+    tickCount++; voiceWorld();}
+  X.fillStyle=WHITE;
+  X.beginPath();X.moveTo(sx3+tw*0.3,ty+th*0.24);X.lineTo(sx3+tw*0.6,ty+th*0.5);
+  X.lineTo(sx3+tw*0.3,ty+th*0.76);X.closePath();X.fill();
+  X.fillRect(sx3+tw*0.64,ty+th*0.24,tw*0.08,th*0.52);
+  const rx=sx3+tw+4*U;
+  if(uiBtn(rx,ty,tw,th,"",1)) restoreInitial();
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(2,U);
+  X.beginPath(); X.arc(rx+tw/2,ty+th/2,Math.min(tw,th)*0.26,0.6,5.4); X.stroke();
+  X.fillStyle=WHITE;
+  X.beginPath();
+  X.moveTo(rx+tw/2+Math.min(tw,th)*0.30,ty+th/2-Math.min(tw,th)*0.34);
+  X.lineTo(rx+tw/2+Math.min(tw,th)*0.02,ty+th/2-Math.min(tw,th)*0.20);
+  X.lineTo(rx+tw/2+Math.min(tw,th)*0.34,ty+th/2-Math.min(tw,th)*0.02);
+  X.closePath(); X.fill();
+  if(editing) drawSchematics(pad,barH);
+  if(!paused&&!modal) boardInput(dt);
+}
+
+/* A dock on the right holding V3 snippets. Clicking one picks it up as a
+   floating block, so placing a schematic is the same gesture as pasting a
+   selection -- click to stamp, q/e to turn it, right click to drop it. */
+function drawSchematics(pad,barH){
+  const is=Math.max(22,U*15);
+  const pw=Math.min(Math.round(W*0.42),190*U);
+  const top=Math.round(pad+textH(U*2)+9*U);   // clear of the tps row
+  const bot=H-barH-4*U;
+  const px=schemOpen?W-pw:W;
+  const bx=px-is-3*U, by=top;
+  reserve(bx,by,is+3*U,is);
+  const hot=inRect(bx,by,is,is);
+  frame(bx,by,is,is,hot);
+  iconSchem(bx,by,is);
+  if(hot&&M.click){ schemOpen=!schemOpen; sfx("click"); consumeClick(); }
+  if(!schemOpen) return;
+
+  X.fillStyle="rgba(120,120,120,.94)"; X.fillRect(px,top,pw,bot-top);
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  X.strokeRect(px+U/2,top+U/2,pw-U,bot-top-U);
+  reserve(px,top,pw,bot-top);
+
+  const m=5*U;
+  let y=top+m;
+  const addH=btnH(U)+textH(U)+2*U;
+  if(uiBtn(px+m,y,pw-2*m,addH,"",1)){
+    if(storageBlocked()){ say(NO_STORE,true); return; }
+    const code=prompt("Paste a V3 schematic code:");
+    if(code&&code.trim()){
+      try{
+        importCode(code.trim());                    // reject junk before storing
+        const nm=prompt("Name this schematic:","");
+        if(nm){ const err=schemSave(nm,code.trim());
+          if(err) say(err,true); else say('schematic "'+nm+'" saved'); }
+      }catch(e){ say("not a readable code: "+e.message,true); }
+    }
+  }
+  textWrapFit("Add V3 schematic",px+m+2*U,y,pw-2*m-4*U,addH,WHITE,"center",1,U*2);
+  y+=addH+3*U;
+
+  const rowH=textH(U)+4*U;
+  const qs=Math.max(14,U*10);
+  textField("schemq",px+m,y,pw-2*m-qs-3*U,rowH,"search...",U);
+  if(uiBtn(px+pw-m-qs,y,qs,qs,"",1)) openModal("schemhelp");
+  textFit("?",px+pw-m-qs,y,qs,qs,WHITE,"center",1,U*2);
+  y+=Math.max(rowH,qs)+3*U;
+
+  const all=schemList();
+  const q=schemQuery.toLowerCase();
+  const list=q?all.filter(e=>e.name.toLowerCase().includes(q)):all;
+  const listTop=y, listBot=bot-m;
+  const visible=Math.max(1,Math.floor((listBot-listTop)/(rowH+2*U)));
+  schemScroll=wheelScroll(px,listTop,pw,listBot-listTop,schemScroll,list.length,visible);
+  if(!list.length){
+    textWrapFit(storageBlocked()
+        ? "saving is disabled - this browser gives the page no storage"
+        : (all.length?"nothing matches that search"
+                     :"nothing saved yet - select cells, then use the clipboard-and-cookie button"),
+      px+m,y,pw-2*m,textH(U)*5,storageBlocked()?"#a33":"#222","left",1,U);
+    return;
+  }
+  const sbW=Math.max(4,U*3), delW=Math.max(12,U*9);
+  for(const e of list.slice(schemScroll,schemScroll+visible)){
+    if(uiBtn(px+m,y,pw-2*m-delW-sbW-4*U,rowH,"",1)){
+      try{ carryFromCode(e.code); setTool(TOOL_SELECT); schemOpen=false; consumeClick();
+           say('placing "'+e.name+'" - left click to place, q/e turns it'); }
+      catch(err){ say("schematic is corrupt",true); }
+    }
+    textFit(e.name,px+m+3*U,y,pw-2*m-delW-sbW-10*U,rowH,WHITE,"left",1,U);
+    if(uiBtn(px+pw-m-delW-sbW-2*U,y,delW,rowH,"",1)){ schemDrop(e.name); say("deleted"); }
+    X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+    const cxm=px+pw-m-delW-sbW-2*U+delW/2, cym=y+rowH/2, r=delW*0.22;
+    X.beginPath();
+    X.moveTo(cxm-r,cym-r); X.lineTo(cxm+r,cym+r);
+    X.moveTo(cxm+r,cym-r); X.lineTo(cxm-r,cym+r);
+    X.stroke();
+    y+=rowH+2*U;
+  }
+  scrollBar(px+pw-m-sbW,listTop,sbW,listBot-listTop,schemScroll,list.length,visible);
+}
+
+/* --- overlays: every panel is sized from the content it must hold ---------- */
+function panelRect(needW,needH){
+  const w=Math.round(Math.min(W-8*U,Math.max(60*U,needW)));
+  const h=Math.round(Math.min(H-8*U,Math.max(50*U,needH)));
+  const x=Math.round((W-w)/2), y=Math.round((H-h)/2);
+  X.fillStyle="rgba(0,0,0,.74)"; X.fillRect(0,0,W,H);
+  X.fillStyle="rgba(122,122,122,.94)"; X.fillRect(x,y,w,h);
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U); X.strokeRect(x+U/2,y+U/2,w-U,h-U);
+  reserve(0,0,W,H);
+  return {x,y,w,h};
+}
+function closeBtn(p,u){
+  u=u||U;
+  const s=Math.max(16,u*11), x=p.x+p.w-s-4*u, y=p.y+4*u;
+  reserve(x,y,s,s);
+  const hot=inRect(x,y,s,s);
+  frame(x,y,s,s,hot);
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(2,u);
+  const m=s*0.3;
+  X.beginPath();
+  X.moveTo(x+m,y+m);     X.lineTo(x+s-m,y+s-m);
+  X.moveTo(x+s-m,y+m);   X.lineTo(x+m,y+s-m);
+  X.stroke();
+  return hot&&M.click&&(sfx("click"),true);
+}
+function iconCog(x,y,s){
+  const cx=x+s/2, cy=y+s/2, r=s*0.27, tw=s*0.12, tl=s*0.13;
+  X.fillStyle=WHITE;
+  for(let k=0;k<8;k++){
+    X.save(); X.translate(cx,cy); X.rotate(k*Math.PI/4);
+    X.fillRect(-tw/2,-(r+tl),tw,tl+s*0.04);
+    X.restore();
+  }
+  X.beginPath(); X.arc(cx,cy,r,0,7); X.fill();
+  X.fillStyle="#000";
+  X.beginPath(); X.arc(cx,cy,r*0.44,0,7); X.fill();
+}
+function iconClipboard(x,y,s){
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  X.strokeRect(x+s*0.20,y+s*0.22,s*0.60,s*0.62);
+  X.fillStyle=WHITE; X.fillRect(x+s*0.36,y+s*0.13,s*0.28,s*0.14);
+}
+function cookieGlyph(cx,cy,r){
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  X.beginPath(); X.arc(cx,cy,r,0,7); X.stroke();
+  X.fillStyle=WHITE;
+  for(const [dx,dy] of [[-0.35,-0.25],[0.30,-0.35],[0.05,0.10],[-0.20,0.40],[0.40,0.30]]){
+    const d=Math.max(1,r*0.22);
+    X.fillRect(cx+dx*r-d/2,cy+dy*r-d/2,d,d);
+  }
+}
+function iconClipCookie(x,y,s){
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  X.strokeRect(x+s*0.14,y+s*0.20,s*0.54,s*0.60);
+  X.fillStyle=WHITE; X.fillRect(x+s*0.28,y+s*0.11,s*0.26,s*0.13);
+  cookieGlyph(x+s*0.74,y+s*0.70,s*0.20);
+}
+function iconSchem(x,y,s){
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  const q=s*0.26;
+  X.strokeRect(x+s*0.16,y+s*0.14,q,q);
+  X.fillStyle=WHITE;
+  X.beginPath();
+  X.moveTo(x+s*0.24,y+s*0.20); X.lineTo(x+s*0.36,y+s*0.27); X.lineTo(x+s*0.24,y+s*0.34);
+  X.closePath(); X.fill();
+  X.strokeRect(x+s*0.50,y+s*0.14,q,q);
+  X.fillRect(x+s*0.57,y+s*0.19,s*0.04,s*0.16);
+  X.fillRect(x+s*0.65,y+s*0.19,s*0.04,s*0.16);
+  X.strokeRect(x+s*0.50,y+s*0.48,q,q);
+  X.fillRect(x+s*0.60,y+s*0.53,s*0.04,s*0.10);
+  X.beginPath();
+  X.moveTo(x+s*0.56,y+s*0.63); X.lineTo(x+s*0.68,y+s*0.63); X.lineTo(x+s*0.62,y+s*0.72);
+  X.closePath(); X.fill();
+  cookieGlyph(x+s*0.30,y+s*0.62,s*0.15);
+}
+function iconMove(x,y,s){
+  const c=s/2, q=Math.max(2,s*0.10);
+  X.fillStyle=WHITE;
+  X.beginPath();
+  for(let k=0;k<4;k++){
+    const a=k*Math.PI/2, dx=Math.cos(a), dy=Math.sin(a);
+    X.moveTo(x+c+dx*(c-s*0.12),y+c+dy*(c-s*0.12));
+    X.lineTo(x+c+dx*(c-s*0.30)-dy*s*0.11,y+c+dy*(c-s*0.30)+dx*s*0.11);
+    X.lineTo(x+c+dx*(c-s*0.30)+dy*s*0.11,y+c+dy*(c-s*0.30)-dx*s*0.11);
+  }
+  X.fill();
+  X.fillRect(x+c-q/2,y+s*0.26,q,s*0.48); X.fillRect(x+s*0.26,y+c-q/2,s*0.48,q);
+}
+function iconTrash(x,y,s){
+  X.fillStyle=WHITE;
+  X.fillRect(x+s*0.30,y+s*0.16,s*0.40,s*0.09);
+  X.fillRect(x+s*0.18,y+s*0.27,s*0.64,s*0.10);
+  X.beginPath();
+  X.moveTo(x+s*0.26,y+s*0.40); X.lineTo(x+s*0.74,y+s*0.40);
+  X.lineTo(x+s*0.66,y+s*0.84); X.lineTo(x+s*0.34,y+s*0.84);
+  X.closePath(); X.fill();
+}
+function iconCopy(x,y,s){
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  X.strokeRect(x+s*0.12,y+s*0.12,s*0.55,s*0.55);
+  X.fillStyle="#000"; X.fillRect(x+s*0.32,y+s*0.32,s*0.55,s*0.55);
+  X.strokeRect(x+s*0.32,y+s*0.32,s*0.55,s*0.55);
+}
+function iconSave(x,y,s){
+  X.fillStyle="#000"; X.fillRect(x+s*0.12,y+s*0.12,s*0.76,s*0.76);
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U); X.strokeRect(x+s*0.12,y+s*0.12,s*0.76,s*0.76);
+  X.fillStyle=WHITE; X.fillRect(x+s*0.3,y+s*0.16,s*0.4,s*0.24);
+  X.strokeRect(x+s*0.26,y+s*0.56,s*0.48,s*0.3);
+}
+function iconLoad(x,y,s){
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  X.beginPath(); X.moveTo(x+s*0.12,y+s*0.82); X.lineTo(x+s*0.12,y+s*0.2);
+  X.lineTo(x+s*0.46,y+s*0.2); X.lineTo(x+s*0.56,y+s*0.34); X.lineTo(x+s*0.88,y+s*0.34);
+  X.lineTo(x+s*0.88,y+s*0.82); X.closePath(); X.stroke();
+}
+function overlayPause(){
+  const hs=U*3, m=8*U, gap=5*U;
+  const labW=Math.max(textW("MUSIC",hs,2),textW("SFX",hs,2));
+  const sldW=Math.max(30*U,Math.min(80*U,W*0.26));
+  // every slot is the same size, wide enough for its caption and for the "?"
+  const is=Math.max(U*14,textW("copy",U,1)+3*U,btnW("?",U*2),btnH(U*2));
+  const iconsW=6*is+5*gap;
+  const btnsW=btnW("Exit",hs)+btnW("Resume",hs)+12*U;
+  const needW=Math.max(labW+gap+sldW,iconsW,btnsW)+2*m;
+  const needH=m+textH(hs)+gap+textH(hs)+gap*2+is+textH(U)+gap*2+btnH(hs)+m;
+    // shrink to fit the window height rather than running off the bottom
+  const u=Math.max(1,Math.min(U,Math.floor(U*(H-8*U)/Math.max(1,needH))));
+  const _k=u/U;
+const p=panelRect(needW*_k,needH*_k);
+  let y=p.y+m;
+  const sx=p.x+p.w-m-sldW;
+  text("MUSIC",p.x+m,y,hs,WHITE,"left",2);
+  S.musicVol=uiSlider("pm",sx,y+textH(hs)/2,sldW,S.musicVol);
+  y+=textH(hs)+gap;
+  text("SFX",p.x+m,y,hs,WHITE,"left",2);
+  S.sfxVol=uiSlider("ps",sx,y+textH(hs)/2,sldW,S.sfxVol);
+  y+=textH(hs)+gap*2;
+  let ix=p.x+m;
+  // stays inside the sandbox -- opens a popup rather than navigating away
+  if(uiBtn(ix,y,is,is,"",1)) openModal("help");
+  textFit("?",ix,y,is,is,WHITE,"center",1,u*2);
+  textFit("help",ix,y+is+u,is,textH(u),"#222","center",1,u);
+  ix+=is+gap;
+  if(uiBtn(ix,y,is,is,"",1)) openModal("settings");
+  iconCog(ix,y,is); textFit("opts",ix,y+is+u,is,textH(u),"#222","center",1,u);
+  ix+=is+gap;
+  if(uiBtn(ix,y,is,is,"",1))
+    copyText(exportV3(initialWorld(),initialMask(),levelName)).then(ok=>
+      say(ok?(started?"copied the initial state, not the run":"level code copied to clipboard")
+            :"could not copy - clipboard blocked",!ok));
+  iconCopy(ix,y,is); textFit("copy",ix,y+is+u,is,textH(u),"#222","center",1,u);
+  ix+=is+gap;
+  if(uiBtn(ix,y,is,is,"",1)){
+    if(storageBlocked()){ say(NO_STORE,true); }
+    else{
+    const nm=prompt("Name your creation:",levelName||"untitled");
+    if(nm){ const err=cookieSave(nm,exportV3(initialWorld(),initialMask(),nm));
+      if(err) say(err,true);
+      else { levelName=nm; say('saved "'+nm+'"'+(started?" (initial state)":"")); } }
+    }
+  }
+  iconSave(ix,y,is);
+  if(storageBlocked()){ X.fillStyle="rgba(0,0,0,.55)"; X.fillRect(ix,y,is,is); } textFit("save",ix,y+is+u,is,textH(u),"#222","center",1,u);
+  ix+=is+gap;
+  if(uiBtn(ix,y,is,is,"",1)) openModal("load");
+  iconLoad(ix,y,is); textFit("load",ix,y+is+u,is,textH(u),"#222","center",1,u);
+  ix+=is+gap;
+  if(uiBtn(ix,y,is,is,"",1)){
+    fieldW=String(world?world.W:28); fieldH=String(world?world.H:18);
+    focusField=null; openModal("world");
+  }
+  iconWorld(ix,y,is); textFit("size",ix,y+is+u,is,textH(u),"#222","center",1,u);
+  const by=p.y+p.h-m-btnH(hs);
+  if(uiBtn(p.x+m,by,0,0,"Exit",hs)){ paused=false; nav("title"); }
+  if(uiBtn(p.x+p.w-m-btnW("Resume",hs),by,0,0,"Resume",hs)) paused=false;
+}
+function overlayHelp(){
+  const m=8*U, unit=FONT_W+2;
+  const keyU=Math.max(...CONTROLS.map(([k])=>k.length))*unit;
+  const descU=Math.max(...CONTROLS.map(([,d])=>d.length))*unit;
+  const gapU=3*unit;
+  // Pick the panel first, then fit the text inside it. Fitting the text to the
+  // window and sizing the panel to the text left the description column ending
+  // exactly on the panel edge, which read as overflowing.
+  const pw=Math.min(W-14*U,Math.max(80*U,Math.round(W*0.82)));
+  const bodyW=pw-2*m-6*U;
+  let sc=U*2;
+  while(sc>1&&(keyU+gapU+descU)*sc>bodyW) sc--;
+  const lineH=textH(sc)+4*U;
+  const head=Math.max(textH(U*2),U*11);
+  const needH=m+head+5*U+CONTROLS.length*lineH+5*U+m;
+  const ph=Math.min(H-8*U,needH);
+  const p=panelRect(pw,ph);
+  const u=U;
+  textFit("CONTROLS",p.x+m,p.y+m,p.w-2*m-14*u,head,WHITE,"left",2,u*2);
+  if(closeBtn(p,u)) modal=null;
+  // dark plate behind the list: blue on grey would be unreadable
+  const ly=p.y+m+head+3*u;
+  const lh=Math.min(CONTROLS.length*lineH+2*u,p.y+p.h-m-ly);
+  X.fillStyle="#000"; X.fillRect(p.x+m,ly,p.w-2*m,lh);
+  let y=ly+2*u;
+  const dx=p.x+m+3*u+(keyU+gapU)*sc;
+  for(const [k,d] of CONTROLS){
+    if(y+textH(sc)>ly+lh) break;
+    text(k,p.x+m+3*u,y,sc,WHITE,"left",2);
+    text(d,dx,y,sc,BLUE,"left",2);
+    y+=lineH;
+  }
+}
+function overlaySettings(){
+  const m=8*U, hs=U*2, head=Math.max(textH(hs),U*11);
+  const labW=Math.max(textW("MUSIC VOL",hs,2),textW("SFX VOL",hs,2),textW("FAST GRAPHICS",hs,2));
+  const ctlW=Math.max(40*U,Math.min(80*U,W*0.28));
+  const noteMax=Math.max(textW("turns off motion interpolation - cells jump between ticks",U,1),
+                         textW("a 32-beat loop, boosted 3x over the file",U,1));
+  const needW=Math.max(labW+6*U+ctlW,noteMax)+2*m;
+  const needH=m+head+5*U+3*(textH(hs)+textH(U)+7*U)+m;
+    // shrink to fit the window height rather than running off the bottom
+  const u=Math.max(1,Math.min(U,Math.floor(U*(H-8*U)/Math.max(1,needH))));
+  const _k=u/U;
+const p=panelRect(needW*_k,needH*_k);
+  textFit("SETTINGS",p.x+m,p.y+m,p.w-2*m-14*u,head,WHITE,"left",2,hs);
+  if(closeBtn(p,u)) modal=null;
+  let y=p.y+m+head+5*u;
+  const cx=p.x+m+labW+6*u;
+  const row=(label,note,ctl)=>{
+    text(label,p.x+m,y,hs,WHITE,"left",2);
+    ctl(cx,y+textH(hs)/2,Math.min(ctlW,p.x+p.w-m-cx));
+    y+=textH(hs)+2*u;
+    textFit(note,p.x+m,y,p.w-2*m,textH(u),"#222","left",1,u); y+=textH(u)+5*u;
+  };
+  row("MUSIC VOL","a 32-beat loop, boosted 3x over the file",
+      (x,cy,w)=>{S.musicVol=uiSlider("sm",x,cy,w,S.musicVol);});
+  row("SFX VOL","place, generate, destroy",
+      (x,cy,w)=>{S.sfxVol=uiSlider("ss",x,cy,w,S.sfxVol);});
+  row("FAST GRAPHICS","turns off motion interpolation - cells jump between ticks",
+      (x,cy)=>{const f=uiToggle(x,cy-4*u,S.fast); if(f!==S.fast) S.fast=f;});
+}
+let szAnchor=0;                  // 0 TL, 1 TR, 2 BL, 3 BR
+let fieldW="", fieldH="", focusField=null;   // typed boxes: sizes and searches
+let loadQuery="", schemQuery="";
+let loadScroll=0, schemScroll=0;
+const FIELD={
+  w:{get:()=>fieldW,set:v=>fieldW=v,numeric:true,max:3},
+  h:{get:()=>fieldH,set:v=>fieldH=v,numeric:true,max:3},
+  loadq:{get:()=>loadQuery,set:v=>{loadQuery=v;loadScroll=0;},max:24},
+  schemq:{get:()=>schemQuery,set:v=>{schemQuery=v;schemScroll=0;},max:24},
+};
+// One box, drawn and focused the same way wherever it appears.
+// Wheel over a list scrolls it, and the wheel is consumed so it cannot also
+// zoom the board underneath.
+function wheelScroll(x,y,w,h,cur,rows,visible){
+  const max=Math.max(0,rows-visible);
+  let v=Math.min(max,Math.max(0,cur));
+  if(M.wheel&&inRect(x,y,w,h)){ v=Math.min(max,Math.max(0,v+M.wheel)); M.wheel=0; }
+  return v;
+}
+function scrollBar(x,y,w,h,off,rows,visible){
+  if(rows<=visible) return;
+  X.fillStyle="rgba(0,0,0,.35)"; X.fillRect(x,y,w,h);
+  const frac=visible/rows, th=Math.max(6,h*frac);
+  const ty=y+(h-th)*(off/Math.max(1,rows-visible));
+  X.fillStyle="#bbb"; X.fillRect(x,ty,w,th);
+}
+function textField(id,x,y,w,h,placeholder,u){
+  u=u||U;
+  reserve(x,y,w,h);
+  const hot=inRect(x,y,w,h), on=focusField===id, val=FIELD[id].get();
+  X.fillStyle=on?"#0b1a28":"#000"; X.fillRect(x,y,w,h);
+  X.strokeStyle=on?"#6ec6ff":WHITE; X.lineWidth=Math.max(1,u);
+  X.strokeRect(x+u/2,y+u/2,w-u,h-u);
+  const shown=val||(on?"":placeholder||"");
+  textFit(shown,x+3*u,y,w-6*u,h,val?(on?"#6ec6ff":WHITE):"#555","left",1,u*2);
+  if(on&&(Math.floor(now/450)&1)){
+    const tw=Math.min(w-6*u,textW(val,u*2,1));
+    X.fillStyle="#6ec6ff"; X.fillRect(x+3*u+tw+u,y+3*u,Math.max(1,u),h-6*u);
+  }
+  if(hot&&M.click){ focusField=id; sfx("click"); consumeClick(); }
+  return hot;
+}
+function resizeWorld(nw,nh,anchor){
+  const ow=world.W, oh=world.H;
+  const dx=(anchor===1||anchor===3)?nw-ow:0;
+  const dy=(anchor===2||anchor===3)?nh-oh:0;
+  const nWorld=new World(nw,nh), nMask=new Uint8Array(nw*nh);
+  for(let y=0;y<oh;y++)for(let x=0;x<ow;x++){
+    const tx=x+dx, ty=y+dy;
+    if(tx<0||tx>=nw||ty<0||ty>=nh) continue;
+    const c=world.g[world.idx(x,y)];
+    if(c) nWorld.setCell(nWorld.idx(tx,ty),c);
+    nMask[ty*nw+tx]=placeMask[y*ow+x];
+  }
+  world=nWorld; placeMask=nMask;
+  rescanMask();
+  tickCount=0; playing=false; won=false; started=false;
+  sel=null; carry=null; dragCell=null;
+  snapshotInitial(); centreCam();
+}
+function iconWorld(x,y,s){
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  X.strokeRect(x+s*0.16,y+s*0.16,s*0.68,s*0.68);
+  X.beginPath();
+  X.moveTo(x+s*0.16,y+s*0.5); X.lineTo(x+s*0.84,y+s*0.5);
+  X.moveTo(x+s*0.5,y+s*0.16); X.lineTo(x+s*0.5,y+s*0.84);
+  X.stroke();
+}
+function overlayWorld(){
+  const m=8*U, hs=U*2;
+  const boxW=Math.max(26*U,textW("999",hs,2)+8*U), boxH=btnH(hs);
+  const labW=Math.max(textW("WIDTH",hs,2),textW("HEIGHT",hs,2));
+  const needW=Math.max(textW("WORLD SIZE",U*3,2),
+                       textW("anchor - which corner stays put",U,1),
+                       labW+6*U+boxW,
+                       btnW("APPLY",hs)+btnW("CANCEL",hs)+10*U)+2*m;
+  const needH=m+textH(U*3)+6*U+2*(boxH+3*U)+6*U+textH(U)+3*U+24*U+8*U+btnH(hs)+m;
+  // shrink to fit the window height rather than running off the bottom
+  const u=Math.max(1,Math.min(U,Math.floor(U*(H-8*U)/Math.max(1,needH))));
+  const _k=u/U;
+  const p=panelRect(needW*_k,needH*_k);
+  const HS=u*2, BW=Math.max(26*u,textW("999",HS,2)+8*u), BH=btnH(HS);
+  const LW=Math.max(textW("WIDTH",HS,2),textW("HEIGHT",HS,2));
+  let ts=u*3;                       // keep the title clear of the close button
+  while(ts>1&&textW("WORLD SIZE",ts,2)>p.w-2*m-14*u) ts--;
+  text("WORLD SIZE",p.x+m,p.y+m,ts,WHITE,"left",2);
+  if(closeBtn(p,u)) modal=null;
+  let y=p.y+m+textH(ts)+6*u;
+  // a click anywhere else drops focus, so typing cannot leak into the game
+  const box=(label,key,val)=>{
+    text(label,p.x+m,y+(BH-textH(HS))/2,HS,WHITE,"left",2);
+    const bx=p.x+m+LW+6*u;
+    reserve(bx,y,BW,BH);
+    const hot=inRect(bx,y,BW,BH), on=focusField===key;
+    X.fillStyle=on?"#0b1a28":"#000"; X.fillRect(bx,y,BW,BH);
+    X.strokeStyle=on?"#6ec6ff":WHITE; X.lineWidth=Math.max(1,u);
+    X.strokeRect(bx+u/2,y+u/2,BW-u,BH-u);
+    text(val,bx+4*u,y+(BH-textH(HS))/2,HS,on?"#6ec6ff":WHITE,"left",2);
+    if(on&&(Math.floor(now/450)&1))
+      X.fillRect(bx+4*u+textW(val,HS,2)+u,y+3*u,Math.max(1,u),BH-6*u);
+    if(hot&&M.click){ focusField=key; sfx("click"); }
+    y+=BH+3*u;
+  };
+  box("WIDTH","w",fieldW);
+  box("HEIGHT","h",fieldH);
+  y+=4*u;
+  textFit("anchor - which corner stays put",p.x+m,y,p.w-2*m,textH(u),"#222","left",1,u);
+  y+=textH(u)+3*u;
+  const cs=Math.max(16,u*10);
+  for(let i=0;i<4;i++){
+    const bx=p.x+m+(i%2)*(cs+3*u), by=y+((i/2)|0)*(cs+3*u);
+    if(uiBtn(bx,by,cs,cs,"",1)) szAnchor=i;
+    X.fillStyle=szAnchor===i?"#6ec6ff":"#666";
+    X.fillRect(bx+cs*0.22,by+cs*0.22,cs*0.56,cs*0.56);
+  }
+  const by=p.y+p.h-m-btnH(HS);
+  if(uiBtn(p.x+m,by,0,0,"APPLY",HS)){
+    const nw=Math.max(1,Math.min(999,parseInt(fieldW,10)||0));
+    const nh=Math.max(1,Math.min(999,parseInt(fieldH,10)||0));
+    if(!nw||!nh) say("enter a width and height",true);
+    else { resizeWorld(nw,nh,szAnchor); say(`world is ${nw} x ${nh}`); focusField=null; modal=null; }
+  }
+  if(uiBtn(p.x+p.w-m-btnW("CANCEL",HS),by,0,0,"CANCEL",HS)){ focusField=null; modal=null; }
+}
+const SCHEM_HELP=[
+  "Schematics are V3 level codes kept in your browser's storage, so you can "+
+  "reuse a machine without rebuilding it.",
+  "",
+  "TO SAVE ONE: choose the square select tool, drag a box round some cells, "+
+  "then press the clipboard-and-cookie button and give it a name.",
+  "",
+  "TO PLACE ONE: click it in the list. It becomes a floating block - click the "+
+  "board to stamp it, q or e to turn it, right click to drop it.",
+  "",
+  "Add V3 schematic takes a code from anywhere; it is checked before it is "+
+  "stored, so a bad paste is refused rather than saved.",
+  "",
+  "Cookies are blocked on file:// pages. If saves keep vanishing, serve the "+
+  "file over localhost instead."
+];
+function overlaySchemHelp(){
+  const m=8*U, head=textH(U*2)+4*U;
+  // sized against the window, not a multiple of U -- there is a lot of text
+  const pw=Math.min(W-14*U,Math.max(80*U,Math.round(W*0.62)));
+  const ph=Math.min(H-8*U,Math.max(60*U,Math.round(H*0.86)));
+  const bodyW=pw-2*m, bodyH=ph-head-2*m-4*U;
+  const blockH=sc=>SCHEM_HELP.reduce((a,para)=>
+    a+(para?wrapWords(para,bodyW,sc,1).length*textH(sc)+2*sc:Math.round(textH(sc)/2)),0);
+  let u=U;
+  while(u>1&&blockH(u)>bodyH) u--;
+  const p=panelRect(pw,ph);
+  textFit("SCHEMATICS",p.x+m,p.y+m,p.w-2*m-14*U,head,WHITE,"left",2,U*2);
+  if(closeBtn(p,U)) modal=null;
+  let y=p.y+m+head+2*U;
+  for(const para of SCHEM_HELP){
+    if(!para){ y+=Math.round(textH(u)/2); continue; }
+    for(const ln of wrapWords(para,bodyW,u,1)){
+      if(y+textH(u)>p.y+p.h-m) return;
+      text(clipText(ln,bodyW,u,1),p.x+m,y,u,"#222","left",1);
+      y+=textH(u);
+    }
+    y+=2*u;
+  }
+}
+function overlayLoad(){
+  // Rows sized for a list, not for headings: a row was taller than the search
+  // box, so a 14-entry list showed one entry.
+  const hs=U*2, m=6*U, rowH=textH(U)+5*U, pasteW=btnW("PASTE CODE",U);
+  const all=cookieList();
+  const q=loadQuery.toLowerCase();
+  const saves=q?all.filter(e=>e.name.toLowerCase().includes(q)):all;
+  // A list wants room, so this panel takes a share of the window rather than
+  // shrinking to its contents; the number of visible rows follows the height.
+  const minW=Math.max(textW("LOAD",hs,2)+gapPad()+pasteW,
+                      textW("storage confirmed: saves survived a previous session",U,1))+2*m;
+  const u=U;
+  const p=panelRect(Math.max(minW,Math.round(W*0.54)),Math.round(H*0.80));
+  textFit("LOAD",p.x+m,p.y+m,p.w-2*m-pasteW-6*u,Math.max(textH(hs),rowH),WHITE,"left",2,hs);
+  if(uiBtn(p.x+p.w-m-pasteW,p.y+m,0,0,"PASTE CODE",u)){
+    const code=prompt("Paste a V1, V2 or V3 level code:");
+    if(code){ try{ pending=importCode(code.trim()); openModal("variant"); }
+              catch(e){ say("import failed: "+e.message,true); } }
+  }
+  let y=p.y+m+Math.max(textH(hs),rowH)+4*u;
+  textField("loadq",p.x+m,y,p.w-2*m,rowH,"search...",u);
+  y+=rowH+4*u;
+  const st=storageStatus();
+  textFit(st.text,p.x+m,y,p.w-2*m,textH(u),st.colour,"left",1,u);
+  y+=textH(u)+4*u;
+
+  const listTop=y, listBot=p.y+p.h-m-btnH(u)-5*u;
+  const visible=Math.max(1,Math.floor((listBot-listTop)/(rowH+3*u)));
+  loadScroll=wheelScroll(p.x+m,listTop,p.w-2*m,listBot-listTop,loadScroll,saves.length,visible);
+  if(!saves.length)
+    textFit(storageBlocked()?"":(all.length?"nothing matches that search":"no saved creations yet"),
+            p.x+m,y,p.w-2*m,textH(u),"#222","left",1,u);
+  const sbW=Math.max(4,u*3);
+  const shown=saves.slice(loadScroll,loadScroll+visible);
+  shown.forEach(e=>{
+    const delW=Math.max(14,u*10);
+    if(uiBtn(p.x+m,y,p.w-2*m-delW-sbW-6*u,rowH,"",1)){
+      try{ pending=importCode(e.code); openModal("variant"); }
+      catch(err){ say("saved code is corrupt",true); }
+    }
+    textFit(e.name,p.x+m+4*u,y,p.w-2*m-delW-sbW-12*u,rowH,WHITE,"left",1,u);
+    if(uiBtn(p.x+p.w-m-delW-sbW-2*u,y,delW,rowH,"",1)){ cookieDrop(e.name); say("deleted"); }
+    textFit("x",p.x+p.w-m-delW-sbW-2*u,y,delW,rowH,WHITE,"center",1,u);
+    y+=rowH+3*u;
+  });
+  scrollBar(p.x+p.w-m-sbW,listTop,sbW,listBot-listTop,loadScroll,saves.length,visible);
+  if(saves.length>visible)
+    textFit(`${loadScroll+1}-${Math.min(saves.length,loadScroll+visible)} of ${saves.length}`,
+            p.x+m+btnW("BACK",u)+6*u,p.y+p.h-m-btnH(u),p.w-2*m-btnW("BACK",u)-8*u,
+            btnH(u),"#222","right",1,u);
+  if(uiBtn(p.x+m,p.y+p.h-m-btnH(u),0,0,"BACK",u)) modal=null;
+}
+const gapPad=()=>10*U;
+function overlayVariant(){
+  const m=8*U, rowH=btnH(U*2);
+  const title="Which Cell Machine is this from?";
+  const rows=VARIANTS.map(v=>v.name+"   (detected)");
+  const needW=Math.max(textW(title,U*2,1),...rows.map(r=>textW(r,U*2,1)))+2*m+8*U;
+  const needH=m+textH(U*2)+4*U+textH(U)+6*U+VARIANTS.length*(rowH+4*U)+m;
+    // shrink to fit the window height rather than running off the bottom
+  const u=Math.max(1,Math.min(U,Math.floor(U*(H-8*U)/Math.max(1,needH))));
+  const _k=u/U;
+const p=panelRect(needW*_k,needH*_k);
+  text(title,p.x+p.w/2,p.y+m,u*2,WHITE,"center",1);
+  const det=detectVariant(pending);
+  textFit("the code does not say - best guess: "+det.conf,p.x+m,p.y+m+textH(u*2)+4*u,
+          p.w-2*m,textH(u),"#222","center",1,u);
+  let y=p.y+m+textH(u*2)+4*u+textH(u)+6*u;
+  VARIANTS.forEach(v=>{
+    if(uiBtn(p.x+m,y,p.w-2*m,rowH,"",1)){
+      loadLevel(pending); pending=null; modal=null; paused=false;
+      afterLoad(mode);
+      say("loaded "+world.W+"x"+world.H);
+    }
+    textFit(v.name+(v.id===det.guess?"   (detected)":""),p.x+m+4*u,y,p.w-2*m-8*u,rowH,
+            WHITE,"left",1,u*2);
+    y+=rowH+4*u;
+  });
+}
+/* ===========================================================================
+   MAIN LOOP
+   =========================================================================== */
+let last=performance.now();
+function loop(t){
+  now=t;
+  const dt=Math.min(.1,(t-last)/1000); last=t;
+  uiZones=[];
+  musicPump();
+  X.imageSmoothingEnabled=false;
+
+  if(scr==="game"&&playing&&!paused&&!modal&&!won&&world){
+    const target=TPS[tpsIdx];
+    let n=0;
+    if(target===Infinity){
+      world.trackMotion=false; world.clearMotion(); tickDur=0;
+      const t0=performance.now();
+      while(performance.now()-t0<9){ world.tick(); n++; }
+    }else{
+      acc+=dt*target; n=Math.min(200000,Math.floor(acc)); acc-=n;
+      // Only a single tick can be interpolated -- with several per frame the
+      // intermediate states are gone, so it snaps rather than lying about them.
+      const track=interpOn()&&n===1;
+      if(n){ world.trackMotion=track; if(track) world.clearMotion(); }
+      for(let i=0;i<n;i++) world.tick();
+      world.trackMotion=false;
+      if(n){
+        if(track){ tickAt=t; tickDur=1000/target; }
+        else{ world.clearMotion(); tickDur=0; }
+      }
+    }
+    if(n) tickCount+=n;
+    voiceWorld(); checkWin();
+  }
+
+  if(scr==="title") screenTitle(dt);
+  else if(scr==="playmenu") screenPlayMenu();
+  else if(scr==="options") screenOptions();
+  else if(scr==="controls") screenControls();
+  else if(scr==="game") screenGame(dt);
+  if(scr==="game"&&won&&!modal) overlayWin();
+  else if(scr==="game"&&paused&&!modal) overlayPause();
+  if(modal==="help") overlayHelp();
+  if(modal==="settings") overlaySettings();
+  if(modal==="world") overlayWorld();
+  if(modal==="schemhelp") overlaySchemHelp();
+  if(modal==="load") overlayLoad();
+  if(modal==="variant"&&pending) overlayVariant();
+
+  if(fadeTo!==null||fade>0){
+    fade+=dt*5.5*(fadeTo!==null?1:-1);
+    if(fadeTo!==null&&fade>=1){ scr=fadeTo; fadeTo=null; fade=1; }
+    fade=Math.max(0,Math.min(1,fade));
+    X.fillStyle="rgba(0,0,0,"+fade+")"; X.fillRect(0,0,W,H);
+  }
+  if(toast&&t-toastT<3400){
+    const w=textW(toast,U,1)+8*U, h=textH(U)+5*U;
+    const x=Math.round(W/2-w/2), y=H-h-3*U;
+    X.fillStyle="rgba(0,0,0,.88)"; X.fillRect(x,y,w,h);
+    X.strokeStyle="#555"; X.lineWidth=1; X.strokeRect(x+.5,y+.5,w-1,h-1);
+    textFit(toast,x+4*U,y+2*U,w-8*U,textH(U),WHITE,"center",1,U);
+  }
+  M.click=false; M.rclick=false; M.wheel=0; M.pdx=M.pdy=0;
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
