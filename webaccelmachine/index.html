@@ -1051,20 +1051,39 @@ function uiSlider(id,x,y,w,val){
   // sweep across the slider snatched it and changed the speed mid-stroke.
   if(M.click&&dragId===null&&hot) dragId=id;
   if(dragId===id){ if(!M.down) dragId=null; else val=Math.max(0,Math.min(1,(M.x-x)/w)); }
-  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  /* On touch the track is drawn thick and the knob big enough to see under a
+     fingertip. The tap area was already generous, but a hairline with a 6px
+     handle reads as "not for touching" even when it is. */
+  const track=touchUsed?Math.max(3,U*2):Math.max(1,U);
+  const r=touchUsed?Math.max(Math.round(TAP()*0.30),5*U):3*U;
+  X.strokeStyle=WHITE; X.lineWidth=track;
   X.beginPath(); X.moveTo(x,Math.round(y)+.5); X.lineTo(x+w,Math.round(y)+.5); X.stroke();
-  const kx=Math.round(x+w*val), r=3*U;
+  const kx=Math.round(x+w*val);
   X.fillStyle="#000"; X.fillRect(kx-r,y-r,r*2,r*2);
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,touchUsed?U*1.5:U);
   X.strokeRect(kx-r+.5,y-r+.5,r*2-1,r*2-1);
-  X.fillStyle=WHITE; X.fillRect(kx-U,y-U,U*2,U*2);
+  X.fillStyle=WHITE;
+  const ki=touchUsed?Math.round(r*0.45):U;
+  X.fillRect(kx-ki,y-ki,ki*2,ki*2);
   return val;
 }
+// y is the top edge; uiToggleAt takes a centre line so callers do not have to
+// know the height, which changes between mouse and touch.
+function uiToggleAt(x,cy,on){ return uiToggle(x,cy-toggleH()/2,on); }
+const toggleH=()=>touchUsed?Math.max(TAP()*0.8,8*U):8*U;
 function uiToggle(x,y,on){
-  const w=16*U,h=8*U; reserve(x,y,w,h);
+  // Sized off the tap target on touch so the switch is a real control, not a
+  // cursor-sized pill that happens to be tappable if you aim.
+  const h=toggleH();
+  const w=touchUsed?Math.round(h*2):16*U;
+  reserve(x,y,w,h);
   const hot=inRect(x,y,w,h);
   X.fillStyle=hot?"rgba(255,255,255,.18)":"#000"; X.fillRect(x,y,w,h);
-  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U); X.strokeRect(x+U/2,y+U/2,w-U,h-U);
-  X.fillStyle=WHITE; X.fillRect(on?x+w-6*U:x+2*U,y+2*U,4*U,h-4*U);
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,touchUsed?U*1.5:U);
+  X.strokeRect(x+U/2,y+U/2,w-U,h-U);
+  X.fillStyle=WHITE;
+  const kw=Math.round(w*0.32), inset=Math.round(h*0.16);
+  X.fillRect(on?x+w-kw-inset:x+inset,y+inset,kw,h-2*inset);
   return hot&&M.click?(sfx("click"),!on):on;
 }
 function backArrow(){
@@ -2430,7 +2449,7 @@ function screenOptions(){
       (x,cy,w)=>{S.musicVol=uiSlider("m",x,cy,w,S.musicVol);});
   row("SFX VOL",null,(x,cy,w)=>{S.sfxVol=uiSlider("s",x,cy,w,S.sfxVol);});
   row("FAST GRAPHICS","turns off motion interpolation - cells jump between ticks",
-      (x,cy)=>{const f=uiToggle(x,cy-4*U,S.fast); if(f!==S.fast) S.fast=f;});
+      (x,cy)=>{const f=uiToggleAt(x,cy,S.fast); if(f!==S.fast) S.fast=f;});
   if(uiBtn(lx,H-btnH(U*2)-10*U,0,0,"VIEW CONTROLS",U*2)) nav("controls");
 }
 const CONTROLS=[["Q/E","Rotate the cell you will place"],["WASD","Move camera around"],
@@ -2534,15 +2553,44 @@ function screenGame(dt){
       if(inRect(x,by,ps,ps)&&M.click){setTool(i);sfx("click");}
     }
   }
+  /* Left-column geometry, computed once here because both the selection row and
+     the transport need it. It used to be worked out further down, so the
+     selection row guessed at the transport's width and guessed wrong. */
+  const bs=touchUsed?Math.max(TAP(),U*34):Math.max(28,U*30);
+  const tSize=touchUsed?Math.max(TAP(),U*30):Math.max(26,U*26);
+  const rSize=Math.max(TAP(),U*26);
+  const colGap=4*U;
+  const stackH=touchUsed?bs+colGap+rSize+colGap+tSize+colGap+tSize:0;
+  const colBot=H-barH-colGap;
+  const colTop=colBot-stackH;
+  const menuBottom=pad+btnH(touchUsed?U*3:U*2)+6*U;
+  const tightCol=touchUsed&&colTop<menuBottom;
+  const colX=pad;
+  const colY=touchUsed?(tightCol?Math.round(menuBottom):Math.round(colTop))
+                      :Math.round(H/2-bs/2);
+  const tw=tSize;
+  const th=touchUsed?tSize:Math.max(20,U*20);
+  const ty=H-barH-th-4*U;
+  // reset stacks above play/step only when the column has the height for it
+  const stack=touchUsed&&(ty-th-colGap)>(colY+bs+colGap+rSize+colGap);
+  const transportCols=stack?2:3;
+  const transportRight=pad+transportCols*(tw+4*U)+6*U;
+
   // actions on a rectangle selection
   if(editing&&sel&&!carry){
     // Finger-sized on touch: these were laid out for a cursor and were by far
     // the smallest targets on the screen.
     const is=touchUsed?Math.max(TAP(),U*30):Math.max(20,U*13);
     const gp=touchUsed?3*U:4*U, totW=5*is+4*gp;
-    const transportRight=pad+3*(Math.max(26,U*26)+4*U)+6*U;
-    let axx=Math.max(transportRight,Math.round((W-totW)/2)), ay=H-barH-is-4*U;
-    if(axx+totW>W-pad) axx=Math.max(pad,W-pad-totW);
+    // transportRight is the real right edge of the transport block, hoisted
+    // above so this row cannot land on top of it.
+    let axx=Math.max(transportRight,Math.round((W-totW)/2));
+    let ay=H-barH-is-4*U;
+    if(axx+totW>W-pad){
+      // No room beside the transport: put the row on its own line above it.
+      axx=Math.max(pad,W-pad-totW);
+      if(axx<transportRight) ay-=is+4*U;
+    }
     if(uiBtn(axx,ay,is,is,"",1)) grabSel(true);
     iconCopy(axx,ay,is);
     if(uiBtn(axx+is+gp,ay,is,is,"",1)) grabSel(false);
@@ -2576,8 +2624,15 @@ function screenGame(dt){
   const menuU=touchUsed?U*3:U*2;
   if(uiBtn(pad,pad,0,0,"MENU",menuU)){ paused=true; consumeClick(); }
   const ty0=pad+btnH(menuU)+3*U;
-  text(String(tickCount),pad+U,ty0,U*2,WHITE,"left",1);
-  if(levelName) textFit(levelName,pad+U,ty0+textH(U*2)+2*U,44*U,textH(U),DIM,"left",1,U);
+  /* The tick counter goes beside MENU when the column below is occupied,
+     otherwise it would sit underneath the tool preview. */
+  // On touch the space under MENU belongs to the tool column, so the counter
+  // always goes beside the button rather than under it.
+  const tickBeside=touchUsed;
+  if(tickBeside) text(String(tickCount),pad+btnW("MENU",menuU)+5*U,pad+U,U*3,WHITE,"left",1);
+  else text(String(tickCount),pad+U,ty0,U*2,WHITE,"left",1);
+  if(levelName&&!tickBeside)
+    textFit(levelName,pad+U,ty0+textH(U*2)+2*U,44*U,textH(U),DIM,"left",1,U);
   // --- top right
   const sw=Math.min(65*U,W*0.28);
   const sx2=W-pad-sw;
@@ -2585,8 +2640,7 @@ function screenGame(dt){
   const t=uiSlider("tps",sx2,pad+U+textH(U*2)/2,sw,tpsIdx/(TPS.length-1));
   tpsIdx=Math.round(t*(TPS.length-1));
   // --- left column: preview + transport
-  const bs=touchUsed?Math.max(TAP(),U*34):Math.max(28,U*30);
-  const px=pad, py=Math.round(H/2-bs/2);
+  const px=colX, py=colY;
   if(editing){
     reserve(px,py,bs,bs);
     const hot=inRect(px,py,bs,bs);
@@ -2598,11 +2652,12 @@ function screenGame(dt){
     if(touchUsed){
       /* "Q / E" is meaningless without a keyboard. The mockup puts two curved
          arrows there instead, so rotating is reachable with a finger. */
-      const rs=Math.max(TAP(),U*26);
-      // Below the preview if there is room, otherwise beside it.
-      const roomBelow=(py+bs+4*U+rs)<(H-barH-3*Math.max(TAP(),U*30));
-      const r1x=roomBelow?px:px+bs+3*U, r1y=roomBelow?py+bs+4*U:py;
-      const r2x=roomBelow?px+rs+3*U:px+bs+3*U, r2y=roomBelow?r1y:py+rs+3*U;
+      const rs=rSize;
+      /* Side by side under the preview when the column fits; when it does not,
+         the two turn buttons go to the right of the preview so the column stays
+         short enough for the transport below it. */
+      const r1x=tightCol?px+bs+3*U:px, r1y=tightCol?py:py+bs+colGap;
+      const r2x=tightCol?px+bs+3*U:px+rs+3*U, r2y=tightCol?py+rs+3*U:r1y;
       if(uiBtn(r1x,r1y,rs,rs,"",1)){ if(carry) rotateCarry(3); else selRot=(selRot+3)&3; sfx("click"); }
       iconTurn(r1x,r1y,rs,-1);
       if(uiBtn(r2x,r2y,rs,rs,"",1)){ if(carry) rotateCarry(1); else selRot=(selRot+1)&3; sfx("click"); }
@@ -2616,13 +2671,6 @@ function screenGame(dt){
   /* The mockup stacks these at the lower left: reset sits on its own above the
      play/step pair rather than all three in a row, which keeps them clear of
      the wider bottom bar and away from the middle of the board. */
-  const tw=touchUsed?Math.max(TAP(),U*30):Math.max(26,U*26);
-  const th=touchUsed?tw:Math.max(20,U*20);
-  const ty=H-barH-th-4*U;
-  /* Stacking reset above play needs vertical room. In landscape the bar eats
-     most of the height, so the three go back to a single row -- better one
-     tidy row than two that overlap. */
-  const stack=touchUsed&&(ty-th-4*U)>H*0.45;
   if(stack){
     const ry2=ty-th-4*U;
     if(uiBtn(pad,ry2,tw,th,"",1)) restoreInitial();
@@ -3000,7 +3048,7 @@ const p=panelRect(needW*_k,needH*_k);
   row("SFX VOL","place, generate, destroy",
       (x,cy,w)=>{S.sfxVol=uiSlider("ss",x,cy,w,S.sfxVol);});
   row("FAST GRAPHICS","turns off motion interpolation - cells jump between ticks",
-      (x,cy)=>{const f=uiToggle(x,cy-4*u,S.fast); if(f!==S.fast) S.fast=f;});
+      (x,cy)=>{const f=uiToggleAt(x,cy,S.fast); if(f!==S.fast) S.fast=f;});
 }
 let szAnchor=0;                  // 0 TL, 1 TR, 2 BL, 3 BR
 let fieldW="", fieldH="", focusField=null;   // typed boxes: sizes and searches
