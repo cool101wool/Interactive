@@ -829,8 +829,20 @@ app.addEventListener("wheel",e=>{M.wheel+=Math.sign(e.deltaY);e.preventDefault()
    -- importantly -- from replaying the touch as a synthetic click afterwards,
    which would otherwise fire every action twice.
 --------------------------------------------------------------------------- */
+// Set the first time a touch arrives. Layout keys off this rather than a
+// user-agent string: what matters is how the thing is actually being used, and
+// a laptop with a touchscreen that is being poked deserves the bigger targets.
+let touchUsed=false;
 let touchMode=0;          // fingers involved in the current gesture
 let pinchDist=0, pinchZ=0, liftAt=-1;
+let touchStart=null, touchMoved=false, pinchAt=0;
+// A finger is far blunter than a mouse and never holds still. Without a dead
+// zone, the tiny drift during a pinch or a pan registers as a press on the
+// board and scatters cells -- six of them in a five-second zoom test. A touch
+// only becomes a press once it has either stayed put long enough to be
+// deliberate or moved far enough to be a real stroke.
+const TAP_SLOP=()=>Math.max(10,14*U);   // px of drift still counted as "still"
+const TAP_DELAY=90;                     // ms before a resting finger commits
 const touchPt=t=>({x:t.clientX*DPR,y:t.clientY*DPR});
 const spread=ts=>Math.hypot(touchPt(ts[0]).x-touchPt(ts[1]).x,
                             touchPt(ts[0]).y-touchPt(ts[1]).y);
@@ -838,7 +850,7 @@ const midPt=ts=>({x:(touchPt(ts[0]).x+touchPt(ts[1]).x)/2,
                   y:(touchPt(ts[0]).y+touchPt(ts[1]).y)/2});
 
 app.addEventListener("touchstart",e=>{
-  e.preventDefault(); audioUnlock();
+  e.preventDefault(); audioUnlock(); touchUsed=true;
   const ts=e.touches;
   if(ts.length===1){
     const p=touchPt(ts[0]);
@@ -847,13 +859,18 @@ app.addEventListener("touchstart",e=>{
     M.x=p.x; M.y=p.y; M.pdx=M.pdy=0;
     if(modal!=="world"&&modal!=="load"&&!schemOpen) focusField=null;
     touchMode=1;
-    M.down=true; M.click=true; M.pressUI=overUI();
+    touchStart={x:p.x,y:p.y,t:performance.now(),ui:overUI()};
+    touchMoved=false;
+    // Widgets keep firing immediately: a button press is unambiguous, and
+    // waiting would make the whole interface feel sticky. Only the board, where
+    // a stray press costs you a cell, waits to see what the finger does.
+    if(touchStart.ui){ M.down=true; M.click=true; M.pressUI=true; }
   }else if(ts.length>=2){
     // A second finger converts the gesture into a pan: undo whatever the first
     // finger started so a two-finger pan never leaves a stray painted cell.
     if(touchMode===1){ M.down=false; M.click=false; M.pressUI=false; }
-    touchMode=2;
-    pinchDist=spread(ts); pinchZ=camZi;
+    touchMode=2; touchStart=null;
+    pinchDist=spread(ts); pinchZ=camZi; pinchAt=zoomPx();
     const m=midPt(ts); M.x=m.x; M.y=m.y; M.pdx=M.pdy=0;
   }
 },{passive:false});
@@ -864,16 +881,22 @@ app.addEventListener("touchmove",e=>{
   if(touchMode===1&&ts.length===1){
     const p=touchPt(ts[0]);
     M.pdx=p.x-M.x; M.pdy=p.y-M.y; M.x=p.x; M.y=p.y;
+    if(touchStart&&!touchStart.ui&&!M.down){
+      const far=Math.hypot(p.x-touchStart.x,p.y-touchStart.y)>TAP_SLOP();
+      // A finger that has travelled is a deliberate stroke: start it from where
+      // it began, so the cell you first touched is not skipped.
+      if(far){
+        M.x=touchStart.x; M.y=touchStart.y;
+        M.down=true; M.click=true; M.pressUI=touchStart.ui;
+        touchMoved=true;
+      }
+    }
   }else if(touchMode===2&&ts.length>=2){
     const m=midPt(ts);
     cam.x-=m.x-M.x; cam.y-=m.y-M.y;      // drag the board with the midpoint
     M.x=m.x; M.y=m.y;
     const d=spread(ts);
-    if(pinchDist>8&&d>8){
-      // Each doubling of the finger gap is two steps up the zoom ladder.
-      const steps=Math.round(Math.log2(d/pinchDist)*2);
-      if(steps) setZoom(pinchZ+steps,m.x,m.y);
-    }
+    if(pinchDist>8&&d>8) setZoomFree(pinchAt*(d/pinchDist),m.x,m.y);
     clampCam();
   }
 },{passive:false});
@@ -881,8 +904,14 @@ app.addEventListener("touchmove",e=>{
 function endTouch(e){
   e.preventDefault();
   if(e.touches.length===0){
-    if(touchMode===1){ M.down=false; M.pressUI=false; }
-    touchMode=0;
+    // A finger that came and went without ever committing was a tap: fire it
+    // now, on release, so quick taps still place a cell.
+    if(touchMode===1&&touchStart&&!touchStart.ui&&!M.down){
+      M.x=touchStart.x; M.y=touchStart.y;
+      M.down=true; M.click=true; M.pressUI=false;
+      tapRelease=true;
+    }else if(touchMode===1){ M.down=false; M.pressUI=false; }
+    touchMode=0; touchStart=null;
     // Hold the position for one more frame: the release frame is where a
     // dragged cell lands and a selection resolves. Cleared right after, so no
     // hover outline is left stranded under a finger that is no longer there.
@@ -893,6 +922,9 @@ function endTouch(e){
     M.x=p.x; M.y=p.y; M.pdx=M.pdy=0;
   }
 }
+// A tap's press and release cannot land in the same frame, or nothing that
+// reads M.down would ever see it. The press gets one full frame, then lifts.
+let tapRelease=false;
 app.addEventListener("touchend",endTouch,{passive:false});
 app.addEventListener("touchcancel",endTouch,{passive:false});
 const isTouch=()=>touchMode>0||liftAt>=0;
@@ -969,8 +1001,13 @@ let dragId=null;
 function consumeClick(){ M.click=false; M.rclick=false; }
 function openModal(name){ modal=name; focusField=null; consumeClick(); }
 function uiSlider(id,x,y,w,val){
-  reserve(x-3*U,y-3*U,w+6*U,6*U);
-  const hot=M.y>y-5*U&&M.y<y+5*U&&M.x>x-5*U&&M.x<x+w+5*U;
+  // The reserved zone has to cover everything the slider will react to. It used
+  // to be smaller than the hot area, leaving a band where a press was neither
+  // "on the slider" nor "on the board" -- on touch that band silently painted a
+  // cell instead of grabbing the handle.
+  const grab=touchUsed?8*U:5*U;
+  reserve(x-grab,y-grab,w+2*grab,2*grab);
+  const hot=M.y>y-grab&&M.y<y+grab&&M.x>x-grab&&M.x<x+w+grab;
   // Grab on the press itself, not on "button is down and the pointer is over
   // me". The latter meant a drag that started on the board and happened to
   // sweep across the slider snatched it and changed the speed mid-stroke.
@@ -1342,6 +1379,9 @@ const tpsLabel=()=>TPS[tpsIdx]===Infinity?"max tps":TPS[tpsIdx]+" tps";
 const PALETTE=[T_GEN,T_MOVER,T_CW,T_CCW,T_PUSH,T_SLIDE,T_ENEMY,T_TRASH,T_WALL];
 // 9 = drag cells around, 10 = pan the camera, 11 = rectangle select
 const TOOL_PLUS=9,TOOL_DRAG=10,TOOL_SELECT=11;   // middle-drag still pans
+// A finger has no right button, so erasing needs a tool of its own. It is only
+// offered on touch devices; a mouse already has a faster way to do this.
+const TOOL_ERASE=12;
 
 /* --- initial state ----------------------------------------------------------
    "Initial state" is whatever the board looked like the moment Play was first
@@ -1433,9 +1473,11 @@ const cam={x:0,y:0,z:26};
    landed back on the value they started from and the wheel appeared dead. Twelve
    rungs sit below 1x, where a cell is smaller than a pixel. */
 const ZSTEPS=[1/64,1/48,1/32,1/24,1/16,1/12,1/8,1/6,1/4,1/3,1/2,2/3,
-              1,2,3,4,6,8,12,16,24,32,48,64];
+              1,2,3,4,6,8,12,16,24,32,48,64,96];
 let camZi=ZSTEPS.indexOf(8);
-const zoomPx=()=>ZSTEPS[camZi];
+// Non-zero while a pinch is driving the zoom off the fixed ladder.
+let zFree=0;
+const zoomPx=()=>zFree||ZSTEPS[camZi];
 function zoomFit(){
   if(!world) return 8;
   return Math.min(W/world.W,H/world.H);
@@ -1447,7 +1489,24 @@ function zoomLo(){
   for(let i=0;i<ZSTEPS.length;i++) if(ZSTEPS[i]<=fit) lo=i;
   return Math.max(0,Math.min(lo,ZSTEPS.length-1));
 }
+/* Pinch is continuous: a ladder of fixed steps makes zooming feel like it is
+   fighting you, since the board jumps between sizes while the fingers move
+   smoothly. camZi is kept in sync with the nearest rung so the wheel and the
+   +/- buttons carry on from wherever the pinch left off. */
+function setZoomFree(px,ax,ay){
+  const lo=ZSTEPS[0], hi=ZSTEPS[ZSTEPS.length-1];
+  const before=zoomPx();
+  zFree=Math.max(lo,Math.min(hi,px));
+  let best=0;
+  for(let i=1;i<ZSTEPS.length;i++)
+    if(Math.abs(ZSTEPS[i]-zFree)<Math.abs(ZSTEPS[best]-zFree)) best=i;
+  camZi=best;
+  const wx=(ax+cam.x)/before, wy=(ay+cam.y)/before;
+  cam.x=wx*zoomPx()-ax; cam.y=wy*zoomPx()-ay;
+  clampCam();
+}
 function setZoom(i,ax,ay){
+  zFree=0;
   const lo=0;                      // the whole ladder; clampCam centres a board
                                    // that ends up smaller than the window
   const before=zoomPx();
@@ -2109,6 +2168,17 @@ function boardInput(dt){
     return;
   }
 
+  if(selTool===TOOL_ERASE){
+    if(M.down&&!M.pressUI){
+      let hit=false;
+      eachCellOnLine(paintFrom||hb,hb,(x,y)=>{
+        if(world.g[world.idx(x,y)]){ world.place(x,y,0); hit=true; }
+      });
+      paintFrom={x:hb.x,y:hb.y};
+      if(M.click&&hit) sfx("del");
+    }
+    return;
+  }
   if(M.down&&!M.pressUI){
     const c=mk(PALETTE[selTool],selRot);
     eachCellOnLine(paintFrom||hb,hb,(x,y)=>world.place(x,y,c));
@@ -2324,6 +2394,14 @@ function paletteIcon(i,x,y,s){
   X.strokeStyle="#444"; X.lineWidth=Math.max(1,U); X.strokeRect(x+U/2,y+U/2,s-U,s-U);
   X.fillStyle=WHITE;
   const c=s/2, q=Math.max(2,s*0.09);
+  if(i===TOOL_ERASE){
+    X.strokeStyle="#ff6b6b"; X.lineWidth=Math.max(2,s*0.11); X.lineCap="butt";
+    X.beginPath();
+    X.moveTo(x+s*0.28,y+s*0.28); X.lineTo(x+s*0.72,y+s*0.72);
+    X.moveTo(x+s*0.72,y+s*0.28); X.lineTo(x+s*0.28,y+s*0.72);
+    X.stroke();
+    return;
+  }
   if(i===TOOL_DRAG){
     X.beginPath();
     for(let k=0;k<4;k++){
@@ -2349,16 +2427,28 @@ function screenGame(dt){
   const pad=7*U;
   const editing=mode!=="level";
   // --- bottom bar
-  const n=12, ps=Math.max(16,Math.min(28*U,Math.floor((W-2*pad-2*U*36)/n)-2*U));
+  const n=touchUsed?13:12;             // touch gets the eraser as well
   const gap=Math.max(2,Math.round(U*1.5));
-  const tot=n*(ps+gap)-gap;
-  const barH=editing?ps+6*U:0;
+  const room=touchUsed?W-2*pad:W-2*pad-2*U*36;
+  /* On a phone the icons are half again as big. Thirteen of them at that size
+     do not fit across a portrait screen, so rather than let the width squeeze
+     them back down to mouse size the bar wraps onto as many rows as it needs.
+     Finger-sized targets matter more than a single tidy row. */
+  const base=Math.max(16,Math.min(28*U,Math.floor(room/12)-2*U));
+  const ps=touchUsed?Math.max(16,Math.round(base*1.5)):base;
+  const perRow=touchUsed?Math.max(1,Math.floor((room+gap)/(ps+gap))):n;
+  const rows=Math.ceil(n/perRow);
+  const barH=editing?rows*(ps+gap)-gap+6*U:0;
   if(editing){
     X.fillStyle="rgba(0,0,0,.72)"; X.fillRect(0,H-barH,W,barH);
     reserve(0,H-barH,W,barH);
-    const bx=Math.round((W-tot)/2), by=Math.round(H-barH+3*U);
+    const top=Math.round(H-barH+3*U);
     for(let i=0;i<n;i++){
-      const x=bx+i*(ps+gap);
+      const r=Math.floor(i/perRow), col=i%perRow;
+      const cnt=Math.min(perRow,n-r*perRow);
+      const rowW=cnt*(ps+gap)-gap;
+      const x=Math.round((W-rowW)/2)+col*(ps+gap);
+      const by=top+r*(ps+gap);
       paletteIcon(i,x,by,ps);
       if(i===selTool){X.strokeStyle=WHITE;X.lineWidth=Math.max(2,U);X.strokeRect(x-U,by-U,ps+2*U,ps+2*U);}
       if(inRect(x,by,ps,ps)&&M.click){setTool(i);sfx("click");}
@@ -2780,6 +2870,23 @@ let szAnchor=0;                  // 0 TL, 1 TR, 2 BL, 3 BR
 let fieldW="", fieldH="", focusField=null;   // typed boxes: sizes and searches
 let loadQuery="", schemQuery="";
 let loadScroll=0, schemScroll=0;
+/* The text boxes are drawn on a canvas, so there is no real <input> for a
+   phone to focus and no on-screen keyboard ever appears -- the boxes were
+   simply dead on mobile. prompt() is the one text entry a browser will raise
+   without a DOM field, so on touch the box opens one instead of taking focus.
+   A physical keyboard still types straight into the box as before. */
+function editField(key,label){
+  const f=FIELD[key];
+  if(!f) return;
+  if(!touchUsed){ focusField=key; return; }
+  focusField=null;
+  let v=null;
+  try{ v=prompt(label,f.get()); }catch(e){ v=null; }
+  if(v===null) return;
+  v=String(v).trim();
+  if(f.numeric) v=v.replace(/[^0-9]/g,"");
+  f.set(v.slice(0,f.max||24));
+}
 const FIELD={
   w:{get:()=>fieldW,set:v=>fieldW=v,numeric:true,max:4},
   h:{get:()=>fieldH,set:v=>fieldH=v,numeric:true,max:4},
@@ -2815,7 +2922,7 @@ function textField(id,x,y,w,h,placeholder,u){
     const tw=Math.min(w-6*u,textW(val,u*2,1));
     X.fillStyle="#6ec6ff"; X.fillRect(x+3*u+tw+u,y+3*u,Math.max(1,u),h-6*u);
   }
-  if(hot&&M.click){ focusField=id; sfx("click"); consumeClick(); }
+  if(hot&&M.click){ editField(id,"Search"); sfx("click"); consumeClick(); }
   return hot;
 }
 function resizeWorld(nw,nh,anchor){
@@ -2876,7 +2983,9 @@ function overlayWorld(){
     text(val,bx+4*u,y+(BH-textH(HS))/2,HS,on?"#6ec6ff":WHITE,"left",2);
     if(on&&(Math.floor(now/450)&1))
       X.fillRect(bx+4*u+textW(val,HS,2)+u,y+3*u,Math.max(1,u),BH-6*u);
-    if(hot&&M.click){ focusField=key; sfx("click"); }
+    if(hot&&M.click){ editField(key,label==="WIDTH"?"World width (1-9999)"
+                                                   :"World height (1-9999)");
+                      sfx("click"); }
     y+=BH+3*u;
   };
   box("WIDTH","w",fieldW);
@@ -3036,6 +3145,12 @@ function loop(t){
   now=t;
   const dt=Math.min(.1,(t-last)/1000); last=t;
   uiZones=[];
+  // A finger held still on the board is a considered press, not a slip.
+  if(touchMode===1&&touchStart&&!touchStart.ui&&!M.down&&
+     performance.now()-touchStart.t>TAP_DELAY){
+    M.x=touchStart.x; M.y=touchStart.y;
+    M.down=true; M.click=true; M.pressUI=false;
+  }
   musicPump();
   X.imageSmoothingEnabled=false;
 
@@ -3091,7 +3206,8 @@ function loop(t){
     textFit(toast,x+4*U,y+2*U,w-8*U,textH(U),WHITE,"center",1,U);
   }
   M.click=false; M.rclick=false; M.wheel=0; M.pdx=M.pdy=0;
-  if(liftAt>=0&&--liftAt<0){ M.x=-9e9; M.y=-9e9; }
+  if(tapRelease&&!M.click){ M.down=false; M.pressUI=false; tapRelease=false; }
+  if(liftAt>=0&&--liftAt<0&&!tapRelease){ M.x=-9e9; M.y=-9e9; }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
