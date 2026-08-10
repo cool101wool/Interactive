@@ -975,7 +975,13 @@ addEventListener("keydown",e=>{
     e.preventDefault(); return;
   }
   KEYS.add(e.key.toLowerCase()); audioUnlock();
-  if(e.key==="Escape"){ if(scr==="game"&&!modal) paused=!paused; else if(modal) modal=null; else if(scr!=="title") back(); }
+  if(e.key==="Escape"){
+    // Escape out of the confirm is a "no", not a second way to leave.
+    if(modal==="exit") modal=null;
+    else if(scr==="game"&&!modal) paused=!paused;
+    else if(modal) modal=null;
+    else if(scr!=="title") back();
+  }
   if(scr==="game"&&!paused&&!modal&&!won){
     const k=e.key.toLowerCase();
     if(k===" ") togglePlay();
@@ -1007,20 +1013,20 @@ let uiZones=[];
 const reserve=(x,y,w,h)=>uiZones.push([x,y,w,h]);
 const overUI=()=>uiZones.some(([x,y,w,h])=>inRect(x,y,w,h));
 
-function frame(x,y,w,h,hot,bg){
+function frame(x,y,w,h,hot,bg,ink){
   if(bg!==false){X.fillStyle=hot?"rgba(255,255,255,.18)":"rgba(0,0,0,.72)";X.fillRect(x,y,w,h);}
-  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
+  X.strokeStyle=ink||WHITE; X.lineWidth=Math.max(1,U);
   X.strokeRect(x+U/2,y+U/2,w-U,h-U);
 }
 const btnW=(l,sc)=>textW(l,sc,1)+8*U, btnH=sc=>textH(sc)+7*U;
-function uiBtn(x,y,w,h,label,scale){
+function uiBtn(x,y,w,h,label,scale,ink){
   const boxed=w>0&&h>0;
   if(label&&!boxed){ w=btnW(label,scale); h=btnH(scale); }
   x=Math.round(x);y=Math.round(y);w=Math.round(w);h=Math.round(h);
   reserve(x,y,w,h);
   const hot=inRect(x,y,w,h);
-  frame(x,y,w,h,hot);
-  if(label) textFit(label,x+3*U,y,w-6*U,h,WHITE,"center",1,scale);
+  frame(x,y,w,h,hot,undefined,ink);
+  if(label) textFit(label,x+3*U,y,w-6*U,h,ink||WHITE,"center",1,scale);
   return hot&&M.click&&(sfx("click"),true);
 }
 function uiText(x,y,label,scale,color,align,sp){
@@ -2430,7 +2436,7 @@ const p=panelRect(needW*_k,needH*_k);
   textFit("every enemy destroyed",p.x+m,p.y+m+textH(u*3)+4*u,p.w-2*m,textH(u),"#222","center",1,u);
   const by=p.y+p.h-m-btnH(u*2);
   if(uiBtn(p.x+m,by,0,0,"RESET",u*2)) restoreInitial();
-  if(uiBtn(p.x+p.w-m-btnW("EXIT",u*2),by,0,0,"EXIT",u*2)){ won=false; nav("title"); }
+  if(uiBtn(p.x+p.w-m-btnW("EXIT",u*2),by,0,0,"EXIT",u*2)) openModal("exit");
 }
 function screenOptions(){
   X.fillStyle="#000"; X.fillRect(0,0,W,H);
@@ -2634,7 +2640,17 @@ function screenGame(dt){
   if(levelName&&!tickBeside)
     textFit(levelName,pad+U,ty0+textH(U*2)+2*U,44*U,textH(U),DIM,"left",1,U);
   // --- top right
-  const sw=Math.min(65*U,W*0.28);
+  // Twice the old length: a longer track means finer control over the speed,
+  // and it is the one slider always on screen.
+  /* Twice the old length. Both limits had to double: the 65*U cap was the one
+     actually binding on a wide screen, so raising only the percentage left the
+     slider unchanged everywhere except a narrow phone. */
+  /* Twice the old length. Both limits had to double -- the 65*U cap was the one
+     actually binding on a wide screen. The last term keeps the label, and the
+     MENU button beside it, from being run over on a narrow phone. */
+  const menuRight=pad+btnW("MENU",menuU)+(tickBeside?textW(String(tickCount),U*3,1)+7*U:2*U);
+  const sw=Math.min(130*U,W*0.56,
+                    W-pad-menuRight-textW(tpsLabel(),U*2,1)-8*U);
   const sx2=W-pad-sw;
   text(tpsLabel(),sx2-4*U,pad+U,U*2,WHITE,"right",1);
   const t=uiSlider("tps",sx2,pad+U+textH(U*2)/2,sw,tpsIdx/(TPS.length-1));
@@ -2788,8 +2804,9 @@ function drawSchematics(pad,barH){
     }
     textFit(e.name,px+m+3*U,y,pw-2*m-delW-sbW-10*U,rowH,WHITE,"left",1,touchUsed?U*2:U);
     if(uiBtn(px+pw-m-delW-sbW-2*U,y,delW,rowH,"",1)){ schemDrop(e.name); say("deleted"); }
-    X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
-    const cxm=px+pw-m-delW-sbW-2*U+delW/2, cym=y+rowH/2, r=delW*0.22;
+    X.strokeStyle=WHITE; X.lineWidth=Math.max(touchUsed?3:1,U);
+    const cxm=px+pw-m-delW-sbW-2*U+delW/2, cym=y+rowH/2;
+    const r=delW*(touchUsed?0.30:0.22);
     X.beginPath();
     X.moveTo(cxm-r,cym-r); X.lineTo(cxm+r,cym+r);
     X.moveTo(cxm+r,cym-r); X.lineTo(cxm-r,cym+r);
@@ -2800,19 +2817,22 @@ function drawSchematics(pad,barH){
 }
 
 /* --- overlays: every panel is sized from the content it must hold ---------- */
-function panelRect(needW,needH){
+function panelRect(needW,needH,ink,fill){
   const w=Math.round(Math.min(W-8*U,Math.max(60*U,needW)));
   const h=Math.round(Math.min(H-8*U,Math.max(50*U,needH)));
   const x=Math.round((W-w)/2), y=Math.round((H-h)/2);
   X.fillStyle="rgba(0,0,0,.74)"; X.fillRect(0,0,W,H);
-  X.fillStyle="rgba(122,122,122,.94)"; X.fillRect(x,y,w,h);
-  X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U); X.strokeRect(x+U/2,y+U/2,w-U,h-U);
+  X.fillStyle=fill||"rgba(122,122,122,.94)"; X.fillRect(x,y,w,h);
+  X.strokeStyle=ink||WHITE; X.lineWidth=Math.max(1,U); X.strokeRect(x+U/2,y+U/2,w-U,h-U);
   reserve(0,0,W,H);
   return {x,y,w,h};
 }
 function closeBtn(p,u){
   u=u||U;
-  const s=Math.max(16,u*11), x=p.x+p.w-s-4*u, y=p.y+4*u;
+  // The corner X closes the panel, so on touch it gets a full tap target
+  // rather than the cursor-sized square it was.
+  const s=touchUsed?Math.max(TAP(),u*11):Math.max(16,u*11);
+  const x=p.x+p.w-s-4*u, y=p.y+4*u;
   reserve(x,y,s,s);
   const hot=inRect(x,y,s,s);
   frame(x,y,s,s,hot);
@@ -2985,8 +3005,32 @@ const p=panelRect(needW*_k,needH*_k);
   }
   iconWorld(ix,y,is); textFit("size",ix,y+is+u,is,textH(u),"#222","center",1,u);
   const by=p.y+p.h-m-btnH(hs);
-  if(uiBtn(p.x+m,by,0,0,"Exit",hs)){ paused=false; nav("title"); }
+  if(uiBtn(p.x+m,by,0,0,"Exit",hs)) openModal("exit");
   if(uiBtn(p.x+p.w-m-btnW("Resume",hs),by,0,0,"Resume",hs)) paused=false;
+}
+/* Leaving a level throws away anything unsaved, so it asks first. The whole
+   panel is yellow -- border, text and buttons -- to mark it out from the grey
+   informational panels as something that wants a decision. */
+const YELLOW="#ffd23f";
+function overlayExitConfirm(){
+  const hs=U*2, m=8*U;
+  const q="Are you sure you want to exit?";
+  const sub="unsaved changes will be lost";
+  const needW=Math.max(textW(q,hs,1),textW(sub,U,1),
+                       btnW("EXIT",hs)+btnW("STAY",hs)+10*U)+2*m;
+  // question, subtitle, gap, buttons -- the subtitle was missing from this,
+  // so the panel came out short and the text sat under the buttons.
+  const needH=m+textH(hs)+3*U+textH(U)+10*U+btnH(hs)+m;
+  const u=Math.max(1,Math.min(U,Math.floor(U*(H-8*U)/Math.max(1,needH))));
+  const _k=u/U;
+  const p=panelRect(needW*_k,needH*_k,YELLOW,"rgba(46,38,0,.96)");
+  textFit(q,p.x+m,p.y+m,p.w-2*m,textH(u*2),YELLOW,"center",1,u*2);
+  textFit(sub,p.x+m,p.y+m+textH(u*2)+3*u,p.w-2*m,textH(u),YELLOW,"center",1,u);
+  const by=p.y+p.h-m-btnH(u*2);
+  if(uiBtn(p.x+m,by,0,0,"STAY",u*2,YELLOW)){ modal=null; consumeClick(); }
+  if(uiBtn(p.x+p.w-m-btnW("EXIT",u*2),by,0,0,"EXIT",u*2,YELLOW)){
+    modal=null; paused=false; won=false; nav("title");
+  }
 }
 function overlayHelp(){
   const m=8*U, unit=FONT_W+2;
@@ -3185,7 +3229,9 @@ function overlayWorld(){
     X.fillRect(bx+cs*0.22,by+cs*0.22,cs*0.56,cs*0.56);
   }
   const by=p.y+p.h-m-btnH(HS);
-  if(uiBtn(p.x+m,by,0,0,"APPLY",HS)){
+  // Cancel on the left, apply on the right.
+  if(uiBtn(p.x+m,by,0,0,"CANCEL",HS)){ focusField=null; modal=null; }
+  if(uiBtn(p.x+p.w-m-btnW("APPLY",HS),by,0,0,"APPLY",HS)){
     // 9999 x 9999 is 100 million cells -- around 270 MB of engine state, which
     // is heavy but real. Anything past the 32-bit index ceiling is refused by
     // the World constructor rather than silently corrupting.
@@ -3200,7 +3246,6 @@ function overlayWorld(){
       }catch(e){ say("could not resize: "+e.message,true); }
     }
   }
-  if(uiBtn(p.x+p.w-m-btnW("CANCEL",HS),by,0,0,"CANCEL",HS)){ focusField=null; modal=null; }
 }
 const SCHEM_HELP=[
   "Schematics are V3 level codes kept in your browser's storage, so you can "+
@@ -3369,6 +3414,7 @@ function loop(t){
   else if(scr==="game") screenGame(dt);
   if(scr==="game"&&won&&!modal) overlayWin();
   else if(scr==="game"&&paused&&!modal) overlayPause();
+  if(modal==="exit") overlayExitConfirm();
   if(modal==="help") overlayHelp();
   if(modal==="settings") overlaySettings();
   if(modal==="world") overlayWorld();
