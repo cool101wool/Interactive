@@ -1538,8 +1538,16 @@ function setZoom(i,ax,ay){
 function clampCam(){
   if(!world) return;
   const z=zoomPx(), bw=world.W*z, bh=world.H*z;
-  cam.x=Math.max(-W/2,Math.min(bw-W/2,cam.x));
-  cam.y=Math.max(-H/2,Math.min(bh-H/2,cam.y));
+  /* Keeping the screen centre over the grid only makes sense while the board is
+     bigger than the view. Once it is smaller -- routine on a tall phone -- the
+     rule still leaves a band of travel, so a pinch anchored anywhere but the
+     middle slides the board along that band and the zoom looks like it is
+     drifting away from your fingers. A board that cannot fill the axis is
+     simply centred on it, which is stable and predictable. */
+  if(bw<=W) cam.x=(bw-W)/2;
+  else cam.x=Math.max(-W/2,Math.min(bw-W/2,cam.x));
+  if(bh<=H) cam.y=(bh-H)/2;
+  else cam.y=Math.max(-H/2,Math.min(bh-H/2,cam.y));
 }
 const say=(m,bad)=>{toast=m;toastT=now;if(bad)sfx("err");};
 
@@ -1556,6 +1564,7 @@ function newWorld(w,h){
   levelName=""; tickCount=0; playing=false; centreCam();
 }
 function centreCam(){
+  zFree=0;          // a pinch must not survive fitting the board to the window
   const fit=Math.min(W*0.92/world.W,H*0.86/world.H);
   let i=0;
   for(let k=0;k<ZSTEPS.length;k++) if(ZSTEPS[k]<=fit) i=k;
@@ -1609,18 +1618,19 @@ function drawPlus(px,py,z,color){
 // The base (rotation 0) sprite is spun by canvas transform rather than swapping
 // between the four pre-rendered ones, which is the only way to show a partial
 // turn. Smoothing stays off, so the spin is chunky rather than blurred.
-function drawCell(w,i,t,c,px,py,z,al){
+function drawCell(w,i,t,c,px,py,z,al,pw,ph){
+  pw=pw||z; ph=ph||z;
   const rf=al<1?w.rotFrom.get(i):undefined;
   if(rf===undefined||t===T_WALL){
-    X.drawImage(spriteFor(t,c&3,z),px,py,z,z);
+    X.drawImage(spriteFor(t,c&3,z),px,py,pw,ph);
     return;
   }
   let d=((c&3)-rf+4)&3;
   if(d===3) d=-1;                      // a single anticlockwise step, not three
   X.save();
-  X.translate(px+z/2,py+z/2);
+  X.translate(px+pw/2,py+ph/2);
   X.rotate((rf+d*al)*Math.PI/2);
-  X.drawImage(spriteFor(t,0,z),-z/2,-z/2,z,z);
+  X.drawImage(spriteFor(t,0,z),-pw/2,-ph/2,pw,ph);
   X.restore();
 }
 /* Below the size at which sprites are drawn, a cell is a flat block of colour --
@@ -1723,6 +1733,7 @@ function rasterLayer(g,sx,sy,z,x0,x1,y0,y1,al,doMove,clip){
            vanishing act. */
         const ex0=Math.max(cx0,Math.round(px)), ex1=Math.min(cx1,Math.round(px+z));
         const ey0=Math.max(cy0,Math.round(py)), ey1=Math.min(cy1,Math.round(py+z));
+        if(ex1<=ex0||ey1<=ey0) continue;
         for(let yy=ey0;yy<ey1;yy++){ let o=yy*W+ex0; for(let xx=ex0;xx<ex1;xx++) U32[o++]=col; }
       }
     }
@@ -1776,9 +1787,11 @@ function drawBoardLayer(clip){
     const py0=Math.max(y0,maskBox[1]), py1=Math.min(y1,maskBox[3]);
     for(let y=py0;y<=py1;y++)for(let x=px0;x<=px1;x++){
       if(!placeMask[y*world.W+x]) continue;
-      X.fillStyle="#191919"; X.fillRect(sx+x*z,sy+y*z,z,z);
+      const qx=Math.round(sx+x*z), qy=Math.round(sy+y*z);
+      const qw=Math.round(sx+(x+1)*z)-qx, qh=Math.round(sy+(y+1)*z)-qy;
+      X.fillStyle="#191919"; X.fillRect(qx,qy,qw,qh);
       if(z>=10&&(world.g[(y+1)*world.stride+1+x]>>2)===T_EMPTY)
-        drawPlus(sx+x*z,sy+y*z,z,"#3d3d3d");
+        drawPlus(qx,qy,z,"#3d3d3d");
     }
   }
   if(z>=9){
@@ -1813,17 +1826,25 @@ function drawBoardLayer(clip){
       const idx=(wi<<5)|bit, x=idx-base;
       const c=G[idx], t=c>>2;
       if(t===T_EMPTY) continue;
-      let px=sx+x*z, py=sy+y*z;
+      /* Snap each cell to whole pixels and derive its size from the next
+         boundary. At a fractional cell size, drawing at sx+x*z with width z
+         leaves neighbours overlapping by a fraction of a pixel here and short
+         of each other there -- which reads as the cell edges crawling and
+         distorting while you pinch. Deriving the far edge the same way the next
+         cell derives its near edge makes them meet exactly. */
+      let px=Math.round(sx+x*z), py=Math.round(sy+y*z);
+      let pw=Math.round(sx+(x+1)*z)-px, ph=Math.round(sy+(y+1)*z)-py;
       if(doMove){
         const src=world.motion.get(idx);
         if(src!==undefined){
           const ox=(src%ST)-1, oy=((src/ST)|0)-1;
           px=Math.round(sx+(ox+(x-ox)*al)*z);
           py=Math.round(sy+(oy+(y-oy)*al)*z);
+          pw=Math.round(z); ph=Math.round(z);
         }
       }
-      if(useSprites) drawCell(world,idx,t,c,px,py,z,doSpin?al:1);
-      else{X.fillStyle=avgColor(t);X.fillRect(px,py,z,z);}
+      if(useSprites) drawCell(world,idx,t,c,px,py,z,doSpin?al:1,pw,ph);
+      else{X.fillStyle=avgColor(t);X.fillRect(px,py,pw,ph);}
       }
     }
   }
@@ -1915,7 +1936,14 @@ function noteMaskCell(x,y,on){
 function drawBoard(){
   if(!world){ X.fillStyle="#000"; X.fillRect(0,0,W,H); return; }
   const animating=interpOn()&&alphaNow()<1&&(world.motion.size>0||world.rotFrom.size>0);
-  const key=[world.W,world.H,Math.round(cam.x),Math.round(cam.y),camZi,
+  /* Keyed on the actual cell size, not the ladder index. Pinch zoom moves
+     between rungs, so camZi stays put for most of a gesture: the cached board
+     was reused at the previous cell size while the camera had already moved to
+     the new one. That is what made the view snap between fixed sizes while
+     panning stayed smooth, and what threw the pinch anchor off -- the picture
+     on screen belonged to a different zoom than the maths did. */
+  const zKey=zoomPx();
+  const key=[world.W,world.H,Math.round(cam.x),Math.round(cam.y),zKey,
              W,H,world.rev,maskRev,KEYS.has("b")?1:0].join(",");
   if(animating){
     bkey="";
@@ -1927,7 +1955,10 @@ function drawBoard(){
     }
     if(key!==bkey){
       // everything except the camera position
-      const stamp=[world.W,world.H,camZi,W,H,world.rev,maskRev,
+      // Same reasoning for the scroll stamp. If it compares equal across a zoom
+      // change, the cache gets shifted and patched at the edges instead of
+      // repainted -- which is exactly the distortion along the borders.
+      const stamp=[world.W,world.H,zKey,W,H,world.rev,maskRev,
                    KEYS.has("b")?1:0].join(",");
       const dx=Math.round(cam.x)-lastCamX, dy=Math.round(cam.y)-lastCamY;
       const zNow=zoomPx();
