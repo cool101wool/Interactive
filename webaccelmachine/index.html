@@ -866,6 +866,12 @@ const midPt=ts=>({x:(touchPt(ts[0]).x+touchPt(ts[1]).x)/2,
 
 app.addEventListener("touchstart",e=>{
   e.preventDefault(); audioUnlock(); touchUsed=true;
+  /* Cancel any pending "park the pointer off-screen" left over from the last
+     finger lifting. It runs a couple of frames late, so starting a second
+     gesture quickly -- pinching twice in a row, which is completely normal --
+     let it fire mid-gesture. The next move then measured its delta against a
+     pointer at -9e9 and flung the camera across the world. */
+  liftAt=-1;
   const ts=e.touches;
   if(ts.length===1){
     const p=touchPt(ts[0]);
@@ -906,12 +912,22 @@ app.addEventListener("touchmove",e=>{
         touchMoved=true;
       }
     }
-  }else if(touchMode===2&&ts.length>=2){
-    const m=midPt(ts);
+  }else if(touchMode===2){
+    /* Pan and zoom are two independent readings of the same gesture, applied
+       together every frame: the midpoint says where to slide, the distance
+       between the fingers says how much to scale. Sliding without spreading
+       gives a pure pan, spreading without sliding a pure zoom, and doing both
+       at once does both -- no modes, no threshold to trip over.
+       With one finger left the midpoint is that finger, so the pan continues
+       and only the zoom component drops out. */
+    const many=ts.length>=2;
+    const m=many?midPt(ts):touchPt(ts[0]);
     cam.x-=m.x-M.x; cam.y-=m.y-M.y;      // drag the board with the midpoint
     M.x=m.x; M.y=m.y;
-    const d=spread(ts);
-    if(pinchDist>8&&d>8) setZoomFree(pinchAt*(d/pinchDist),m.x,m.y);
+    if(many){
+      const d=spread(ts);
+      if(pinchDist>8&&d>8) setZoomFree(pinchAt*(d/pinchDist),m.x,m.y);
+    }
     clampCam();
   }
 },{passive:false});
@@ -932,9 +948,12 @@ function endTouch(e){
     // hover outline is left stranded under a finger that is no longer there.
     liftAt=2;
   }else if(e.touches.length===1&&touchMode===2){
-    // Lifting to one finger keeps panning rather than suddenly painting.
+    // Lifting to one finger keeps panning rather than suddenly painting, and
+    // the remaining finger carries on dragging the board: a two-finger slide
+    // that ends with one finger leaving should not stop dead half way.
     const p=touchPt(e.touches[0]);
     M.x=p.x; M.y=p.y; M.pdx=M.pdy=0;
+    pinchDist=0;              // no second finger, so no zoom component left
   }
 }
 // A tap's press and release cannot land in the same frame, or nothing that
@@ -979,6 +998,10 @@ addEventListener("keyup",e=>KEYS.delete(e.key.toLowerCase()));
    WIDGETS
    =========================================================================== */
 const WHITE="#fff", BLUE="#2f45ff", DIM="#8a8a8a";
+/* 44pt is the smallest thing a finger reliably hits. Everything here works in
+   device pixels, so that has to be scaled by DPR -- a bare 44 is only 22pt on a
+   retina phone, which is how these controls ended up half the size intended. */
+const TAP=()=>Math.round(44*DPR);
 const inRect=(x,y,w,h)=>M.x>=x&&M.x<x+w&&M.y>=y&&M.y<y+h;
 let uiZones=[];
 const reserve=(x,y,w,h)=>uiZones.push([x,y,w,h]);
@@ -1020,7 +1043,7 @@ function uiSlider(id,x,y,w,val){
   // to be smaller than the hot area, leaving a band where a press was neither
   // "on the slider" nor "on the board" -- on touch that band silently painted a
   // cell instead of grabbing the handle.
-  const grab=touchUsed?8*U:5*U;
+  const grab=touchUsed?Math.max(TAP()/2,8*U):5*U;
   reserve(x-grab,y-grab,w+2*grab,2*grab);
   const hot=M.y>y-grab&&M.y<y+grab&&M.x>x-grab&&M.x<x+w+grab;
   // Grab on the press itself, not on "button is down and the pointer is over
@@ -1538,16 +1561,13 @@ function setZoom(i,ax,ay){
 function clampCam(){
   if(!world) return;
   const z=zoomPx(), bw=world.W*z, bh=world.H*z;
-  /* Keeping the screen centre over the grid only makes sense while the board is
-     bigger than the view. Once it is smaller -- routine on a tall phone -- the
-     rule still leaves a band of travel, so a pinch anchored anywhere but the
-     middle slides the board along that band and the zoom looks like it is
-     drifting away from your fingers. A board that cannot fill the axis is
-     simply centred on it, which is stable and predictable. */
-  if(bw<=W) cam.x=(bw-W)/2;
-  else cam.x=Math.max(-W/2,Math.min(bw-W/2,cam.x));
-  if(bh<=H) cam.y=(bh-H)/2;
-  else cam.y=Math.max(-H/2,Math.min(bh-H/2,cam.y));
+  /* The screen centre stays over the grid, whatever the board size. Pinning a
+     small board to the middle instead did stabilise pinching, but it also meant
+     two fingers could not slide it at all -- the board was simply stuck. Being
+     able to move the thing you are looking at matters more, so the travel band
+     is back for every board size. */
+  cam.x=Math.max(-W/2,Math.min(bw-W/2,cam.x));
+  cam.y=Math.max(-H/2,Math.min(bh-H/2,cam.y));
 }
 const say=(m,bad)=>{toast=m;toastT=now;if(bad)sfx("err");};
 
@@ -2486,9 +2506,18 @@ function screenGame(dt){
      them back down to mouse size the bar wraps onto as many rows as it needs.
      Finger-sized targets matter more than a single tidy row. */
   const base=Math.max(16,Math.min(28*U,Math.floor(room/12)-2*U));
-  const ps=touchUsed?Math.max(16,Math.round(base*1.5)):base;
-  const perRow=touchUsed?Math.max(1,Math.floor((room+gap)/(ps+gap))):n;
+  /* Touch sizes for the finger first and lays out second. 44pt is Apple's
+     minimum tap target, so that is the floor; however many of those fit across
+     the screen is the row length. In landscape all thirteen fit and they grow
+     to fill the width, which is the single row in the mockup. In portrait they
+     cannot, so the bar wraps rather than shrinking the icons below what a
+     thumb can actually hit. */
+  const want=touchUsed?Math.max(TAP(),base):base;
+  const perRow=touchUsed?Math.max(1,Math.floor((room+gap)/(want+gap))):n;
   const rows=Math.ceil(n/perRow);
+  const ps=(touchUsed&&perRow>=n)
+    ? Math.min(Math.floor((room-(n-1)*gap)/n),Math.round(want*1.7))
+    : want;
   const barH=editing?rows*(ps+gap)-gap+6*U:0;
   if(editing){
     X.fillStyle="rgba(0,0,0,.72)"; X.fillRect(0,H-barH,W,barH);
@@ -2507,7 +2536,10 @@ function screenGame(dt){
   }
   // actions on a rectangle selection
   if(editing&&sel&&!carry){
-    const is=Math.max(20,U*13), gp=4*U, totW=5*is+4*gp;
+    // Finger-sized on touch: these were laid out for a cursor and were by far
+    // the smallest targets on the screen.
+    const is=touchUsed?Math.max(TAP(),U*30):Math.max(20,U*13);
+    const gp=touchUsed?3*U:4*U, totW=5*is+4*gp;
     const transportRight=pad+3*(Math.max(26,U*26)+4*U)+6*U;
     let axx=Math.max(transportRight,Math.round((W-totW)/2)), ay=H-barH-is-4*U;
     if(axx+totW>W-pad) axx=Math.max(pad,W-pad-totW);
@@ -2536,12 +2568,14 @@ function screenGame(dt){
     }
     iconClipCookie(axx+4*(is+gp),ay,is);
     if(storageBlocked()){ X.fillStyle="rgba(0,0,0,.55)"; X.fillRect(axx+4*(is+gp),ay,is,is); }
-    textFit("q/e turns a picked-up block",axx,ay-textH(U)-2*U,
-            Math.max(totW,W-pad-axx),textH(U),DIM,"left",1,U);
+    if(!touchUsed)
+      textFit("q/e turns a picked-up block",axx,ay-textH(U)-2*U,
+              Math.max(totW,W-pad-axx),textH(U),DIM,"left",1,U);
   }
   // --- top left
-  if(uiBtn(pad,pad,0,0,"MENU",U*2)){ paused=true; consumeClick(); }
-  const ty0=pad+btnH(U*2)+3*U;
+  const menuU=touchUsed?U*3:U*2;
+  if(uiBtn(pad,pad,0,0,"MENU",menuU)){ paused=true; consumeClick(); }
+  const ty0=pad+btnH(menuU)+3*U;
   text(String(tickCount),pad+U,ty0,U*2,WHITE,"left",1);
   if(levelName) textFit(levelName,pad+U,ty0+textH(U*2)+2*U,44*U,textH(U),DIM,"left",1,U);
   // --- top right
@@ -2551,7 +2585,7 @@ function screenGame(dt){
   const t=uiSlider("tps",sx2,pad+U+textH(U*2)/2,sw,tpsIdx/(TPS.length-1));
   tpsIdx=Math.round(t*(TPS.length-1));
   // --- left column: preview + transport
-  const bs=Math.max(28,U*30);
+  const bs=touchUsed?Math.max(TAP(),U*34):Math.max(28,U*30);
   const px=pad, py=Math.round(H/2-bs/2);
   if(editing){
     reserve(px,py,bs,bs);
@@ -2561,13 +2595,46 @@ function screenGame(dt){
     if(selTool<9) X.drawImage(spriteFor(PALETTE[selTool],selRot,isz),px+(bs-isz)/2,py+(bs-isz)/2,isz,isz);
     else paletteIcon(selTool,px+(bs-isz)/2,py+(bs-isz)/2,isz);
     if(hot&&M.click){selRot=(selRot+1)&3;sfx("click");}
-    text("Q / E",px,py+bs+2*U,U,DIM,"left",1);
+    if(touchUsed){
+      /* "Q / E" is meaningless without a keyboard. The mockup puts two curved
+         arrows there instead, so rotating is reachable with a finger. */
+      const rs=Math.max(TAP(),U*26);
+      // Below the preview if there is room, otherwise beside it.
+      const roomBelow=(py+bs+4*U+rs)<(H-barH-3*Math.max(TAP(),U*30));
+      const r1x=roomBelow?px:px+bs+3*U, r1y=roomBelow?py+bs+4*U:py;
+      const r2x=roomBelow?px+rs+3*U:px+bs+3*U, r2y=roomBelow?r1y:py+rs+3*U;
+      if(uiBtn(r1x,r1y,rs,rs,"",1)){ if(carry) rotateCarry(3); else selRot=(selRot+3)&3; sfx("click"); }
+      iconTurn(r1x,r1y,rs,-1);
+      if(uiBtn(r2x,r2y,rs,rs,"",1)){ if(carry) rotateCarry(1); else selRot=(selRot+1)&3; sfx("click"); }
+      iconTurn(r2x,r2y,rs,1);
+    }else text("Q / E",px,py+bs+2*U,U,DIM,"left",1);
   }else{
     textFit("LEVEL",px,py,Math.max(30*U,bs),textH(U*2),"#6ec6ff","left",2,U*2);
     textFit(started?"running - R resets":"drag cells on a plus",
             px,py+textH(U*2)+2*U,Math.max(44*U,bs*2),textH(U),DIM,"left",1,U);
   }
-  const tw=Math.max(26,U*26), th=Math.max(20,U*20), ty=H-barH-th-4*U;
+  /* The mockup stacks these at the lower left: reset sits on its own above the
+     play/step pair rather than all three in a row, which keeps them clear of
+     the wider bottom bar and away from the middle of the board. */
+  const tw=touchUsed?Math.max(TAP(),U*30):Math.max(26,U*26);
+  const th=touchUsed?tw:Math.max(20,U*20);
+  const ty=H-barH-th-4*U;
+  /* Stacking reset above play needs vertical room. In landscape the bar eats
+     most of the height, so the three go back to a single row -- better one
+     tidy row than two that overlap. */
+  const stack=touchUsed&&(ty-th-4*U)>H*0.45;
+  if(stack){
+    const ry2=ty-th-4*U;
+    if(uiBtn(pad,ry2,tw,th,"",1)) restoreInitial();
+    X.strokeStyle=WHITE; X.lineWidth=Math.max(2,U);
+    X.beginPath(); X.arc(pad+tw/2,ry2+th/2,Math.min(tw,th)*0.26,0.6,5.4); X.stroke();
+    X.fillStyle=WHITE;
+    X.beginPath();
+    X.moveTo(pad+tw/2+Math.min(tw,th)*0.30,ry2+th/2-Math.min(tw,th)*0.34);
+    X.lineTo(pad+tw/2+Math.min(tw,th)*0.02,ry2+th/2-Math.min(tw,th)*0.20);
+    X.lineTo(pad+tw/2+Math.min(tw,th)*0.34,ry2+th/2-Math.min(tw,th)*0.02);
+    X.closePath(); X.fill();
+  }
   if(uiBtn(pad,ty,tw,th,"",1)) togglePlay();
   X.fillStyle=WHITE;
   if(playing){X.fillRect(pad+tw*0.34,ty+th*0.26,tw*0.1,th*0.48);
@@ -2584,16 +2651,18 @@ function screenGame(dt){
   X.beginPath();X.moveTo(sx3+tw*0.3,ty+th*0.24);X.lineTo(sx3+tw*0.6,ty+th*0.5);
   X.lineTo(sx3+tw*0.3,ty+th*0.76);X.closePath();X.fill();
   X.fillRect(sx3+tw*0.64,ty+th*0.24,tw*0.08,th*0.52);
-  const rx=sx3+tw+4*U;
-  if(uiBtn(rx,ty,tw,th,"",1)) restoreInitial();
-  X.strokeStyle=WHITE; X.lineWidth=Math.max(2,U);
-  X.beginPath(); X.arc(rx+tw/2,ty+th/2,Math.min(tw,th)*0.26,0.6,5.4); X.stroke();
-  X.fillStyle=WHITE;
-  X.beginPath();
-  X.moveTo(rx+tw/2+Math.min(tw,th)*0.30,ty+th/2-Math.min(tw,th)*0.34);
-  X.lineTo(rx+tw/2+Math.min(tw,th)*0.02,ty+th/2-Math.min(tw,th)*0.20);
-  X.lineTo(rx+tw/2+Math.min(tw,th)*0.34,ty+th/2-Math.min(tw,th)*0.02);
-  X.closePath(); X.fill();
+  if(!stack){
+    const rx=sx3+tw+4*U;
+    if(uiBtn(rx,ty,tw,th,"",1)) restoreInitial();
+    X.strokeStyle=WHITE; X.lineWidth=Math.max(2,U);
+    X.beginPath(); X.arc(rx+tw/2,ty+th/2,Math.min(tw,th)*0.26,0.6,5.4); X.stroke();
+    X.fillStyle=WHITE;
+    X.beginPath();
+    X.moveTo(rx+tw/2+Math.min(tw,th)*0.30,ty+th/2-Math.min(tw,th)*0.34);
+    X.lineTo(rx+tw/2+Math.min(tw,th)*0.02,ty+th/2-Math.min(tw,th)*0.20);
+    X.lineTo(rx+tw/2+Math.min(tw,th)*0.34,ty+th/2-Math.min(tw,th)*0.02);
+    X.closePath(); X.fill();
+  }
   if(editing) drawSchematics(pad,barH);
   if(!paused&&!modal) boardInput(dt);
 }
@@ -2602,8 +2671,11 @@ function screenGame(dt){
    floating block, so placing a schematic is the same gesture as pasting a
    selection -- click to stamp, q/e to turn it, right click to drop it. */
 function drawSchematics(pad,barH){
-  const is=Math.max(22,U*15);
-  const pw=Math.min(Math.round(W*0.42),190*U);
+  // Touch gets a bigger toggle, a wider drawer and taller rows: at cursor sizes
+  // the list was a column of targets a finger could not reliably hit.
+  const is=touchUsed?Math.max(TAP(),U*32):Math.max(22,U*15);
+  const pw=touchUsed?Math.min(Math.round(W*0.72),260*U)
+                    :Math.min(Math.round(W*0.42),190*U);
   const top=Math.round(pad+textH(U*2)+9*U);   // clear of the tps row
   const bot=H-barH-4*U;
   const px=schemOpen?W-pw:W;
@@ -2622,7 +2694,7 @@ function drawSchematics(pad,barH){
 
   const m=5*U;
   let y=top+m;
-  const addH=btnH(U)+textH(U)+2*U;
+  const addH=touchUsed?Math.max(TAP(),btnH(U)+textH(U*2)+4*U):btnH(U)+textH(U)+2*U;
   if(uiBtn(px+m,y,pw-2*m,addH,"",1)){
     if(storageBlocked()){ say(NO_STORE,true); return; }
     const code=prompt("Paste a V3 schematic code:");
@@ -2638,8 +2710,8 @@ function drawSchematics(pad,barH){
   textWrapFit("Add V3 schematic",px+m+2*U,y,pw-2*m-4*U,addH,WHITE,"center",1,U*2);
   y+=addH+3*U;
 
-  const rowH=textH(U)+4*U;
-  const qs=Math.max(14,U*10);
+  const rowH=touchUsed?Math.max(TAP(),textH(U*2)+8*U):textH(U)+4*U;
+  const qs=touchUsed?Math.max(TAP(),U*20):Math.max(14,U*10);
   textField("schemq",px+m,y,pw-2*m-qs-3*U,rowH,"search...",U);
   if(uiBtn(px+pw-m-qs,y,qs,qs,"",1)) openModal("schemhelp");
   textFit("?",px+pw-m-qs,y,qs,qs,WHITE,"center",1,U*2);
@@ -2659,14 +2731,14 @@ function drawSchematics(pad,barH){
       px+m,y,pw-2*m,textH(U)*5,storageBlocked()?"#a33":"#222","left",1,U);
     return;
   }
-  const sbW=Math.max(4,U*3), delW=Math.max(12,U*9);
+  const sbW=Math.max(4,U*3), delW=touchUsed?Math.max(TAP(),U*22):Math.max(12,U*9);
   for(const e of list.slice(schemScroll,schemScroll+visible)){
     if(uiBtn(px+m,y,pw-2*m-delW-sbW-4*U,rowH,"",1)){
       try{ carryFromCode(e.code); setTool(TOOL_SELECT); schemOpen=false; consumeClick();
            say('placing "'+e.name+'" - left click to place, q/e turns it'); }
       catch(err){ say("schematic is corrupt",true); }
     }
-    textFit(e.name,px+m+3*U,y,pw-2*m-delW-sbW-10*U,rowH,WHITE,"left",1,U);
+    textFit(e.name,px+m+3*U,y,pw-2*m-delW-sbW-10*U,rowH,WHITE,"left",1,touchUsed?U*2:U);
     if(uiBtn(px+pw-m-delW-sbW-2*U,y,delW,rowH,"",1)){ schemDrop(e.name); say("deleted"); }
     X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
     const cxm=px+pw-m-delW-sbW-2*U+delW/2, cym=y+rowH/2, r=delW*0.22;
@@ -2766,6 +2838,19 @@ function iconMove(x,y,s){
   }
   X.fill();
   X.fillRect(x+c-q/2,y+s*0.26,q,s*0.48); X.fillRect(x+s*0.26,y+c-q/2,s*0.48,q);
+}
+// Curved arrow: an arc with a head at one end. dir -1 turns anticlockwise.
+function iconTurn(x,y,s,dir){
+  const cx=x+s/2, cy=y+s/2+s*0.06, r=s*0.26;
+  X.strokeStyle=WHITE; X.lineWidth=Math.max(2,s*0.075); X.lineCap="butt";
+  X.beginPath(); X.arc(cx,cy,r,Math.PI,2*Math.PI); X.stroke();
+  const hx=cx+dir*r, hy=cy, a=s*0.11;
+  X.fillStyle=WHITE;
+  X.beginPath();
+  X.moveTo(hx,hy+a*1.3);
+  X.lineTo(hx-a,hy-a*0.5);
+  X.lineTo(hx+a,hy-a*0.5);
+  X.closePath(); X.fill();
 }
 function iconTrash(x,y,s){
   X.fillStyle=WHITE;
