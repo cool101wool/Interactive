@@ -1093,12 +1093,16 @@ function uiToggle(x,y,on){
   return hot&&M.click?(sfx("click"),!on):on;
 }
 function backArrow(){
-  const w=24*U,h=18*U,x=W-w-7*U,y=7*U;
+  // Twice the size on touch: it is the only way off these screens and it sat in
+  // a corner at cursor proportions.
+  const k=touchUsed?2:1;
+  const w=24*U*k,h=18*U*k,x=W-w-7*U,y=7*U;
   reserve(x,y,w,h);
   const hot=inRect(x,y,w,h);
   frame(x,y,w,h,hot);
   X.fillStyle=WHITE; X.beginPath();
-  X.moveTo(x+w/2-4*U,y+h/2); X.lineTo(x+w/2+3*U,y+h/2-4*U); X.lineTo(x+w/2+3*U,y+h/2+4*U);
+  X.moveTo(x+w/2-4*U*k,y+h/2); X.lineTo(x+w/2+3*U*k,y+h/2-4*U*k);
+  X.lineTo(x+w/2+3*U*k,y+h/2+4*U*k);
   X.closePath(); X.fill();
   return hot&&M.click&&(sfx("click"),true);
 }
@@ -1438,7 +1442,8 @@ let tickAt=-1e9, tickDur=0;
 const interpOn=()=>!S.fast;
 const alphaNow=()=>tickDur>0?Math.min(1,(now-tickAt)/tickDur):1;
 const TPS=[1,2,3,5,10,20,30,60,120,600,Infinity];
-const tpsLabel=()=>TPS[tpsIdx]===Infinity?"max tps":TPS[tpsIdx]+" tps";
+const tpsLabelFor=i=>TPS[i]===Infinity?"max tps":TPS[i]+" tps";
+const tpsLabel=()=>tpsLabelFor(tpsIdx);
 const PALETTE=[T_GEN,T_MOVER,T_CW,T_CCW,T_PUSH,T_SLIDE,T_ENEMY,T_TRASH,T_WALL];
 // 9 = drag cells around, 10 = pan the camera, 11 = rectangle select
 const TOOL_PLUS=9,TOOL_DRAG=10,TOOL_SELECT=11;   // middle-drag still pans
@@ -2441,12 +2446,26 @@ const p=panelRect(needW*_k,needH*_k);
 function screenOptions(){
   X.fillStyle="#000"; X.fillRect(0,0,W,H);
   if(backArrow()) nav("title");
-  const lx=10*U, ls=U*2, ns=U, right=W-12*U;
+  const lx=10*U, ls=U*2, ns=U;
+  // The back arrow is twice the size on touch, so the first row has to stop
+  // short of it rather than running underneath.
+  const backW=(touchUsed?24*U*2:24*U)+9*U;
+  const backH=(touchUsed?18*U*2:18*U)+9*U;
+  const right=W-12*U;
   let y=12*U;
   function row(label,note,ctl){
     text(label,lx,y,ls,WHITE,"left",2);
     const cx=lx+textW(label,ls,2)+8*U;
-    ctl(cx,y+textH(ls)/2,Math.max(24*U,Math.min(right-cx,150*U)));
+    // The row's control must stop before the back arrow if their bands overlap
+    // vertically. Comparing the row's top against the arrow's height was not
+    // enough -- a tall touch-sized slider still reached up into it.
+    const rowBot=y+textH(ls);
+    /* A slider reserves a grab radius either side of its track, so the drawn
+       width has to stop that much further short of the arrow than the track
+       alone would suggest. */
+    const grab=touchUsed?Math.max(TAP()/2,8*U):5*U;
+    const lim=(rowBot>7*U&&y<backH?W-backW-grab:right)-cx;
+    ctl(cx,y+textH(ls)/2,Math.max(24*U,Math.min(lim,150*U)));
     y+=textH(ls)+3*U;
     if(note){ textFit(note,lx,y,right-lx,textH(ns),DIM,"left",1,ns); y+=textH(ns); }
     y+=9*U;
@@ -2647,13 +2666,51 @@ function screenGame(dt){
      slider unchanged everywhere except a narrow phone. */
   /* Twice the old length. Both limits had to double -- the 65*U cap was the one
      actually binding on a wide screen. The last term keeps the label, and the
-     MENU button beside it, from being run over on a narrow phone. */
+     MENU button beside it, from being run over on a narrow phone.
+
+     The reserved label space is the WIDEST label, not the current one. Using the
+     current one fed the value back into the geometry that produced it: picking
+     "10 tps" is wider than "5 tps", so the track shrank, which moved the value
+     under a motionless finger back to 5, which widened the track again. At the
+     right width that never settles and the speed flips every single frame. */
   const menuRight=pad+btnW("MENU",menuU)+(tickBeside?textW(String(tickCount),U*3,1)+7*U:2*U);
-  const sw=Math.min(130*U,W*0.56,
-                    W-pad-menuRight-textW(tpsLabel(),U*2,1)-8*U);
-  const sx2=W-pad-sw;
-  text(tpsLabel(),sx2-4*U,pad+U,U*2,WHITE,"right",1);
-  const t=uiSlider("tps",sx2,pad+U+textH(U*2)/2,sw,tpsIdx/(TPS.length-1));
+  const labelW=Math.max(...TPS.map((_,i)=>textW(tpsLabelFor(i),U*2,1)));
+  const grabPad0=touchUsed?Math.max(TAP()/2,8*U):5*U;
+  /* Never smaller than a usable track. On a 320pt phone the reserve for MENU
+     and the label eats the whole row, and the slider collapsed to nothing --
+     the speed control simply was not there. Below that floor the label moves
+     onto its own line above the track instead of sharing the row. */
+  // A floor, but not one that can push the track back under MENU: on a 320pt
+  // screen 30% of the width was wider than the space actually left.
+  const minSw=Math.min(Math.max(40*U,W*0.30),W-2*pad-2*grabPad0);
+  const roomOnRow=W-pad-menuRight-labelW-8*U;
+  const labelInline=roomOnRow>=minSw;
+  /* When the label drops to its own line the track moves down a row, where the
+     schematics toggle lives on the right. Leave room for it, plus the slider's
+     own grab radius, or the two overlap. */
+  const grabPad=grabPad0;
+  const schemW=(touchUsed?Math.max(TAP(),U*32):Math.max(22,U*15))+6*U;
+  // On the second line the track shares the row with the schematics toggle, so
+  // it ends where that begins rather than at the screen edge.
+  const trackRight=labelInline?W-pad:W-schemW-grabPad;
+  /* On the second line the track sits low enough to run into the MENU button,
+     which is tall on touch. Start it clear of whichever is further right: the
+     screen edge padding, or MENU when their bands overlap. */
+  const menuBot=pad+btnH(menuU);
+  const slTopTwoLine=pad+U+textH(U*2)+3*U;
+  const clearsMenu=labelInline||slTopTwoLine>menuBot;
+  const trackLeft=clearsMenu?pad+grabPad0:menuRight+grabPad0;
+  const avail=trackRight-trackLeft;
+  const sw=Math.max(Math.min(minSw,avail),
+                    Math.min(130*U,W*0.56,labelInline?roomOnRow:avail));
+  const sx2=Math.max(trackLeft,trackRight-sw);
+  // Inline the label beside the track when it fits; otherwise it goes on the
+  // line above, with the track pushed clear of it by the label's full height
+  // plus the slider's own grab radius.
+  const slY=labelInline?pad+U+textH(U*2)/2
+                       :pad+U+textH(U*2)+3*U+(touchUsed?Math.max(TAP()/2,8*U):5*U);
+  text(tpsLabel(),labelInline?sx2-4*U:W-pad,pad+U,U*2,WHITE,"right",1);
+  const t=uiSlider("tps",sx2,slY,sw,tpsIdx/(TPS.length-1));
   tpsIdx=Math.round(t*(TPS.length-1));
   // --- left column: preview + transport
   const px=colX, py=colY;
