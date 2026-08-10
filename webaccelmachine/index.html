@@ -2,12 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>WebAccel Machine</title>
 <style>
   html,body{margin:0;height:100%;background:#000;overflow:hidden}
-  canvas{display:block;image-rendering:pixelated;cursor:default}
-  body{-webkit-user-select:none;user-select:none}
+  /* touch-action:none hands every gesture to the canvas: without it the
+     browser claims drags for scrolling and pinches for page zoom, and the app
+     sees a stroke that stops dead partway. */
+  canvas{display:block;image-rendering:pixelated;cursor:default;touch-action:none}
+  body{-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;overscroll-behavior:none}
 </style>
 </head>
 <body>
@@ -811,6 +814,88 @@ addEventListener("mouseup",e=>{
   if(e.button===2){M.rdown=false;M.rpressUI=false;}
 });
 app.addEventListener("wheel",e=>{M.wheel+=Math.sign(e.deltaY);e.preventDefault();},{passive:false});
+
+/* ---------------------------------------------------------------------------
+   TOUCH
+   A phone fires no mouse events at all, which is why nothing on the page
+   responded to a finger: no sliders, no cells, no drags. Rather than teach the
+   rest of the app about a second kind of input, touches are translated into the
+   same M state the mouse writes, so every existing code path -- widgets,
+   painting, the Bresenham stroke filling -- works unchanged.
+
+   One finger is the left button. Two fingers pan and pinch-zoom, standing in
+   for the middle-drag and the wheel, neither of which a touchscreen has.
+   preventDefault stops the browser from scrolling, pinch-zooming the page, and
+   -- importantly -- from replaying the touch as a synthetic click afterwards,
+   which would otherwise fire every action twice.
+--------------------------------------------------------------------------- */
+let touchMode=0;          // fingers involved in the current gesture
+let pinchDist=0, pinchZ=0, liftAt=-1;
+const touchPt=t=>({x:t.clientX*DPR,y:t.clientY*DPR});
+const spread=ts=>Math.hypot(touchPt(ts[0]).x-touchPt(ts[1]).x,
+                            touchPt(ts[0]).y-touchPt(ts[1]).y);
+const midPt=ts=>({x:(touchPt(ts[0]).x+touchPt(ts[1]).x)/2,
+                  y:(touchPt(ts[0]).y+touchPt(ts[1]).y)/2});
+
+app.addEventListener("touchstart",e=>{
+  e.preventDefault(); audioUnlock();
+  const ts=e.touches;
+  if(ts.length===1){
+    const p=touchPt(ts[0]);
+    // No hover exists on a touchscreen, so the press has to place the pointer
+    // and register the click in one go -- exactly what mousedown does.
+    M.x=p.x; M.y=p.y; M.pdx=M.pdy=0;
+    if(modal!=="world"&&modal!=="load"&&!schemOpen) focusField=null;
+    touchMode=1;
+    M.down=true; M.click=true; M.pressUI=overUI();
+  }else if(ts.length>=2){
+    // A second finger converts the gesture into a pan: undo whatever the first
+    // finger started so a two-finger pan never leaves a stray painted cell.
+    if(touchMode===1){ M.down=false; M.click=false; M.pressUI=false; }
+    touchMode=2;
+    pinchDist=spread(ts); pinchZ=camZi;
+    const m=midPt(ts); M.x=m.x; M.y=m.y; M.pdx=M.pdy=0;
+  }
+},{passive:false});
+
+app.addEventListener("touchmove",e=>{
+  e.preventDefault();
+  const ts=e.touches;
+  if(touchMode===1&&ts.length===1){
+    const p=touchPt(ts[0]);
+    M.pdx=p.x-M.x; M.pdy=p.y-M.y; M.x=p.x; M.y=p.y;
+  }else if(touchMode===2&&ts.length>=2){
+    const m=midPt(ts);
+    cam.x-=m.x-M.x; cam.y-=m.y-M.y;      // drag the board with the midpoint
+    M.x=m.x; M.y=m.y;
+    const d=spread(ts);
+    if(pinchDist>8&&d>8){
+      // Each doubling of the finger gap is two steps up the zoom ladder.
+      const steps=Math.round(Math.log2(d/pinchDist)*2);
+      if(steps) setZoom(pinchZ+steps,m.x,m.y);
+    }
+    clampCam();
+  }
+},{passive:false});
+
+function endTouch(e){
+  e.preventDefault();
+  if(e.touches.length===0){
+    if(touchMode===1){ M.down=false; M.pressUI=false; }
+    touchMode=0;
+    // Hold the position for one more frame: the release frame is where a
+    // dragged cell lands and a selection resolves. Cleared right after, so no
+    // hover outline is left stranded under a finger that is no longer there.
+    liftAt=2;
+  }else if(e.touches.length===1&&touchMode===2){
+    // Lifting to one finger keeps panning rather than suddenly painting.
+    const p=touchPt(e.touches[0]);
+    M.x=p.x; M.y=p.y; M.pdx=M.pdy=0;
+  }
+}
+app.addEventListener("touchend",endTouch,{passive:false});
+app.addEventListener("touchcancel",endTouch,{passive:false});
+const isTouch=()=>touchMode>0||liftAt>=0;
 addEventListener("keydown",e=>{
   // a focused size box swallows the keyboard, so digits cannot reach the game
   if(focusField&&FIELD[focusField]){
@@ -3006,6 +3091,7 @@ function loop(t){
     textFit(toast,x+4*U,y+2*U,w-8*U,textH(U),WHITE,"center",1,U);
   }
   M.click=false; M.rclick=false; M.wheel=0; M.pdx=M.pdy=0;
+  if(liftAt>=0&&--liftAt<0){ M.x=-9e9; M.y=-9e9; }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
