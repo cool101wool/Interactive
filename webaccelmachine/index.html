@@ -2250,14 +2250,19 @@ function drawBoardOverlays(){
     X.strokeRect(sx+r.x0*z+U/2,sy+r.y0*z+U/2,(r.x1-r.x0+1)*z-U,(r.y1-r.y0+1)*z-U);
   }
   const h=hoverCell();
-  if(carry&&h){
+  const hraw=carry?hoverCellRaw():null;
+  if(carry&&hraw){
     X.globalAlpha=.75;
     for(let cy=0;cy<carry.h;cy++)for(let cx=0;cx<carry.w;cx++){
       const c=carry.cells[cy*carry.w+cx];
       if(!c) continue;
+      // parts hanging off the board are trimmed, exactly as placing will trim
+      // them -- so the preview shows what you are actually going to get
+      const tx=hraw.x+cx, ty=hraw.y+cy;
+      if(tx<0||tx>=world.W||ty<0||ty>=world.H) continue;
       const t2=c>>2;
-      if(z>=8) X.drawImage(spriteFor(t2,c&3,z),sx+(h.x+cx)*z,sy+(h.y+cy)*z,z,z);
-      else{X.fillStyle=avgColor(t2);X.fillRect(sx+(h.x+cx)*z,sy+(h.y+cy)*z,z,z);}
+      if(z>=8) X.drawImage(spriteFor(t2,c&3,z),sx+tx*z,sy+ty*z,z,z);
+      else{X.fillStyle=avgColor(t2);X.fillRect(sx+tx*z,sy+ty*z,z,z);}
     }
     X.globalAlpha=1;
   }
@@ -2286,6 +2291,15 @@ function hoverCell(){
   const z=zoomPx();
   const x=Math.floor((M.x+cam.x)/z), y=Math.floor((M.y+cam.y)/z);
   return (x>=0&&x<world.W&&y>=0&&y<world.H)?{x,y}:null;
+}
+/* The cell under the pointer even when that is off the board -- the coordinates
+   can be negative or past the far edge. A carried selection is anchored with
+   this so that hanging it over an edge trims it instead of making the whole
+   thing vanish. */
+function hoverCellRaw(){
+  if(!world) return null;
+  const z=zoomPx();
+  return {x:Math.floor((M.x+cam.x)/z),y:Math.floor((M.y+cam.y)/z)};
 }
 /* --- selection clipboard ---------------------------------------------------- */
 function normSel(r){
@@ -2415,19 +2429,25 @@ function boardInput(dt){
   // resolves to the nearest cell. Without this a fast drag towards an edge
   // stops one cell short: the frame that should have covered the border column
   // arrived when the pointer was already past it, and got discarded whole.
-  const stroking=(M.down||M.rdown)&&paintFrom;
-  const hb=h||(stroking?hoverCellClamped():null);
-  if(!hb) return;
-
+  /* Carried cells are placed from the raw pointer position, so a selection held
+     over an edge drops the part that is on the board and discards the rest --
+     matching the preview. It is handled before the on-board guard below,
+     because that guard would otherwise reject the whole action. */
   if(carry){
-    if(!h) return;
-    if(M.click&&!M.pressUI){ stampAt(carry,h.x,h.y); carry=null; sfx("place"); }
-    if(M.rclick&&!M.rpressUI){
-      if(carry.from) stampAt(carry,carry.from.x,carry.from.y);
-      carry=null;
+    const hc=hoverCellRaw();
+    if(hc){
+      if(M.click&&!M.pressUI){ stampAt(carry,hc.x,hc.y); carry=null; sfx("place"); }
+      if(M.rclick&&!M.rpressUI){
+        if(carry.from) stampAt(carry,carry.from.x,carry.from.y);
+        carry=null;
+      }
     }
     return;
   }
+
+  const stroking=(M.down||M.rdown)&&paintFrom;
+  const hb=h||(stroking?hoverCellClamped():null);
+  if(!hb) return;
 
   // level mode has no building tools: dragging cells that sit on a plus is all
   // you get, and only before the run has started
