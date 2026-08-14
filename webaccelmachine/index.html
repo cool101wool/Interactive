@@ -1616,7 +1616,7 @@ async function copyText(t){
 /* ===========================================================================
    STATE
    =========================================================================== */
-const S={musicVol:.8,sfxVol:.8,fast:false};
+const S={musicVol:.8,sfxVol:.8,fast:false,noDraw:false};
 let scr="title", paused=false, modal=null, pending=null, toast="", toastT=-1e9;
 let world=null, placeMask=null, levelName="", tickCount=0;
 let playing=false, tpsIdx=3, acc=0, now=0;
@@ -2174,13 +2174,27 @@ function noteMaskCell(x,y,on){
    than paid for. */
 function setMotionWindow(){
   if(!world) return;
-  if(!interpOn()||zoomPx()<4){ world.setMotionWindow(0,0,-1,-1); return; }
+  // nothing is drawn, so there is nothing to interpolate
+  if(S.noDraw||!interpOn()||zoomPx()<4){ world.setMotionWindow(0,0,-1,-1); return; }
   const z=zoomPx(), sx=Math.round(-cam.x), sy=Math.round(-cam.y), m=2;
   const x0=Math.max(0,Math.floor((0-sx)/z)-m), x1=Math.min(world.W-1,Math.floor((W-1-sx)/z)+m);
   const y0=Math.max(0,Math.floor((0-sy)/z)-m), y1=Math.min(world.H-1,Math.floor((H-1-sy)/z)+m);
   world.setMotionWindow(x0,y0,x1,y1);
 }
 function drawBoard(){
+  /* Disable graphics: the board is the expensive part of a frame on a big
+     level, so nothing about it is drawn -- no grid, no cells, and none of the
+     board-space overlays, which would only be floating over blank space. The
+     HUD stays, so you can still place, run and step; the simulation is
+     untouched either way. */
+  if(S.noDraw){
+    X.fillStyle="#3a3a3a"; X.fillRect(0,0,W,H);
+    bkey="";                      // the cache holds a stale board; force a repaint on re-enable
+    const t="Rendering disabled";
+    const sc=Math.max(U,Math.min(U*3,Math.floor((W*0.6)/Math.max(1,textW(t,1,1)))));
+    textFit(t,0,Math.round(H/2-textH(sc)/2),W,textH(sc),"#9a9a9a","center",1,sc);
+    return;
+  }
   if(!world){ X.fillStyle="#000"; X.fillRect(0,0,W,H); return; }
   const animating=interpOn()&&alphaNow()<1&&(world.motion.size>0||world.rotFrom.size>0);
   /* Keyed on the actual cell size, not the ladder index. Pinch zoom moves
@@ -2693,6 +2707,8 @@ function screenOptions(){
   row("SFX VOL",null,(x,cy,w)=>{S.sfxVol=uiSlider("s",x,cy,w,S.sfxVol);});
   row("FAST GRAPHICS","turns off motion interpolation - cells jump between ticks",
       (x,cy)=>{const f=uiToggleAt(x,cy,S.fast); if(f!==S.fast) S.fast=f;});
+  row("DISABLE GRAPHICS","stops drawing the board entirely - the simulation still runs",
+      (x,cy)=>{const f=uiToggleAt(x,cy,S.noDraw); if(f!==S.noDraw){ S.noDraw=f; bkey=""; }});
   if(uiBtn(lx,H-btnH(U*2)-10*U,0,0,"VIEW CONTROLS",U*2)) nav("controls");
 }
 const CONTROLS=[["Q/E","Rotate the cell you will place"],["WASD","Move camera around"],
@@ -3368,6 +3384,8 @@ const p=panelRect(needW*_k,needH*_k);
       (x,cy,w)=>{S.sfxVol=uiSlider("ss",x,cy,w,S.sfxVol);});
   row("FAST GRAPHICS","turns off motion interpolation - cells jump between ticks",
       (x,cy)=>{const f=uiToggleAt(x,cy,S.fast); if(f!==S.fast) S.fast=f;});
+  row("DISABLE GRAPHICS","stops drawing the board entirely - the simulation still runs",
+      (x,cy)=>{const f=uiToggleAt(x,cy,S.noDraw); if(f!==S.noDraw){ S.noDraw=f; bkey=""; }});
 }
 let szAnchor=0;                  // 0 TL, 1 TR, 2 BL, 3 BR
 let fieldW="", fieldH="", focusField=null;   // typed boxes: sizes and searches
