@@ -92,6 +92,13 @@ function opaqueBwd(B,p){
   return (w<<5)|(31-Math.clz32(m));
 }
 
+/* A backstop, not the main defence -- the viewport clip in push() is what keeps
+   the cost sane. Tracking a screenful of an exploding board peaks around 95,000
+   moves a tick and costs about 14% on top of the simulation, so this sits well
+   clear of that: it only trips if you zoom out far enough that a single screen
+   covers a vast amount of movement, and at that zoom a cell shifts a pixel or
+   two and there is nothing to see anyway. */
+const MOTION_CAP=200000;
 class World{
   constructor(w,h){
     // Same reasoning as the importer: indices must fit a signed 32-bit int.
@@ -106,7 +113,10 @@ class World{
     // One bit per non-empty cell. The renderer walks these instead of reading
     // every slot in view, which is what made a big sparse board crawl.
     this.occ=null;
-    this.trackMotion=false; this.motion=new Map();
+    this.trackMotion=false; this.motion=new Map(); this.moved=0; this.movedLast=0;
+    // Visible window in interior row/column indices; -1 means "no clipping".
+    this.winR0=-1; this.winR1=-1; this.winC0=-1; this.winC1=-1;
+    this.movedVis=0; this.movedVisLast=0;
     this.rotFrom=new Map();          // index -> rotation when the tick began
     this.W=w; this.H=h; this.stride=w+2; this.strideT=h+2;
     this.size=this.stride*this.strideT;
@@ -126,6 +136,12 @@ class World{
     // Everything starts BORDER or EMPTY, both opaque. Bits past `size` stay set
     // too: a forward scan must always terminate, and an over-set bit is safe
     // (the border stops us first) whereas an under-set one would run off the end.
+    /* obits[1] is transposed so vertical pushes can scan a column contiguously.
+       That makes it useless for a horizontal shift, where a row's cells are
+       strided through it. opqR1 is the same information in row-major order,
+       kept purely so a row shift can find the handful of positions where
+       opacity changes with word operations instead of walking every cell. */
+    this.opqR1=new Uint32Array(this.nwords).fill(0xFFFFFFFF);
     this.obits=[new Uint32Array(this.nwords).fill(0xFFFFFFFF),
                 new Uint32Array(this.nwords).fill(0xFFFFFFFF)];
     this.occ=new Uint32Array(this.nwords);
@@ -133,19 +149,133 @@ class World{
   idx(x,y){return (y+1)*this.stride+(x+1);}
   toT(i){ const y=(i/this.stride)|0; return (i-y*this.stride)*this.strideT+y; }
   fromT(t){ const x=(t/this.strideT)|0; return (t-x*this.strideT)*this.stride+x; }
-  clearMotion(){ this.motion.clear(); this.rotFrom.clear(); }
+  clearMotion(){
+    this.motionOver=false; this.motion.clear(); this.rotFrom.clear(); }
 
   static bucketOf(c){ return TBL_BUCKET[c]; }
   bitSet(b,i){
-    const w=i>>5;
-    this.bits[b][w]|=(1<<(i&31));
-    this.sum[b][w>>5]|=(1<<(w&31));
+    const w=i>>5, arr=this.bits[b], v0=arr[w];
+    arr[w]=v0|(1<<(i&31));
+    if(v0===0) this.sum[b][w>>5]|=(1<<(w&31));
   }
   bitClear(b,i){
     const w=i>>5;
     const v=this.bits[b][w]&~(1<<(i&31));
     this.bits[b][w]=v;
     if(v===0) this.sum[b][w>>5]&=~(1<<(w&31));
+  }
+  /* Shifting a chain was one setCell per cell, and setCell is a method call
+     that re-reads this.g, this.bits and this.sum every time. On a dense board
+     these chains run to hundreds of cells and dominate everything else. This is
+     the same work with every lookup hoisted out of the loop.
+
+     (Batching the bucket bits a machine word at a time was also tried. It only
+     helps horizontal chains, which are a third of the moves here, and measured
+     no faster than this -- so it is not worth the extra code.) */
+  shiftChain(i,k,o){
+    if(k===i){ this.setCell(i,0); return; }
+    this.rev++;
+    if(o===1||o===-1) this.shiftRow(i,k,o); else this.shiftCol(i,k,o);
+    this.setCell(i,0);
+  }
+  /* A horizontal chain is contiguous in memory, so the grid moves with a single
+     memmove and every bitmap indexed by cell position shifts a machine word at
+     a time rather than a bit at a time -- a 400-cell chain goes from roughly
+     4800 operations to under 200.
+
+     The transposed opacity bitmap is the exception: a row's cells are strided
+     through it, so it cannot shift with the row. It gets fixed up at only the
+     positions where opacity actually changes, which on a dense board is almost
+     nowhere. */
+  shiftRow(i,k,o){
+    const g=this.g, up=(o===1);
+    const lo=up?i+1:k, hi=up?k:i-1;
+    /* Where does vertical opacity actually change? Exactly where the row-major
+       copy differs from itself shifted by one. Compute that a word at a time
+       and touch the transposed bitmap only at those bits -- on a dense board
+       there are usually none at all. */
+    const R=this.opqR1, opq1=this.obits[1];
+    const wlo=lo>>5, whi=hi>>5, n=R.length;
+    for(let w=wlo;w<=whi;w++){
+      const a=(w===wlo?lo:(w<<5))&31, b=(w===whi?hi:((w<<5)|31))&31;
+      const mask=((((0xFFFFFFFF<<a)>>>0)&(b===31?0xFFFFFFFF:(((1<<(b+1))-1)>>>0)))>>>0);
+      const cur=R[w];
+      const src=up ? ((((cur<<1)>>>0)|(w>0?(R[w-1]>>>31):0))>>>0)
+                   : (((cur>>>1)|(((w+1<n?R[w+1]:0)&1)<<31))>>>0);
+      let diff=((cur^src)&mask)>>>0;
+      while(diff!==0){
+        const bb=31-Math.clz32(diff&-diff);
+        diff&=diff-1;
+        const p=(w<<5)|bb, t=this.toT(p);
+        opq1[t>>5]^=(1<<(t&31));
+      }
+    }
+    if(up) g.copyWithin(i+1,i,k); else g.copyWithin(k,k+1,i+1);
+    const bits=this.bits, sum=this.sum;
+    for(let b=0;b<10;b++) this.shiftBits(bits[b],sum[b],lo,hi,up);
+    this.shiftBits(this.occ,null,lo,hi,up);
+    this.shiftBits(this.obits[0],null,lo,hi,up);
+    this.shiftBits(R,null,lo,hi,up);
+  }
+  // bit p <- bit p-1 (up) or bit p+1 (down) for p in [lo,hi]; bits outside the
+  // range are untouched. S is the per-word summary bitmap, or null.
+  shiftBits(B,S,lo,hi,up){
+    const wlo=lo>>5, whi=hi>>5, n=B.length;
+    if(up){
+      for(let w=whi;w>=wlo;w--){
+        const a=(w===wlo?lo:(w<<5))&31, b=(w===whi?hi:((w<<5)|31))&31;
+        const mask=((((0xFFFFFFFF<<a)>>>0)&(b===31?0xFFFFFFFF:(((1<<(b+1))-1)>>>0)))>>>0);
+        const old=B[w];
+        const shifted=((((old<<1)>>>0)|(w>0?(B[w-1]>>>31):0))>>>0);
+        const nw=((((old&~mask)>>>0)|(shifted&mask))>>>0);
+        if(nw!==old){
+          B[w]=nw;
+          if(S!==null&&((old===0)!==(nw===0))){
+            if(nw===0) S[w>>5]&=~(1<<(w&31)); else S[w>>5]|=(1<<(w&31));
+          }
+        }
+      }
+    }else{
+      for(let w=wlo;w<=whi;w++){
+        const a=(w===wlo?lo:(w<<5))&31, b=(w===whi?hi:((w<<5)|31))&31;
+        const mask=((((0xFFFFFFFF<<a)>>>0)&(b===31?0xFFFFFFFF:(((1<<(b+1))-1)>>>0)))>>>0);
+        const old=B[w];
+        const shifted=(((old>>>1)|(((w+1<n?B[w+1]:0)&1)<<31))>>>0);
+        const nw=((((old&~mask)>>>0)|(shifted&mask))>>>0);
+        if(nw!==old){
+          B[w]=nw;
+          if(S!==null&&((old===0)!==(nw===0))){
+            if(nw===0) S[w>>5]&=~(1<<(w&31)); else S[w>>5]|=(1<<(w&31));
+          }
+        }
+      }
+    }
+  }
+  // A vertical chain steps by the row stride, so each cell lands in its own
+  // word and there is nothing to batch.
+  shiftCol(i,k,o){
+    const g=this.g, bits=this.bits, sum=this.sum, occ=this.occ;
+    const opq0=this.obits[0], opq1=this.obits[1];
+    for(let p=k;p!==i;p-=o){
+      const oldv=g[p], nv=g[p-o];
+      if(oldv===nv) continue;
+      g[p]=nv;
+      const w=p>>5, bit=1<<(p&31);
+      if(((oldv>>2)===T_EMPTY)!==((nv>>2)===T_EMPTY)) occ[w]^=bit;
+      const ob=TBL_BUCKET[oldv], nb=TBL_BUCKET[nv];
+      if(ob!==nb){
+        if(ob>=0){ const arr=bits[ob], v=arr[w]&~bit; arr[w]=v;
+                   if(v===0) sum[ob][w>>5]&=~(1<<(w&31)); }
+        if(nb>=0){ const arr=bits[nb], v0=arr[w]; arr[w]=v0|bit;
+                   if(v0===0) sum[nb][w>>5]|=(1<<(w&31)); }
+      }
+      const dop=TBL_OPQ[oldv]^TBL_OPQ[nv];
+      if(dop){
+        if(dop&1) opq0[w]^=bit;
+        if(dop&2){ const t=this.toT(p); opq1[t>>5]^=(1<<(t&31));
+                   this.opqR1[w]^=bit; }
+      }
+    }
   }
   setCell(i,c){
     const o=this.g[i];
@@ -159,7 +289,8 @@ class World{
     const dop=TBL_OPQ[o]^TBL_OPQ[c];
     if(dop){
       if(dop&1) this.obits[0][i>>5]^=(1<<(i&31));
-      if(dop&2){ const t=this.toT(i); this.obits[1][t>>5]^=(1<<(t&31)); }
+      if(dop&2){ const t=this.toT(i); this.obits[1][t>>5]^=(1<<(t&31));
+                 this.opqR1[i>>5]^=(1<<(i&31)); }
     }
   }
   place(x,y,c){this.setCell(this.idx(x,y),c);}
@@ -179,6 +310,7 @@ class World{
     else if(t===T_SLIDE){       // delta is odd, so the axis always flips
       this.obits[0][n>>5]^=(1<<(n&31));
       const tt=this.toT(n); this.obits[1][tt>>5]^=(1<<(tt&31));
+      this.opqR1[n>>5]^=(1<<(n&31));
     }
   }
 
@@ -230,18 +362,60 @@ class World{
       k=j-o;
       if(k===i){ this.setCell(i,0); return true; }
     }
+    /* Interpolation records where every moved cell came from -- a Map insert
+       and delete per cell. A generator nuke moves tens of millions of cells in
+       a tick, and doing that for all of them cost more than the simulation.
+
+       But a cell you cannot see does not need interpolating, so the work is
+       clipped to the visible window instead. A chain is a straight line, so the
+       part of it that is on screen is a contiguous run: clip once, up front,
+       and skip the whole chain when it misses the window entirely. The cost
+       then follows the size of the viewport rather than the size of the
+       explosion, which is what stops it falling off a cliff. */
     if(this.trackMotion){
-      for(let q=k;q!==i;q-=o){
-        const src=this.motion.get(q-o);            // compose repeated moves
-        this.motion.set(q,src===undefined?q-o:src);
-        this.motion.delete(q-o);
-        const rf=this.rotFrom.get(q-o);            // ...and carry the rotation with it
-        if(rf!==undefined){ this.rotFrom.set(q,rf); this.rotFrom.delete(q-o); }
-        else this.rotFrom.delete(q);
+      let a=k, b=i+o;                       // the run of destinations, k first
+      const r0=this.winR0;
+      if(r0>=0){
+        const st=this.stride;
+        if(o===1||o===-1){
+          const row=(i/st)|0;
+          if(row<r0||row>this.winR1) a=b=0;   // whole chain off screen
+          else{
+            const lo=row*st+this.winC0, hi=row*st+this.winC1;
+            /* Clamp by the direction of travel, not by comparing the two ends:
+               a one-cell chain has a===b, and comparing them then picked the
+               wrong branch and let chains far off screen through. */
+            if(o>0){ if(a>hi)a=hi; if(b<lo)b=lo; }
+            else   { if(a<lo)a=lo; if(b>hi)b=hi; }
+          }
+        }else{
+          const col=i-(((i/st)|0)*st);
+          if(col<this.winC0||col>this.winC1) a=b=0;
+          else{
+            const lo=this.winR0*st+col, hi=this.winR1*st+col;
+            if(o>0){ if(a>hi)a=hi; if(b<lo)b=lo; }
+            else   { if(a<lo)a=lo; if(b>hi)b=hi; }
+          }
+        }
+      }
+      if(a!==b||a!==0){
+        const n=(a-b)/o;
+        if(n>=0){
+          this.movedVis+=n+1;
+          if(this.movedVis>=MOTION_CAP){ this.trackMotion=false; this.motionOver=true; }
+          else for(let q=a;q!==b-o;q-=o){
+            const src=this.motion.get(q-o);          // compose repeated moves
+            this.motion.set(q,src===undefined?q-o:src);
+            this.motion.delete(q-o);
+            const rf=this.rotFrom.get(q-o);          // ...and carry the rotation with it
+            if(rf!==undefined){ this.rotFrom.set(q,rf); this.rotFrom.delete(q-o); }
+            else this.rotFrom.delete(q);
+          }
+        }
       }
     }
-    for(;k!==i;k-=o) this.setCell(k,g[k-o]);
-    this.setCell(i,0);
+    this.moved+=(k-i)/o;
+    this.shiftChain(i,k,o);
     return true;
   }
 
@@ -301,11 +475,22 @@ class World{
       }
     }
   }
+  /* x0..x1, y0..y1 are cell coordinates; pass no arguments to track everywhere.
+     Called once a frame from the camera, so tracking follows what is on screen. */
+  setMotionWindow(x0,y0,x1,y1){
+    if(x0===undefined){ this.winR0=-1; return; }
+    const st=this.stride;
+    this.winR0=Math.max(1,y0+1); this.winR1=Math.min(this.H,y1+1);
+    this.winC0=Math.max(1,x0+1); this.winC1=Math.min(this.W,x1+1);
+    if(this.winR1<this.winR0||this.winC1<this.winC0){ this.winR0=1; this.winR1=0; }
+  }
   tick(){
+    this.moved=0; this.movedVis=0;
     for(let k=0;k<4;k++){const d=DIR_ORDER[k]; this.sweep(d,descending(d));}
     this.sweep(4,false);
     this.sweep(5,false);
     for(let k=0;k<4;k++){const d=DIR_ORDER[k]; this.sweep(6+d,descending(d));}
+    this.movedLast=this.moved; this.movedVisLast=this.movedVis;
   }
 }
 
@@ -1983,6 +2168,18 @@ function noteMaskCell(x,y,on){
   } else maskCount=Math.max(0,maskCount-1);   // box stays conservative
   maskRev++;
 }
+/* The cells the renderer will actually draw, plus a margin so a cell easing in
+   from just off screen is still animated. Below about four pixels a cell the
+   movement is a blur of one or two pixels, so tracking is switched off rather
+   than paid for. */
+function setMotionWindow(){
+  if(!world) return;
+  if(!interpOn()||zoomPx()<4){ world.setMotionWindow(0,0,-1,-1); return; }
+  const z=zoomPx(), sx=Math.round(-cam.x), sy=Math.round(-cam.y), m=2;
+  const x0=Math.max(0,Math.floor((0-sx)/z)-m), x1=Math.min(world.W-1,Math.floor((W-1-sx)/z)+m);
+  const y0=Math.max(0,Math.floor((0-sy)/z)-m), y1=Math.min(world.H-1,Math.floor((H-1-sy)/z)+m);
+  world.setMotionWindow(x0,y0,x1,y1);
+}
 function drawBoard(){
   if(!world){ X.fillStyle="#000"; X.fillRect(0,0,W,H); return; }
   const animating=interpOn()&&alphaNow()<1&&(world.motion.size>0||world.rotFrom.size>0);
@@ -2320,6 +2517,7 @@ function screenTitle(dt){
   while(titleAcc>=1){
     titleW.trackMotion=interpOn(); titleW.clearMotion();
     titleW.tick(); titleW.trackMotion=false;
+    if(titleW.motionOver) titleW.clearMotion();
     titleAcc-=1; ticked=true;
   }
   if(ticked) titleAt=now;
@@ -3451,12 +3649,24 @@ function loop(t){
       acc+=dt*target; n=Math.min(200000,Math.floor(acc)); acc-=n;
       // Only a single tick can be interpolated -- with several per frame the
       // intermediate states are gone, so it snaps rather than lying about them.
-      const track=interpOn()&&n===1;
+      /* Judged from the last tick rather than discovered during this one: a
+         board that just moved a screenful will do it again, and building forty
+         thousand map entries only to throw them away costs as much as the
+         simulation. It re-enables itself the moment things settle.
+
+         The count is of cells that moved ON SCREEN, so zooming into a corner of
+         an exploding board still animates smoothly -- only what you are looking
+         at has to be affordable. */
+      setMotionWindow();
+      const track=interpOn()&&n===1&&world.movedVisLast<=MOTION_CAP;
       if(n){ world.trackMotion=track; if(track) world.clearMotion(); }
       for(let i=0;i<n;i++) world.tick();
       world.trackMotion=false;
       if(n){
-        if(track){ tickAt=t; tickDur=1000/target; }
+        // A tick that gave up on tracking part-way through has only half a
+        // picture of what moved, so it snaps rather than easing some cells and
+        // not others.
+        if(track&&!world.motionOver){ tickAt=t; tickDur=1000/target; }
         else{ world.clearMotion(); tickDur=0; }
       }
     }
