@@ -922,6 +922,27 @@ function clipText(str,w,sc,sp){
   if(n<=2) return str.slice(0,n);        // no room for the marker
   return str.slice(0,n-2)+"..";
 }
+/* Cutting only the tail turns every long title into the same "ABCDEFGH..",
+   which is the least useful part to keep -- names differ at the end at least
+   as often as the start. This keeps both ends and drops the middle. */
+function clipMid(str,w,sc,sp){
+  str=String(str);
+  if(textW(str,sc,sp)<=w) return str;
+  const cw=(FONT_W+(sp|0))*Math.max(1,sc|0);
+  const n=Math.floor(w/cw);
+  if(n<=0) return "";
+  if(n<=4) return str.slice(0,n);        // too narrow to say anything useful
+  const keep=n-3, head=Math.ceil(keep/2), tail=keep-head;
+  return str.slice(0,head)+"..."+(tail?str.slice(str.length-tail):"");
+}
+function textFitMid(str,x,y,w,h,color,align,sp,max){
+  const sc=fitScale(str,w,h,sp,max);
+  const out=clipMid(str,w,sc,sp);
+  const ty=y+Math.max(0,Math.round((h-textH(sc))/2));
+  const tx=align==="center"?x+w/2:align==="right"?x+w:x;
+  text(out,tx,ty,sc,color,align,sp);
+  return sc;
+}
 // draw inside a box, scaled down until it fits, vertically centred
 function textFit(str,x,y,w,h,color,align,sp,max){
   const sc=fitScale(str,w,h,sp,max);
@@ -930,6 +951,15 @@ function textFit(str,x,y,w,h,color,align,sp,max){
   const tx=align==="center"?x+w/2:align==="right"?x+w:x;
   text(out,tx,ty,sc,color,align,sp);
   return sc;
+}
+// What you are typing is at the end, so an over-long value scrolls rather
+// than hiding the caret off the right edge.
+function tailOf(str,w,sc,sp){
+  str=String(str);
+  if(textW(str,sc,sp)<=w) return str;
+  const cw=(FONT_W+(sp|0))*Math.max(1,sc|0);
+  const n=Math.max(1,Math.floor(w/cw));
+  return str.slice(str.length-n);
 }
 function wrapWords(str,w,sc,sp){
   const words=String(str).split(" "), out=[];
@@ -993,7 +1023,7 @@ function resize(){
 addEventListener("resize",resize); resize();
 
 const M={x:-9e9,y:-9e9,down:false,click:false,rdown:false,rclick:false,mdown:false,
-         wheel:0,pdx:0,pdy:0,pressUI:false,rpressUI:false,ctrl:false,alt:false};
+         wheel:0,pdx:0,pdy:0,pressUI:false,rpressUI:false,ctrl:false,alt:false,mclick:false};
 const KEYS=new Set();
 const toV=e=>({x:e.clientX*DPR,y:e.clientY*DPR});
 app.addEventListener("contextmenu",e=>e.preventDefault());
@@ -1003,12 +1033,12 @@ app.addEventListener("mousedown",e=>{
   // Latch whether the press began on a widget. Checking only where the pointer
   // is now meant dragging off the tps slider onto the board started painting.
   const onUI=overUI();
-  if(modal!=="world"&&modal!=="load"&&!schemOpen) focusField=null;
+  if(modal!=="world"&&modal!=="load"&&!schemOpen&&!paused) focusField=null;
   // Latched with the press: the key can be let go mid-drag and the drag still
   // finishes as the add or the cut it started out as.
   M.ctrl=e.ctrlKey||e.metaKey; M.alt=e.altKey;
   if(e.button===0){M.down=true;M.click=true;M.pressUI=onUI;}
-  if(e.button===1){M.mdown=true;e.preventDefault();}
+  if(e.button===1){M.mdown=true;M.mclick=true;e.preventDefault();}
   if(e.button===2){M.rdown=true;M.rclick=true;M.rpressUI=onUI;}
 });
 addEventListener("mouseup",e=>{
@@ -1066,7 +1096,7 @@ app.addEventListener("touchstart",e=>{
     // No hover exists on a touchscreen, so the press has to place the pointer
     // and register the click in one go -- exactly what mousedown does.
     M.x=p.x; M.y=p.y; M.pdx=M.pdy=0;
-    if(modal!=="world"&&modal!=="load"&&!schemOpen) focusField=null;
+    if(modal!=="world"&&modal!=="load"&&!schemOpen&&!paused) focusField=null;
     touchMode=1;
     touchStart={x:p.x,y:p.y,t:performance.now(),ui:overUI()};
     touchMoved=false;
@@ -1236,7 +1266,11 @@ let dragId=null;
 /* A panel drawn in the same frame as the click that opened it would otherwise
    receive that very click -- which is why opening LOAD instantly picked
    whichever row happened to sit under the pointer. */
-function consumeClick(){ M.click=false; M.rclick=false; }
+function consumeClick(){ M.click=false; M.rclick=false; M.mclick=false; }
+// A right or middle press inside a rectangle, for widgets that want all three
+// buttons. uiBtn already covers the left one.
+function hitR(x,y,w,h){ return M.rclick&&inRect(x,y,w,h); }
+function hitM(x,y,w,h){ return M.mclick&&inRect(x,y,w,h); }
 function openModal(name){ modal=name; focusField=null; consumeClick(); }
 function uiSlider(id,x,y,w,val){
   // The reserved zone has to cover everything the slider will react to. It used
@@ -1452,7 +1486,7 @@ function b74e(n){
    version concatenated one character per cell and then indexed the result --
    the same mistake that hung the importer on a 999x999 level, mirrored. On a
    19-million-cell board that never returned. */
-function exportV3(w,mask,name){
+function exportV3(w,mask,name,desc){
   const n=w.W*w.H, ST=w.stride;
   const raw=new Uint8Array(n);
   let k=0;
@@ -1476,7 +1510,9 @@ function exportV3(w,mask,name){
     else parts.push(ch+"(0("+b74e(run-1)+")");
     i=j;
   }
-  return `V3;${b74e(w.W)};${b74e(w.H)};${parts.join("")};;${(name||"").replace(/;/g,"")};0`;
+  // field 4 is the description, field 5 the name -- both were being thrown away
+  const clean=t=>String(t||"").replace(/;/g,",");
+  return `V3;${b74e(w.W)};${b74e(w.H)};${parts.join("")};${clean(desc)};${clean(name)};0`;
 }
 
 const DB_NAME="webaccel", DB_VER=1;   // never change this: it is where saved
@@ -1628,7 +1664,23 @@ async function copyText(t){
    =========================================================================== */
 const S={musicVol:.8,sfxVol:.8,fast:false,noDraw:false};
 let scr="title", paused=false, modal=null, pending=null, toast="", toastT=-1e9;
-let world=null, placeMask=null, levelName="", tickCount=0;
+let world=null, placeMask=null, levelName="", levelDesc="", tickCount=0;
+/* The rate actually achieved, which is not the rate asked for once the board
+   is big enough to fall behind. Counted over a moving second. */
+let tpsMark=0, tpsSeen=0, tpsReal=0;
+// 1234567 reads as 1,234,567. Tick counts run into the millions on a big
+// board and an ungrouped run of digits is unreadable at a glance.
+function grp(n){
+  const str=String(n), dot=str.indexOf(".");
+  const head=dot<0?str:str.slice(0,dot), tail=dot<0?"":str.slice(dot);
+  return head.replace(/\B(?=(\d{3})+(?!\d))/g,",")+tail;
+}
+function noteTicks(n,t){
+  tpsSeen+=n;
+  if(!tpsMark) tpsMark=t;
+  const dt=t-tpsMark;
+  if(dt>=500){ tpsReal=tpsSeen*1000/dt; tpsSeen=0; tpsMark=t; }
+}
 let playing=false, tpsIdx=3, acc=0, now=0;
 // Interpolation. The grid always holds the post-tick state; moved cells are
 // drawn back toward where they came from and slide into place as the next tick
@@ -1863,7 +1915,7 @@ function back(){ nav(scr==="controls"?"options":"title"); }
 function newWorld(w,h){
   world=new World(w,h); placeMask=new Uint8Array(w*h);   // no plus tiles by default
   rescanMask();
-  levelName=""; tickCount=0; playing=false; centreCam();
+  levelName=""; levelDesc=""; tickCount=0; playing=false; centreCam();
 }
 function centreCam(){
   zFree=0;          // a pinch must not survive fitting the board to the window
@@ -1880,7 +1932,8 @@ function loadLevel(L){
     const cid=L.id[y*L.W+x]; if(cid===9) continue;
     world.place(x,y,cid>9?mk(T_WALL,0):mk(CM_TO_T[cid],L.rot[y*L.W+x]));
   }
-  placeMask=L.place; levelName=L.name||""; tickCount=0; playing=false; centreCam();
+  placeMask=L.place; levelName=L.name||""; levelDesc=L.tutorial||"";
+  tickCount=0; playing=false; centreCam();
   rescanMask();
 }
 
@@ -2412,13 +2465,48 @@ function hoverCellRaw(){
    works out to is shown next to it. */
 const FILL_ROTS={};
 FILL_ROTS[T_MOVER]=4; FILL_ROTS[T_GEN]=4; FILL_ROTS[T_SLIDE]=2;
-const FILL_TYPES=[-1].concat(PALETTE);       // -1 is empty
+const FILL_TYPES=[-1,-2].concat(PALETTE);    // -1 air, -2 the placeable mark
+// What the fill is allowed to write over. Both on means it ignores what was
+// already there, which is what it always used to do.
+let fillOverAir=true, fillOverCells=true;
 const nrots=t=>FILL_ROTS[t]||1;
 const fillW={};                              // type -> weight, absent means unused
 const fillRW={};                             // "type:rot" -> weight, absent means even
 let fillPick=null;                           // the type the box will apply to
 let fillRotPick=0, focusRot=false;           // ...or one of its facings
 let fillBox="";                              // the typed number
+/* Weights are not capped. The slider covers 1..fillCap, and holding the handle
+   against the right-hand end keeps pushing the cap up, so any value is
+   reachable without a number to type. The cap comes back down on its own once
+   nothing needs the headroom. */
+let fillCap=100, rotCap=100;
+/* Cancel has to undo what the panel did, so both panels keep a copy of the
+   weights as they were when it opened. */
+let fillSnap=null, rotSnap=null;
+function fillSnapshot(){ fillSnap={w:Object.assign({},fillW),r:Object.assign({},fillRW),
+                                   a:fillOverAir,c:fillOverCells}; }
+function fillRestore(){
+  if(!fillSnap) return;
+  for(const k of Object.keys(fillW)) delete fillW[k];
+  for(const k of Object.keys(fillRW)) delete fillRW[k];
+  Object.assign(fillW,fillSnap.w); Object.assign(fillRW,fillSnap.r);
+  fillOverAir=fillSnap.a; fillOverCells=fillSnap.c;
+}
+function rotSnapshot(t){
+  rotSnap={t,v:{}};
+  for(let r=0;r<4;r++) if(fillRW[t+":"+r]!==undefined) rotSnap.v[r]=fillRW[t+":"+r];
+}
+function rotRestore(t){
+  if(!rotSnap||rotSnap.t!==t) return;
+  for(let r=0;r<4;r++) delete fillRW[t+":"+r];
+  for(const r of Object.keys(rotSnap.v)) fillRW[t+":"+r]=rotSnap.v[r];
+}
+function growCap(cap,v,atEnd){
+  if(atEnd&&M.down) cap=Math.ceil(cap*1.04)+1;
+  const need=Math.max(100,v*1.05);
+  if(cap>need*1.6) cap=Math.max(100,Math.ceil(need));
+  return Math.min(cap,1e6);
+}
 const fillTypes=()=>FILL_TYPES.filter(t=>(fillW[t]|0)>0);
 function fillTotal(){ let n=0; for(const t of fillTypes()) n+=fillW[t]; return n; }
 function fillPctOf(t){ const n=fillTotal(); return n?Math.round(fillW[t]*100/n):0; }
@@ -2437,9 +2525,17 @@ function fillSelection(){
   if(!sel||!ts.length||tot<=0) return;
   for(let y=sel.y0;y<=sel.y1;y++)for(let x=sel.x0;x<=sel.x1;x++){
     if(!selHas(x,y)) continue;
-    if(mode==="level"&&!placeMask[y*world.W+x]) continue;
+    if(mode==="level"&&!placeMask[y*world.W+x]&&!fillW[-2]) continue;
+    const wasAir=(world.g[world.idx(x,y)]>>2)===T_EMPTY;
+    if(wasAir?!fillOverAir:!fillOverCells) continue;
     let r=Math.random()*tot, t=ts[ts.length-1];
     for(const c of ts){ r-=fillW[c]; if(r<=0){ t=c; break; } }
+    if(t===-2){                               // the plus mark, not a cell
+      world.place(x,y,0);
+      const o=y*world.W+x;
+      if(!placeMask[o]){ placeMask[o]=1; noteMaskCell(x,y,true); }
+      continue;
+    }
     world.place(x,y,t<0?0:mk(t,pickRot(t)));
   }
   sfx("place");
@@ -2799,7 +2895,7 @@ function screenPlayMenu(){
 }
 function overlayWin(){
   const m=8*U;
-  const needW=Math.max(textW("LEVEL COMPLETE",U*3,2),btnW("RESET",U*2)+btnW("EXIT",U*2)+8*U)+2*m;
+  const needW=Math.max(textW("LEVEL COMPLETE",U*3,2),btnW("EXIT",U*2)+btnW("RESET",U*2)+8*U)+2*m;
   const needH=m+textH(U*3)+6*U+textH(U)+8*U+btnH(U*2)+m;
     // shrink to fit the window height rather than running off the bottom
   const u=Math.max(1,Math.min(U,Math.floor(U*(H-8*U)/Math.max(1,needH))));
@@ -2808,8 +2904,8 @@ const p=panelRect(needW*_k,needH*_k);
   textFit("LEVEL COMPLETE",p.x+m,p.y+m,p.w-2*m,textH(u*3),WHITE,"center",2,u*3);
   textFit("every enemy destroyed",p.x+m,p.y+m+textH(u*3)+4*u,p.w-2*m,textH(u),"#222","center",1,u);
   const by=p.y+p.h-m-btnH(u*2);
-  if(uiBtn(p.x+m,by,0,0,"RESET",u*2)) restoreInitial();
-  if(uiBtn(p.x+p.w-m-btnW("EXIT",u*2),by,0,0,"EXIT",u*2)) openModal("exit");
+  if(uiBtn(p.x+m,by,0,0,"EXIT",u*2)) openModal("exit");
+  if(uiBtn(p.x+p.w-m-btnW("RESET",u*2),by,0,0,"RESET",u*2)) restoreInitial();
 }
 function screenOptions(){
   X.fillStyle="#000"; X.fillRect(0,0,W,H);
@@ -3018,7 +3114,7 @@ function screenGame(dt){
     // Start from the cell you were last building with, so the usual case is
     // open-and-press-FILL rather than a form to fill in.
     if(!fillTypes().length&&lastCell) fillOnly(lastCell.t,selRot);
-    openModal("fill");
+    fillSnapshot(); openModal("fill");
   }
     iconFill(axx+5*(is+gp),ay,is);
     if(!touchUsed)
@@ -3034,10 +3130,52 @@ function screenGame(dt){
   // On touch the space under MENU belongs to the tool column, so the counter
   // always goes beside the button rather than under it.
   const tickBeside=touchUsed;
-  if(tickBeside) text(String(tickCount),pad+btnW("MENU",menuU)+5*U,pad+U,U*3,WHITE,"left",1);
-  else text(String(tickCount),pad+U,ty0,U*2,WHITE,"left",1);
+  if(tickBeside) text(grp(tickCount),pad+btnW("MENU",menuU)+5*U,pad+U,U*3,WHITE,"left",1);
+  else text(grp(tickCount),pad+U,ty0,U*2,WHITE,"left",1);
+  /* The title is the level's name and the description is instructions for
+     playing it -- two different kinds of text, so they no longer look alike.
+     The title is larger and white with a rule under it; the description is
+     small, grey and indented beneath. */
   if(levelName&&!tickBeside)
-    textFit(levelName,pad+U,ty0+textH(U*2)+2*U,44*U,textH(U),DIM,"left",1,U);
+    textFitMid(levelName,pad+U,ty0+textH(U*2)+2*U,60*U,textH(U*2),WHITE,"left",2,U*2);
+  /* A level's description is written for whoever is playing it, so it belongs
+     on screen rather than buried in a menu. Wrapped to the width it has and
+     capped at three lines. */
+  if(levelDesc){
+    const dw=Math.min(70*U,W*0.32);
+    let dy=(tickBeside?pad+textH(U*3)+3*U
+                     :ty0+textH(U*2)+2*U+(levelName?textH(U*2)+2*U:0));
+    if(levelName&&!tickBeside){            // a rule between the two
+      X.fillStyle="#5a5a5a"; X.fillRect(pad+U,dy-2*U,Math.min(dw,40*U),Math.max(1,U));
+    }
+    const words=levelDesc.split(/\s+/); const lines=[]; let cur="";
+    for(const w2 of words){
+      const t2=cur?cur+" "+w2:w2;
+      if(textW(t2,U,1)>dw&&cur){ lines.push(cur); cur=w2; if(lines.length===3) break; }
+      else cur=t2;
+    }
+    if(lines.length<3&&cur) lines.push(cur);
+    for(let i=0;i<lines.length;i++)
+      textFit(lines[i],pad+3*U,dy+i*textH(U),dw-3*U,textH(U),"#8f8f8f","left",1,U);
+  }
+  /* --- bottom right: the rate actually achieved.
+     Three things already live in this corner, so it has to clear all of them:
+     the palette bar along the bottom, the selection action row that sits just
+     above it, and the schematics drawer down the right-hand side. */
+  {
+    const lab=grp(tpsReal>=100?Math.round(tpsReal):tpsReal>=10?tpsReal.toFixed(0)
+                 :tpsReal.toFixed(1))+" tps";
+    const bw2=textW("888,888 tps",U,1)+4*U, bh2=textH(U)+3*U;
+    const selIs=touchUsed?Math.max(TAP(),U*30):Math.max(20,U*13);
+    const selRowH=(editing&&sel&&!carry)?selIs+8*U:0;
+    const schW=schemOpen?(touchUsed?Math.min(Math.round(W*0.72),260*U)
+                                   :Math.min(Math.round(W*0.42),190*U)):0;
+    const bx2=W-schW-pad-bw2, by2=H-barH-selRowH-bh2-4*U;
+    X.fillStyle="rgba(0,0,0,.55)"; X.fillRect(bx2,by2,bw2,bh2);
+    textFit(playing?lab:"paused",bx2,by2+1.5*U,bw2,textH(U),
+            playing?"#8f8f8f":"#5a5a5a","center",1,U);
+    reserve(bx2,by2,bw2,bh2);
+  }
   // --- top right
   // Twice the old length: a longer track means finer control over the speed,
   // and it is the one slider always on screen.
@@ -3147,7 +3285,7 @@ function screenGame(dt){
     world.trackMotion=interpOn(); world.clearMotion();
     world.tick(); world.trackMotion=false;
     if(interpOn()){ tickAt=now; tickDur=190; } else tickDur=0;
-    tickCount++; voiceWorld();}
+    tickCount++; noteTicks(1,now); voiceWorld();}
   X.fillStyle=WHITE;
   X.beginPath();X.moveTo(sx3+tw*0.3,ty+th*0.24);X.lineTo(sx3+tw*0.6,ty+th*0.5);
   X.lineTo(sx3+tw*0.3,ty+th*0.76);X.closePath();X.fill();
@@ -3385,19 +3523,29 @@ function iconLoad(x,y,s){
   X.lineTo(x+s*0.88,y+s*0.82); X.closePath(); X.stroke();
 }
 function overlayPause(){
-  const hs=U*3, m=8*U, gap=5*U;
-  const labW=Math.max(textW("MUSIC",hs,2),textW("SFX",hs,2));
-  const sldW=Math.max(30*U,Math.min(80*U,W*0.26));
-  // every slot is the same size, wide enough for its caption and for the "?"
-  const is=Math.max(U*14,textW("copy",U,1)+3*U,btnW("?",U*2),btnH(U*2));
-  const iconsW=6*is+5*gap;
-  const btnsW=btnW("Exit",hs)+btnW("Resume",hs)+12*U;
-  const needW=Math.max(labW+gap+sldW,iconsW,btnsW)+2*m;
-  const needH=m+textH(hs)+gap+textH(hs)+gap*2+is+textH(U)+gap*2+btnH(hs)+m;
-    // shrink to fit the window height rather than running off the bottom
-  const u=Math.max(1,Math.min(U,Math.floor(U*(H-8*U)/Math.max(1,needH))));
-  const _k=u/U;
-const p=panelRect(needW*_k,needH*_k);
+  /* Everything is measured and drawn at the same unit. It used to measure at
+     full size, shrink the panel to fit the window, then draw the contents at
+     full size anyway -- so on a short or narrow window the panel got smaller
+     while its contents did not, and they spilled out of it. */
+  const fit=u=>{
+    const hs=u*3, m=8*u, gap=5*u;
+    const labW=Math.max(textW("MUSIC",hs,2),textW("SFX",hs,2));
+    const sldW=Math.max(24*u,Math.min(80*u,W*0.26));
+    const is=Math.max(u*14,textW("copy",u,1)+3*u,btnW("?",u*2),btnH(u*2));
+    const capH=Math.max(textH(u*2)+4*u,btnH(u));
+    const capW=Math.max(textW("DESCRIPTION",u,1),textW("NAME",u,1))+4*u;
+    const needW=Math.max(labW+gap+sldW,6*is+5*gap,
+                         btnW("Exit",hs)+btnW("Resume",hs)+12*u,
+                         capW+40*u)+2*m;
+      const needH=m+textH(hs)+gap+textH(hs)+gap*2+2*capH+2*u+gap
+                 +(mode==="level"?textH(u)+2*u:0)
+                 +is+textH(u)+gap*2+btnH(hs)+m;
+    return {u,hs,m,gap,labW,sldW,is,capH,capW,needW,needH};
+  };
+  let g=fit(U);
+  while(g.u>1&&(g.needH>H-8*U||g.needW>W-8*U)) g=fit(g.u-1);
+  const {u,hs,m,gap,sldW,is,capH,capW}=g;
+  const p=panelRect(g.needW,g.needH);
   let y=p.y+m;
   const sx=p.x+p.w-m-sldW;
   text("MUSIC",p.x+m,y,hs,WHITE,"left",2);
@@ -3406,41 +3554,47 @@ const p=panelRect(needW*_k,needH*_k);
   text("SFX",p.x+m,y,hs,WHITE,"left",2);
   S.sfxVol=uiSlider("ps",sx,y+textH(hs)/2,sldW,S.sfxVol);
   y+=textH(hs)+gap*2;
+  // The level's name and description arrive with the code. Click one and type.
+  textFit("NAME",p.x+m,y+(capH-textH(u))/2,capW,textH(u),DIM,"left",1,u);
+  if(mode==="level") readOnlyField(levelName||"untitled",p.x+m+capW,y,p.w-2*m-capW,capH,u,WHITE,u*2);
+  else textField("lname",p.x+m+capW,y,p.w-2*m-capW,capH,"untitled",u);
+  y+=capH+2*u;
+  textFit("DESCRIPTION",p.x+m,y+(capH-textH(u))/2,capW,textH(u),DIM,"left",1,u);
+  if(mode==="level") readOnlyField(levelDesc||"none",p.x+m+capW,y,p.w-2*m-capW,capH,u,"#8f8f8f",u);
+  else textField("ldesc",p.x+m+capW,y,p.w-2*m-capW,capH,"none",u);
+  y+=capH+gap;
+  if(mode==="level")
+    textFit("a loaded level keeps its own name and description",
+            p.x+m,y,p.w-2*m,textH(u),"#444","left",1,u), y+=textH(u)+2*u;
+
   let ix=p.x+m;
+  const slot=(draw,cap,act)=>{
+    if(uiBtn(ix,y,is,is,"",1)) act();
+    draw(ix,y,is);
+    textFit(cap,ix,y+is+u,is,textH(u),"#222","center",1,u);
+    ix+=is+gap;
+  };
   // stays inside the sandbox -- opens a popup rather than navigating away
-  if(uiBtn(ix,y,is,is,"",1)) openModal("help");
-  textFit("?",ix,y,is,is,WHITE,"center",1,u*2);
-  textFit("help",ix,y+is+u,is,textH(u),"#222","center",1,u);
-  ix+=is+gap;
-  if(uiBtn(ix,y,is,is,"",1)) openModal("settings");
-  iconCog(ix,y,is); textFit("opts",ix,y+is+u,is,textH(u),"#222","center",1,u);
-  ix+=is+gap;
-  if(uiBtn(ix,y,is,is,"",1))
-    copyText(exportV3(initialWorld(),initialMask(),levelName)).then(ok=>
+  slot((x,y2,s)=>textFit("?",x,y2,s,s,WHITE,"center",1,u*2),"help",()=>openModal("help"));
+  slot(iconCog,"opts",()=>openModal("settings"));
+  slot(iconCopy,"copy",()=>
+    copyText(exportV3(initialWorld(),initialMask(),levelName,levelDesc)).then(ok=>
       say(ok?(started?"copied the initial state, not the run":"level code copied to clipboard")
-            :"could not copy - clipboard blocked",!ok));
-  iconCopy(ix,y,is); textFit("copy",ix,y+is+u,is,textH(u),"#222","center",1,u);
-  ix+=is+gap;
-  if(uiBtn(ix,y,is,is,"",1)){
-    if(storageBlocked()){ say(NO_STORE,true); }
-    else{
+            :"could not copy - clipboard blocked",!ok)));
+  const saveX=ix;
+  slot(iconSave,"save",()=>{
+    if(storageBlocked()){ say(NO_STORE,true); return; }
     const nm=prompt("Name your creation:",levelName||"untitled");
-    if(nm){ const err=cookieSave(nm,exportV3(initialWorld(),initialMask(),nm));
+    if(nm){ const err=cookieSave(nm,exportV3(initialWorld(),initialMask(),nm,levelDesc));
       if(err) say(err,true);
       else { levelName=nm; say('saved "'+nm+'"'+(started?" (initial state)":"")); } }
-    }
-  }
-  iconSave(ix,y,is);
-  if(storageBlocked()){ X.fillStyle="rgba(0,0,0,.55)"; X.fillRect(ix,y,is,is); } textFit("save",ix,y+is+u,is,textH(u),"#222","center",1,u);
-  ix+=is+gap;
-  if(uiBtn(ix,y,is,is,"",1)) openModal("load");
-  iconLoad(ix,y,is); textFit("load",ix,y+is+u,is,textH(u),"#222","center",1,u);
-  ix+=is+gap;
-  if(uiBtn(ix,y,is,is,"",1)){
+  });
+  if(storageBlocked()){ X.fillStyle="rgba(0,0,0,.55)"; X.fillRect(saveX,y,is,is); }
+  slot(iconLoad,"load",()=>openModal("load"));
+  slot(iconWorld,"size",()=>{
     fieldW=String(world?world.W:28); fieldH=String(world?world.H:18);
     focusField=null; openModal("world");
-  }
-  iconWorld(ix,y,is); textFit("size",ix,y+is+u,is,textH(u),"#222","center",1,u);
+  });
   const by=p.y+p.h-m-btnH(hs);
   if(uiBtn(p.x+m,by,0,0,"Exit",hs)) openModal("exit");
   if(uiBtn(p.x+p.w-m-btnW("Resume",hs),by,0,0,"Resume",hs)) paused=false;
@@ -3464,8 +3618,8 @@ function overlayExitConfirm(){
   textFit(q,p.x+m,p.y+m,p.w-2*m,textH(u*2),YELLOW,"center",1,u*2);
   textFit(sub,p.x+m,p.y+m+textH(u*2)+3*u,p.w-2*m,textH(u),YELLOW,"center",1,u);
   const by=p.y+p.h-m-btnH(u*2);
-  if(uiBtn(p.x+m,by,0,0,"STAY",u*2,YELLOW)){ modal=null; consumeClick(); }
-  if(uiBtn(p.x+p.w-m-btnW("EXIT",u*2),by,0,0,"EXIT",u*2,YELLOW)){
+  if(uiBtn(p.x+p.w-m-btnW("STAY",u*2),by,0,0,"STAY",u*2,YELLOW)){ modal=null; consumeClick(); }
+  if(uiBtn(p.x+m,by,0,0,"EXIT",u*2,YELLOW)){
     modal=null; paused=false; won=false; nav("title");
   }
 }
@@ -3514,10 +3668,17 @@ function iconFill(x,y,s){
 // and a highlight when it is what the weight box is pointed at.
 function fillTile(x,y,ts,t,rot,on,lab){
   X.fillStyle=on?"#1d3448":"#111"; X.fillRect(x,y,ts,ts);
-  if(t<0){
+  if(t===-2){
+    // the plus that marks where a level lets you build
+    const th=Math.max(2,ts*0.11), cx=x+ts/2, cy=y+ts*0.38, arm=ts*0.20;
+    X.fillStyle="#3fa63f";
+    X.fillRect(cx-arm,cy-th/2,arm*2,th);
+    X.fillRect(cx-th/2,cy-arm,th,arm*2);
+    textFit("PLACE",x,y+ts*0.62,ts,textH(U),DIM,"center",1,U);
+  }else if(t<0){
     X.strokeStyle="#555"; X.lineWidth=Math.max(1,U);
     X.strokeRect(x+ts*0.26+U/2,y+ts*0.16+U/2,ts*0.48-U,ts*0.40-U);
-    textFit("EMPTY",x,y+ts*0.60,ts,textH(U),DIM,"center",1,U);
+    textFit("AIR",x,y+ts*0.60,ts,textH(U),DIM,"center",1,U);
   }else{
     const isz=Math.round(ts*0.78);
     X.drawImage(spriteFor(t,rot,isz),x+(ts-isz)/2,y+(ts-isz)/2*0.8,isz,isz);
@@ -3540,17 +3701,20 @@ function overlayFill(){
   const hasRots=cur!==null&&cur>=0&&nrots(cur)>1;
   const ctlH=Math.max(btnH(hs),textH(hs)+4*U);
   let ts=Math.max(12*U,Math.min(26*U,(W*0.86-2*m-(cols-1)*gap)/cols));
+  const swH=Math.max(toggleH(),textH(U))+4*U;
   const needH=()=>m+head+4*U+textH(U)+3*U+rows*(ts+gap)
-                 +(cur!==null?ctlH+6*U:0)+btnH(hs)+m;
+                 +(cur!==null?ctlH+6*U:0)+2*swH+6*U+btnH(hs)+m;
   for(let i=0;i<30&&needH()>H-8*U&&ts>7*U;i++) ts-=U;
   const pw=Math.max(2*m+cols*ts+(cols-1)*gap,
                     2*m+textW("FILL SELECTION",hs,2)+16*U,
-                    2*m+textW("MOVER",U,1)+70*U+btnW("FACINGS",hs)+16*U);
+                    2*m+textW("MOVER",U,1)+70*U+btnW("FACINGS",hs)+16*U,
+                    2*m+btnW("FILL",hs)+btnW("CLEAR",hs)+btnW("CANCEL",hs)+14*U,
+                    2*m+textW("Overwrite cells",U,1)+(touchUsed?Math.round(toggleH()*2):16*U)+10*U);
   const p=panelRect(pw,needH());
   textFit("FILL SELECTION",p.x+m,p.y+m,p.w-2*m-14*U,head,WHITE,"left",2,hs);
-  if(closeBtn(p,U)) modal=null;
+  if(closeBtn(p,U)){ fillRestore(); modal=null; }
   let y=p.y+m+head+4*U;
-  textFit(picked.length?"click a cell to drop it - the numbers are its share of the fill"
+  textFit(picked.length?"right click removes - middle click opens facings"
                        :"click the cells you want scattered over the selection",
           p.x+m,y,p.w-2*m,textH(U),DIM,"left",1,U);
   y+=textH(U)+3*U;
@@ -3561,7 +3725,19 @@ function overlayFill(){
     const cx=gx+(i%cols)*(ts+gap), cy=y+Math.floor(i/cols)*(ts+gap);
     const w=fillW[t]|0;
     const rot=(t>=0&&nrots(t)>1)?topRot(t):0;
-    if(fillTile(cx,cy,ts,t,rot,fillPick===t&&w>0,w>0?fillPctOf(t)+"%":"")){
+    const lab=w>0?fillPctOf(t)+"%":"";
+    const hit=fillTile(cx,cy,ts,t,rot,fillPick===t&&w>0,lab);
+    if(hitR(cx,cy,ts,ts)){                    // right: take it out of the mix
+      delete fillW[t];
+      for(let r=0;r<4;r++) delete fillRW[t+":"+r];
+      if(fillPick===t) fillPick=null;
+      consumeClick();
+    } else if(hitM(cx,cy,ts,ts)){             // middle: straight to its facings
+      if(!w) fillW[t]=50;
+      fillPick=t;
+      if(t>=0&&nrots(t)>1){ fillRotPick=0; rotSnapshot(t); openModal("fillrot"); }
+      consumeClick();
+    } else if(hit){                           // left: add it, or pick it up again
       if(w>0&&fillPick===t){ delete fillW[t];
         for(let r=0;r<4;r++) delete fillRW[t+":"+r];
         fillPick=null;
@@ -3573,32 +3749,50 @@ function overlayFill(){
 
   // --- one control for the highlighted cell, plus the way into its facings
   if(cur!==null){
-    const nm=(cur<0?"EMPTY":(NAMES[cur]||"CELL")).toUpperCase();
+    const nm=(cur===-2?"PLACEABLE":cur<0?"AIR":(NAMES[cur]||"CELL")).toUpperCase();
     const nw=textW(nm,U,1);
     textFit(nm,p.x+m,y+(ctlH-textH(U))/2,nw,textH(U),WHITE,"left",1,U);
     const fbW=hasRots?btnW("FACINGS",hs)+6*U:0;
     const sx=p.x+m+nw+8*U;
-    const pctW=textW("100%",U,1)+4*U;
+    const pctW=textW("99999  100%",U,1)+4*U;
     const sw=Math.max(24*U,p.x+p.w-m-fbW-pctW-sx-6*U);
-    const v=uiSlider("fw",sx,y+ctlH/2,sw,(fillW[cur]-1)/99);
-    fillW[cur]=Math.max(1,Math.round(v*99)+1);
-    textFit(fillPctOf(cur)+"%",sx+sw+4*U,y+(ctlH-textH(U))/2,pctW,textH(U),"#6ec6ff","left",1,U);
+    fillCap=growCap(fillCap,fillW[cur],false);
+    const v=uiSlider("fw",sx,y+ctlH/2,sw,Math.min(1,(fillW[cur]-1)/(fillCap-1)));
+    fillW[cur]=Math.max(1,Math.round(v*(fillCap-1))+1);
+    fillCap=growCap(fillCap,fillW[cur],v>=0.999);
+    // the raw weight as well as the share, since the weight is now unbounded
+    textFit(fillW[cur]+"  "+fillPctOf(cur)+"%",sx+sw+4*U,y+(ctlH-textH(U))/2,
+            pctW,textH(U),"#6ec6ff","left",1,U);
     if(hasRots&&uiBtn(p.x+p.w-m-btnW("FACINGS",hs),y,0,0,"FACINGS",hs)){
-      fillRotPick=0; openModal("fillrot");
+      fillRotPick=0; rotSnapshot(cur); openModal("fillrot");
     }
     y+=ctlH+6*U;
   }
 
+  // What may be written over. Both on by default, which is how it behaved
+  // before there was a choice.
+  const swx=p.x+p.w-m-(touchUsed?Math.round(toggleH()*2):16*U);
+  textFit("Overwrite air",p.x+m,y+(swH-textH(U))/2,swx-p.x-m-4*U,textH(U),WHITE,"left",1,U);
+  fillOverAir=uiToggleAt(swx,y+swH/2,fillOverAir);
+  y+=swH;
+  textFit("Overwrite cells",p.x+m,y+(swH-textH(U))/2,swx-p.x-m-4*U,textH(U),WHITE,"left",1,U);
+  fillOverCells=uiToggleAt(swx,y+swH/2,fillOverCells);
+  y+=swH+6*U;
+
   const by=p.y+p.h-m-btnH(hs);
-  if(uiBtn(p.x+m,by,0,0,"CLEAR",hs)){
+  if(uiBtn(p.x+m,by,0,0,"FILL",hs)){
+    if(!picked.length) say("click at least one cell first",true);
+    else { fillSelection(); modal=null; }
+  }
+  const cw2=btnW("CANCEL",hs);
+  if(uiBtn(p.x+p.w-m-cw2,by,0,0,"CANCEL",hs)){ fillRestore(); modal=null; }
+  // CLEAR is not apply and not cancel, so it sits between them
+  const clw=btnW("CLEAR",hs);
+  const cmid=p.x+p.w-m-cw2-6*U-clw;
+  if(cmid>p.x+m+btnW("FILL",hs)+6*U&&uiBtn(cmid,by,0,0,"CLEAR",hs)){
     for(const k of Object.keys(fillW)) delete fillW[k];
     for(const k of Object.keys(fillRW)) delete fillRW[k];
     fillPick=null;
-  }
-  const okw=btnW("FILL",hs);
-  if(uiBtn(p.x+p.w-m-okw,by,0,0,"FILL",hs)){
-    if(!picked.length) say("click at least one cell first",true);
-    else { fillSelection(); modal=null; }
   }
 }
 // The facings of one cell type, behind their own button so the main panel
@@ -3616,11 +3810,12 @@ function overlayFillRot(){
   const p=panelRect(pw,Math.min(needH,H-8*U));
   textFit("FACINGS OF "+((NAMES[t]||"CELL").toUpperCase()),
           p.x+m,p.y+m,p.w-2*m-14*U,head,WHITE,"left",2,hs);
-  if(closeBtn(p,U)) modal="fill";           // back to the fill panel, not the board
+  if(closeBtn(p,U)){ rotRestore(t); modal="fill"; }   // back to the panel, not the board
   let y=p.y+m+head+4*U;
-  textFit("how often each direction comes up",p.x+m,y,p.w-2*m,textH(U),DIM,"left",1,U);
+  textFit("right click zeroes a direction - middle click keeps only that one",
+          p.x+m,y,p.w-2*m,textH(U),DIM,"left",1,U);
   y+=textH(U)+3*U;
-  const pctW=textW("100%",U,1)+4*U;
+  const pctW=textW("99999  100%",U,1)+4*U;
   for(let r=0;r<n;r++){
     const rh=Math.max(ts,rowH);
     const isz=Math.round(ts*0.78);
@@ -3630,19 +3825,31 @@ function overlayFillRot(){
     X.strokeRect(p.x+m+U/2,y+U/2,ts-U,ts-U);
     const sx=p.x+m+ts+6*U;
     const sw=Math.max(24*U,p.x+p.w-m-pctW-6*U-sx);
-    const v=uiSlider("fr"+r,sx,y+rh/2,sw,rotWeight(t,r)/100);
-    fillRW[t+":"+r]=Math.round(v*100);
-    textFit(rotPctOf(t,r)+"%",sx+sw+4*U,y+(rh-textH(U))/2,pctW,textH(U),"#6ec6ff","left",1,U);
+    rotCap=growCap(rotCap,rotWeight(t,r),false);
+    const v=uiSlider("fr"+r,sx,y+rh/2,sw,Math.min(1,rotWeight(t,r)/rotCap));
+    fillRW[t+":"+r]=Math.round(v*rotCap);
+    rotCap=growCap(rotCap,rotWeight(t,r),v>=0.999);
+    textFit(rotWeight(t,r)+"  "+rotPctOf(t,r)+"%",sx+sw+4*U,y+(rh-textH(U))/2,
+            pctW,textH(U),"#6ec6ff","left",1,U);
+    // the row answers all three buttons, tile and slider alike
+    if(hitR(p.x+m,y,p.w-2*m,rh)){ fillRW[t+":"+r]=0; consumeClick(); }
+    else if(hitM(p.x+m,y,p.w-2*m,rh)){
+      for(let q=0;q<n;q++) fillRW[t+":"+q]=(q===r?100:0);
+      consumeClick();
+    }
     y+=rh+gap;
   }
   const by=p.y+p.h-m-btnH(hs);
-  if(uiBtn(p.x+m,by,0,0,"EVEN",hs)) for(let r=0;r<n;r++) fillRW[t+":"+r]=50;
-  const dw=btnW("DONE",hs);
-  if(uiBtn(p.x+p.w-m-dw,by,0,0,"DONE",hs)){
+  if(uiBtn(p.x+m,by,0,0,"DONE",hs)){
     let tot=0; for(let r=0;r<n;r++) tot+=rotWeight(t,r);
     if(tot<=0) for(let r=0;r<n;r++) fillRW[t+":"+r]=50;   // never leave it unfillable
     modal="fill";
   }
+  const cw3=btnW("CANCEL",hs);
+  if(uiBtn(p.x+p.w-m-cw3,by,0,0,"CANCEL",hs)){ rotRestore(t); modal="fill"; }
+  const ew=btnW("EVEN",hs), emid=p.x+p.w-m-cw3-6*U-ew;
+  if(emid>p.x+m+btnW("DONE",hs)+6*U&&uiBtn(emid,by,0,0,"EVEN",hs))
+    for(let r=0;r<n;r++) fillRW[t+":"+r]=50;
 }
 // The facing a tile should show: whichever one is most likely.
 function topRot(t){
@@ -3705,12 +3912,19 @@ function editField(key,label){
   if(f.numeric) v=v.replace(/[^0-9]/g,"");
   f.set(v.slice(0,f.max||24));
 }
+const FIELD_LABEL={w:"Width",h:"Height",lname:"Level name",ldesc:"Level description",
+                   fillw:"Weight",loadq:"Search",schemq:"Search"};
 const FIELD={
   w:{get:()=>fieldW,set:v=>fieldW=v,numeric:true,max:4},
   h:{get:()=>fieldH,set:v=>fieldH=v,numeric:true,max:4},
   loadq:{get:()=>loadQuery,set:v=>{loadQuery=v;loadScroll=0;},max:24},
   schemq:{get:()=>schemQuery,set:v=>{schemQuery=v;schemScroll=0;},max:24},
   fillw:{get:()=>fillBox,set:v=>fillBox=v,numeric:true,max:4},
+  // A loaded level owns its own title text, so the setters refuse in level
+  // mode as well as the boxes being hidden -- a focus left over from before
+  // the level was loaded would otherwise still type into it.
+  lname:{get:()=>levelName,set:v=>{ if(mode!=="level") levelName=v.replace(/;/g,","); },max:48},
+  ldesc:{get:()=>levelDesc,set:v=>{ if(mode!=="level") levelDesc=v.replace(/;/g,","); },max:200},
 };
 // One box, drawn and focused the same way wherever it appears.
 // Wheel over a list scrolls it, and the wheel is consumed so it cannot also
@@ -3728,6 +3942,15 @@ function scrollBar(x,y,w,h,off,rows,visible){
   const ty=y+(h-th)*(off/Math.max(1,rows-visible));
   X.fillStyle="#bbb"; X.fillRect(x,ty,w,th);
 }
+// Looks like the box beside it but flatter and greyed, so it reads as fixed
+// rather than as a field you have failed to focus.
+function readOnlyField(val,x,y,w,h,u,ink,sc){
+  u=u||U;
+  X.fillStyle="#141414"; X.fillRect(x,y,w,h);
+  X.strokeStyle="#3a3a3a"; X.lineWidth=Math.max(1,u);
+  X.strokeRect(x+u/2,y+u/2,w-u,h-u);
+  textFitMid(val,x+3*u,y,w-6*u,h,ink||"#8f8f8f","left",1,sc||u*2);
+}
 function textField(id,x,y,w,h,placeholder,u){
   u=u||U;
   reserve(x,y,w,h);
@@ -3736,12 +3959,18 @@ function textField(id,x,y,w,h,placeholder,u){
   X.strokeStyle=on?"#6ec6ff":WHITE; X.lineWidth=Math.max(1,u);
   X.strokeRect(x+u/2,y+u/2,w-u,h-u);
   const shown=val||(on?"":placeholder||"");
-  textFit(shown,x+3*u,y,w-6*u,h,val?(on?"#6ec6ff":WHITE):"#555","left",1,u*2);
+  // While it has focus the tail is what you are typing, so keep that visible;
+  // otherwise show both ends.
+  const put=on?clipText:clipMid;
+  const sc2=fitScale(shown,w-6*u,h,1,u*2);
+  text(on?tailOf(shown,w-6*u,sc2,1):put(shown,w-6*u,sc2,1),
+       x+3*u,y+Math.max(0,Math.round((h-textH(sc2))/2)),sc2,
+       val?(on?"#6ec6ff":WHITE):"#555","left",1);
   if(on&&(Math.floor(now/450)&1)){
     const tw=Math.min(w-6*u,textW(val,u*2,1));
     X.fillStyle="#6ec6ff"; X.fillRect(x+3*u+tw+u,y+3*u,Math.max(1,u),h-6*u);
   }
-  if(hot&&M.click){ editField(id,"Search"); sfx("click"); consumeClick(); }
+  if(hot&&M.click){ editField(id,FIELD_LABEL[id]||"Search"); sfx("click"); consumeClick(); }
   return hot;
 }
 function resizeWorld(nw,nh,anchor){
@@ -3821,8 +4050,8 @@ function overlayWorld(){
   }
   const by=p.y+p.h-m-btnH(HS);
   // Cancel on the left, apply on the right.
-  if(uiBtn(p.x+m,by,0,0,"CANCEL",HS)){ focusField=null; modal=null; }
-  if(uiBtn(p.x+p.w-m-btnW("APPLY",HS),by,0,0,"APPLY",HS)){
+  if(uiBtn(p.x+p.w-m-btnW("CANCEL",HS),by,0,0,"CANCEL",HS)){ focusField=null; modal=null; }
+  if(uiBtn(p.x+m,by,0,0,"APPLY",HS)){
     // 9999 x 9999 is 100 million cells -- around 270 MB of engine state, which
     // is heavy but real. Anything past the 32-bit index ceiling is refused by
     // the World constructor rather than silently corrupting.
@@ -4007,6 +4236,7 @@ function loop(t){
       }
     }
     if(n) tickCount+=n;
+    noteTicks(n,t);
     voiceWorld(); checkWin();
   }
 
@@ -4040,7 +4270,7 @@ function loop(t){
     X.strokeStyle="#555"; X.lineWidth=1; X.strokeRect(x+.5,y+.5,w-1,h-1);
     textFit(toast,x+4*U,y+2*U,w-8*U,textH(U),WHITE,"center",1,U);
   }
-  M.click=false; M.rclick=false; M.wheel=0; M.pdx=M.pdy=0;
+  M.click=false; M.rclick=false; M.mclick=false; M.wheel=0; M.pdx=M.pdy=0;
   if(tapRelease&&!M.click){ M.down=false; M.pressUI=false; tapRelease=false; }
   if(liftAt>=0&&--liftAt<0&&!tapRelease){ M.x=-9e9; M.y=-9e9; }
   requestAnimationFrame(loop);

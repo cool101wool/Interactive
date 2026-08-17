@@ -87,8 +87,8 @@ INK = (14, 14, 14)
 PALE = (240, 237, 218)
 PAD = 60
 TITLE_H = 68
-PRESET_COLORS = ["#0e0e0e", "#1f3a93", "#9e1b1b", "#1f6b2e", "#5b4636", "#ffffff"]
-PRESET_NAMES = ["Ink", "Blue", "Red", "Green", "Sepia", "White"]
+PRESET_COLORS = ["#0e0e0e", "#1f3a93", "#9e1b1b", "#1f6b2e", "#5b4636", "#f2c200", "#ffffff"]
+PRESET_NAMES = ["Ink", "Blue", "Red", "Green", "Sepia", "Yellow", "White"]
 
 
 def hex_to_rgb(h):
@@ -110,6 +110,98 @@ def _dashed_seg(draw, x0, y0, x1, y1, fill=INK, dash=(7, 4)):
             draw.line([(round(x0 + ux * pos), round(y0 + uy * pos)),
                        (round(x0 + ux * end), round(y0 + uy * end))], fill=fill, width=1)
         pos, on = end, not on
+
+
+def curved_block_arrow(path, shaft_w):
+    """Thick block arrow that follows a curved path. Returns outline points."""
+    if len(path) < 2:
+        return []
+    # cumulative arc length
+    seg = [0.0]
+    for i in range(1, len(path)):
+        seg.append(seg[-1] + math.hypot(path[i][0] - path[i - 1][0],
+                                        path[i][1] - path[i - 1][1]))
+    total = seg[-1]
+    if total < 1:
+        return []
+    hw = shaft_w * 2.0
+    hl = min(total * 0.55, hw * 1.1)
+    cut = total - hl                      # arc-length where the head begins
+
+    def at(dist):
+        """Point + unit tangent at a given arc length."""
+        dist = max(0.0, min(total, dist))
+        for i in range(1, len(seg)):
+            if seg[i] >= dist:
+                t = (dist - seg[i - 1]) / max(1e-6, seg[i] - seg[i - 1])
+                x = path[i - 1][0] + (path[i][0] - path[i - 1][0]) * t
+                y = path[i - 1][1] + (path[i][1] - path[i - 1][1]) * t
+                dx, dy = path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1]
+                L = math.hypot(dx, dy) or 1.0
+                return (x, y), (dx / L, dy / L)
+        return path[-1], (1.0, 0.0)
+
+    # sample the shaft up to the head base
+    steps = max(2, int(cut / 6))
+    left, right = [], []
+    for k in range(steps + 1):
+        d = cut * k / steps
+        (px, py), (ux, uy) = at(d)
+        nx, ny = -uy, ux
+        left.append((px + nx * shaft_w / 2, py + ny * shaft_w / 2))
+        right.append((px - nx * shaft_w / 2, py - ny * shaft_w / 2))
+
+    (bx, by), (ux, uy) = at(cut)
+    nx, ny = -uy, ux
+    tip = path[-1]
+    return (left
+            + [(bx + nx * hw / 2, by + ny * hw / 2), tip, (bx - nx * hw / 2, by - ny * hw / 2)]
+            + right[::-1])
+
+
+def block_arrow_polygon(x0, y0, x1, y1, shaft_w):
+    """Return the outline points of a thick block arrow from start to tip."""
+    dx, dy = x1 - x0, y1 - y0
+    L = math.hypot(dx, dy)
+    if L < 1:
+        return []
+    ux, uy = dx / L, dy / L
+    px, py = -uy, ux
+    hw = shaft_w * 2.0                      # head width
+    hl = min(L * 0.55, hw * 1.1)            # head length
+    sw2, hw2 = shaft_w / 2, hw / 2
+    bx, by = x1 - ux * hl, y1 - uy * hl     # head base
+    return [
+        (x0 + px * sw2, y0 + py * sw2),
+        (bx + px * sw2, by + py * sw2),
+        (bx + px * hw2, by + py * hw2),
+        (x1, y1),
+        (bx - px * hw2, by - py * hw2),
+        (bx - px * sw2, by - py * sw2),
+        (x0 - px * sw2, y0 - py * sw2),
+    ]
+
+
+def catmull_rom_spline(pts, samples_per_seg=16):
+    """Smooth curve passing through all pts (Catmull-Rom). Needs >=3 pts."""
+    if len(pts) < 3:
+        return list(pts)
+    ext = [pts[0]] + list(pts) + [pts[-1]]
+    out = []
+    for i in range(len(pts) - 1):
+        p0, p1, p2, p3 = ext[i], ext[i + 1], ext[i + 2], ext[i + 3]
+        for sidx in range(samples_per_seg):
+            t = sidx / samples_per_seg
+            t2, t3 = t * t, t * t * t
+            x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t +
+                       (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+                       (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+            y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t +
+                       (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+                       (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+            out.append((x, y))
+    out.append(pts[-1])
+    return out
 
 
 def _poly(draw, pts, fill=INK, dashed=False, width=1):
@@ -144,28 +236,34 @@ def _nearest_edge(cx, cy, hw, hh, target):
     return min(edges, key=lambda p: math.hypot(p[0] - target[0], p[1] - target[1]))
 
 
-def render_patent(img, labels, boxes=None, connectors=None, fig_num=1, title="",
+def render_patent(img, labels, boxes=None, connectors=None, arrows=None, fig_num=1, title="",
                   grayscale=False, grade_strength=0.55, font_scale=1.0,
-                  dashed=True, arrow=False, border_style="double"):
+                  dashed=True, arrow=False, border_style="double",
+                  pre_graded=None, scale=1.0):
     boxes = boxes or []
     connectors = connectors or []
-    graded = patent_grade(img, grayscale=grayscale, strength=grade_strength)
+    arrows = arrows or []
+    graded = pre_graded if pre_graded is not None else \
+        patent_grade(img, grayscale=grayscale, strength=grade_strength)
     sw, sh = graded.size
-    cw, ch = sw + PAD * 2, sh + PAD * 2 + TITLE_H
+    pad = max(8, int(PAD * scale))
+    title_h = max(16, int(TITLE_H * scale))
+    cw, ch = sw + pad * 2, sh + pad * 2 + title_h
     canvas = Image.new("RGB", (cw, ch), (250, 247, 234))
-    canvas.paste(graded, (PAD, PAD))
+    canvas.paste(graded, (pad, pad))
     draw = ImageDraw.Draw(canvas)
 
-    f_ref = get_font(17 * font_scale, True)
-    f_lbl = get_font(14 * font_scale)
-    f_box = get_font(15 * font_scale, True)
-    f_fig = get_font(24, True)
-    f_ttl = get_font(19, True)
+    fs = font_scale * scale
+    f_ref = get_font(17 * fs, True)
+    f_lbl = get_font(14 * fs)
+    f_box = get_font(15 * fs, True)
+    f_fig = get_font(24 * scale, True)
+    f_ttl = get_font(19 * scale, True)
 
     # ── diagram block boxes ───────────────────────────────────────────────
     for b in boxes:
-        x0 = PAD + b["x"] * sw
-        y0 = PAD + b["y"] * sh
+        x0 = pad + b["x"] * sw
+        y0 = pad + b["y"] * sh
         w = max(8, b["w"] * sw)
         h = max(8, b["h"] * sh)
         draw.rectangle((x0, y0, x0 + w, y0 + h), fill=PALE, outline=INK, width=2)
@@ -180,25 +278,49 @@ def render_patent(img, labels, boxes=None, connectors=None, fig_num=1, title="",
     # ── connectors ────────────────────────────────────────────────────────
     for cn in connectors:
         col = hex_to_rgb(cn.get("color", "#0e0e0e"))
-        pts = [(PAD + p["x"] * sw, PAD + p["y"] * sh) for p in cn["pts"]]
+        pts = [(pad + p["x"] * sw, pad + p["y"] * sh) for p in cn["pts"]]
         if len(pts) < 2:
             continue
-        _poly(draw, pts, fill=col, dashed=cn.get("dashed", False))
+        draw_pts = catmull_rom_spline(pts) if cn.get("spline") and len(pts) >= 3 else pts
+        _poly(draw, draw_pts, fill=col, dashed=cn.get("dashed", False))
         if cn.get("arrow_end", True):
-            _arrowhead(draw, int(pts[-1][0]), int(pts[-1][1]),
-                       int(pts[-2][0]), int(pts[-2][1]), fill=col)
+            _arrowhead(draw, int(draw_pts[-1][0]), int(draw_pts[-1][1]),
+                       int(draw_pts[-2][0]), int(draw_pts[-2][1]), fill=col)
         if cn.get("arrow_start", False):
-            _arrowhead(draw, int(pts[0][0]), int(pts[0][1]),
-                       int(pts[1][0]), int(pts[1][1]), fill=col)
+            _arrowhead(draw, int(draw_pts[0][0]), int(draw_pts[0][1]),
+                       int(draw_pts[1][0]), int(draw_pts[1][1]), fill=col)
+
+    # ── translucent block / flow arrows ───────────────────────────────────
+    if arrows:
+        overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        od = ImageDraw.Draw(overlay)
+        for a in arrows:
+            r, g, b = hex_to_rgb(a.get("color", "#1f3a93"))
+            op = int(max(0.05, min(0.95, a.get("opacity", 0.45))) * 255)
+            shaft = a.get("width", 0.06) * min(sw, sh)
+            pts = [(pad + p["x"] * sw, pad + p["y"] * sh) for p in a["pts"]]
+            if len(pts) < 2:
+                continue
+            if len(pts) == 2:
+                poly = block_arrow_polygon(pts[0][0], pts[0][1], pts[1][0], pts[1][1], shaft)
+            else:
+                path = catmull_rom_spline(pts) if a.get("spline", True) else pts
+                poly = curved_block_arrow(path, shaft)
+            if not poly:
+                continue
+            od.polygon(poly, fill=(r, g, b, op),
+                       outline=(r, g, b, min(255, op + 90)))
+        canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(canvas)
 
     # ── reference-number callouts ─────────────────────────────────────────
     for lbl in labels:
-        ax = PAD + lbl["ax"] * sw
-        ay = PAD + lbl["ay"] * sh
-        lx = PAD + lbl["lx"] * sw
-        ly = PAD + lbl["ly"] * sh
+        ax = pad + lbl["ax"] * sw
+        ay = pad + lbl["ay"] * sh
+        lx = pad + lbl["lx"] * sw
+        ly = pad + lbl["ly"] * sh
         ref, text = lbl["ref"], lbl["text"]
-        wps = [(PAD + w["x"] * sw, PAD + w["y"] * sh) for w in lbl.get("waypoints", [])]
+        wps = [(pad + w["x"] * sw, pad + w["y"] * sh) for w in lbl.get("waypoints", [])]
         col = hex_to_rgb(lbl.get("color", "#0e0e0e"))
 
         rw, rh = _tsize(draw, ref, f_ref)
@@ -224,18 +346,20 @@ def render_patent(img, labels, boxes=None, connectors=None, fig_num=1, title="",
         draw.ellipse((ax - 4, ay - 4, ax + 4, ay + 4), fill=col)
 
     # ── frame + title ─────────────────────────────────────────────────────
-    m = 9
+    m = max(3, int(9 * scale))
+    bw2 = max(1, int(round(2 * scale)))
     if border_style in ("double", "single"):
-        draw.rectangle((m, m, cw - m, ch - m), outline=INK, width=2)
+        draw.rectangle((m, m, cw - m, ch - m), outline=INK, width=bw2)
     if border_style == "double":
-        draw.rectangle((m + 5, m + 5, cw - m - 5, ch - m - 5), outline=INK, width=1)
-    ty = ch - TITLE_H
+        draw.rectangle((m + 5 * scale, m + 5 * scale, cw - m - 5 * scale, ch - m - 5 * scale),
+                       outline=INK, width=1)
+    ty = ch - title_h
     if border_style != "none":
         draw.line([(m, ty), (cw - m, ty)], fill=INK, width=1)
-    draw.text((m + 20, ty + TITLE_H // 2 - 12), f"FIG. {fig_num}", font=f_fig, fill=INK)
+    draw.text((m + 20, ty + title_h // 2 - 12), f"FIG. {fig_num}", font=f_fig, fill=INK)
     if title:
         tw2, _ = _tsize(draw, title, f_ttl)
-        draw.text(((cw - tw2) // 2, ty + TITLE_H // 2 - 10), title, font=f_ttl, fill=INK)
+        draw.text(((cw - tw2) // 2, ty + title_h // 2 - 10), title, font=f_ttl, fill=INK)
     if border_style == "double":
         for cx, cy in [(m + 3, m + 3), (cw - m - 3, m + 3),
                        (m + 3, ch - m - 3), (cw - m - 3, ch - m - 3)]:
@@ -274,6 +398,7 @@ class PatentApp(tk.Tk):
         self.labels = []
         self.boxes = []
         self.connectors = []
+        self.arrows = []
         self.sel = None               # (kind, idx)  kind in label|box|conn
         self.placing = False
         self.drag = None
@@ -286,6 +411,8 @@ class PatentApp(tk.Tk):
         self._out_photo = None
         self._rendered = None
         self._dirty_job = None
+        self._grade_key = None
+        self._grade_img = None
 
         self._build_ui()
         self.bind("<Delete>", lambda e: self.delete_selected())
@@ -329,6 +456,8 @@ class PatentApp(tk.Tk):
                   ).pack(fill="x", padx=14, pady=(0, 3))
         self._btn(s, "→  ADD CONNECTOR", self.add_connector, GREEN, "#16301a"
                   ).pack(fill="x", padx=14, pady=(0, 3))
+        self._btn(s, "➤  ADD FLOW ARROW (thick)", self.add_flow_arrow, GREEN, "#16301a"
+                  ).pack(fill="x", padx=14, pady=(0, 3))
         self._btn(s, "①  ADD REF CALLOUT", self.start_placing, GREEN, "#16301a"
                   ).pack(fill="x", padx=14, pady=(0, 3))
         self.status = tk.Label(s, text="Drag handles to move. Double-click a\n"
@@ -353,8 +482,23 @@ class PatentApp(tk.Tk):
                   ).pack(side="left", fill="x", expand=True, padx=(0, 3))
         self._btn(cr, "END ARROW ↦", lambda: self.toggle_arrow("end"), "#bbb", "#2a2a2a"
                   ).pack(side="left", fill="x", expand=True, padx=(3, 0))
-        self._btn(s, "TOGGLE DASHED (line)", self.toggle_dashed_conn, "#bbb", "#2a2a2a"
-                  ).pack(fill="x", padx=14, pady=(3, 0))
+        lr = tk.Frame(s, bg=PANEL); lr.pack(fill="x", padx=14, pady=(3, 0))
+        self._btn(lr, "TOGGLE DASHED", self.toggle_dashed_conn, "#bbb", "#2a2a2a"
+                  ).pack(side="left", fill="x", expand=True, padx=(0, 3))
+        self._btn(lr, "TOGGLE SPLINE ﹋", self.toggle_spline, "#bbb", "#2a2a2a"
+                  ).pack(side="left", fill="x", expand=True, padx=(3, 0))
+
+        self._flabel(s, "FLOW ARROW (selected)")
+        tr = tk.Frame(s, bg=PANEL); tr.pack(fill="x", padx=14)
+        self._btn(tr, "− THINNER", lambda: self.arrow_size(-0.012), "#bbb", "#2a2a2a"
+                  ).pack(side="left", fill="x", expand=True, padx=(0, 3))
+        self._btn(tr, "＋ THICKER", lambda: self.arrow_size(0.012), "#bbb", "#2a2a2a"
+                  ).pack(side="left", fill="x", expand=True, padx=(3, 0))
+        opr = tk.Frame(s, bg=PANEL); opr.pack(fill="x", padx=14, pady=(3, 0))
+        self._btn(opr, "MORE SEE-THRU", lambda: self.arrow_opacity(-0.1), "#bbb", "#2a2a2a"
+                  ).pack(side="left", fill="x", expand=True, padx=(0, 3))
+        self._btn(opr, "MORE SOLID", lambda: self.arrow_opacity(0.1), "#bbb", "#2a2a2a"
+                  ).pack(side="left", fill="x", expand=True, padx=(3, 0))
 
         self._flabel(s, "PATH COLOR (selected line)")
         sw_row = tk.Frame(s, bg=PANEL); sw_row.pack(fill="x", padx=14, pady=(0, 2))
@@ -363,7 +507,7 @@ class PatentApp(tk.Tk):
             holder = tk.Frame(sw_row, bg=PANEL, highlightthickness=2,
                               highlightbackground=PANEL, cursor="hand2")
             holder.pack(side="left", padx=2)
-            chip = tk.Frame(holder, bg=hexc, width=30, height=22,
+            chip = tk.Frame(holder, bg=hexc, width=24, height=22,
                             highlightthickness=1, highlightbackground="#555", cursor="hand2")
             chip.pack_propagate(False); chip.pack()
             for w in (holder, chip):
@@ -475,7 +619,7 @@ class PatentApp(tk.Tk):
         self._reset_elements(); self.redraw_source(); self.render_now()
 
     def _reset_elements(self):
-        self.labels.clear(); self.boxes.clear(); self.connectors.clear()
+        self.labels.clear(); self.boxes.clear(); self.connectors.clear(); self.arrows.clear()
         self.sel = None; self.cancel_placing(); self._update_sel_label(); self._refresh_swatches()
 
     def save_png(self):
@@ -486,8 +630,10 @@ class PatentApp(tk.Tk):
                                             filetypes=[("PNG image", "*.png")])
         if not path:
             return
+        full = patent_grade(self.source_img, grayscale=self.gray_var.get(),
+                            strength=float(self.grade_var.get()))
         render_patent(self.source_img, self.labels, self.boxes, self.connectors,
-                      **self._opts()).save(path)
+                      self.arrows, pre_graded=full, scale=1.0, **self._opts()).save(path)
         messagebox.showinfo("Saved", f"Saved:\n{path}")
 
     # ── coords ──────────────────────────────────────────────────────────────
@@ -519,12 +665,35 @@ class PatentApp(tk.Tk):
         self.sel = ("box", len(self.boxes) - 1)
         self._after_change()
 
+    def add_flow_arrow(self):
+        if not self._require_canvas():
+            return
+        self.arrows.append({"pts": [{"x": 0.32, "y": 0.50}, {"x": 0.64, "y": 0.50}],
+                            "width": 0.06, "color": self.current_color,
+                            "opacity": 0.45, "spline": True})
+        self.sel = ("arrow", len(self.arrows) - 1)
+        self._after_change()
+
+    def arrow_size(self, d):
+        if not self.sel or self.sel[0] != "arrow":
+            messagebox.showinfo("Flow arrow", "Select a flow arrow first."); return
+        a = self.arrows[self.sel[1]]
+        a["width"] = max(0.02, min(0.22, a.get("width", 0.06) + d))
+        self._after_change()
+
+    def arrow_opacity(self, d):
+        if not self.sel or self.sel[0] != "arrow":
+            messagebox.showinfo("Flow arrow", "Select a flow arrow first."); return
+        a = self.arrows[self.sel[1]]
+        a["opacity"] = max(0.1, min(0.9, a.get("opacity", 0.45) + d))
+        self._after_change()
+
     def add_connector(self):
         if not self._require_canvas():
             return
         self.connectors.append({"pts": [{"x": 0.35, "y": 0.50}, {"x": 0.62, "y": 0.50}],
                                 "color": self.current_color, "arrow_start": False,
-                                "arrow_end": True, "dashed": False})
+                                "arrow_end": True, "dashed": False, "spline": False})
         self.sel = ("conn", len(self.connectors) - 1)
         self._after_change()
 
@@ -573,6 +742,11 @@ class PatentApp(tk.Tk):
             self.cancel_placing(); self._after_change()
             return
         self.drag = self._hit(event.x, event.y)
+        if self.drag and self.drag.get("kind") == "arrow" and self.drag.get("part") == "move":
+            a = self.arrows[self.drag["index"]]
+            gnx, gny = self.c2n(event.x, event.y)
+            self.drag.update(gx=gnx, gy=gny,
+                             orig=[(p["x"], p["y"]) for p in a["pts"]])
         self.sel = (self.drag["kind"], self.drag["index"]) if self.drag else None
         self._update_sel_label(); self._refresh_swatches(); self.update_overlays()
 
@@ -595,6 +769,15 @@ class PatentApp(tk.Tk):
                 px, py = self.n2c(p["x"], p["y"])
                 if (x - px) ** 2 + (y - py) ** 2 <= (WP_R + 5) ** 2:
                     return {"kind": "conn", "index": i, "part": "pt", "pt": j}
+        # flow arrows: points, then body move handle
+        for i, a in enumerate(self.arrows):
+            pts = [self.n2c(p["x"], p["y"]) for p in a["pts"]]
+            for j, (px, py) in enumerate(pts):
+                if (x - px) ** 2 + (y - py) ** 2 <= (HANDLE_R + 4) ** 2:
+                    return {"kind": "arrow", "index": i, "part": "pt", "pt": j}
+            mid = pts[len(pts) // 2]
+            if abs(x - mid[0]) <= 10 and abs(y - mid[1]) <= 10:
+                return {"kind": "arrow", "index": i, "part": "move"}
         # box resize corner, then body
         for i, b in enumerate(self.boxes):
             bx, by = self.n2c(b["x"], b["y"])
@@ -651,6 +834,22 @@ class PatentApp(tk.Tk):
             nx, ny = self.c2n(x, y)
             cn["pts"][j]["x"] = min(1.2, max(-0.2, nx))
             cn["pts"][j]["y"] = min(1.2, max(-0.2, ny))
+        elif d["kind"] == "arrow":
+            a = self.arrows[i]
+            if d["part"] == "pt":
+                j = d["pt"]
+                if self.snap_var.get():
+                    ref = a["pts"][j - 1] if j > 0 else (a["pts"][1] if len(a["pts"]) > 1 else None)
+                    if ref:
+                        x, y = snap45(*self.n2c(ref["x"], ref["y"]), x, y)
+                nx, ny = self.c2n(x, y)
+                a["pts"][j]["x"] = min(1.2, max(-0.2, nx))
+                a["pts"][j]["y"] = min(1.2, max(-0.2, ny))
+            else:
+                nx, ny = self.c2n(x, y)
+                dnx, dny = nx - d["gx"], ny - d["gy"]
+                for p, (ox, oy) in zip(a["pts"], d["orig"]):
+                    p["x"] = ox + dnx; p["y"] = oy + dny
         elif d["kind"] == "box":
             b = self.boxes[i]
             nx, ny = self.c2n(x, y)
@@ -659,7 +858,7 @@ class PatentApp(tk.Tk):
             else:
                 offx, offy = self.c2n(d["ox"] + self.dx, d["oy"] + self.dy)
                 b["x"] = nx - offx; b["y"] = ny - offy
-        self.update_overlays(); self.schedule_render()
+        self.update_overlays(); self.schedule_render(fast=True)
 
     def on_release(self, event):
         if self.drag:
@@ -677,6 +876,12 @@ class PatentApp(tk.Tk):
                 self.sel = ("box", i); self.rename_selected(); return
         # add bend to nearest connector or callout segment
         best = None; bestd = 16 ** 2
+        for i, a in enumerate(self.arrows):
+            pts = [self.n2c(p["x"], p["y"]) for p in a["pts"]]
+            for k in range(len(pts) - 1):
+                d2 = self._seg_dist2(event.x, event.y, pts[k], pts[k + 1])
+                if d2 < bestd:
+                    bestd = d2; best = ("arrow", i, k)
         for i, cn in enumerate(self.connectors):
             pts = [self.n2c(p["x"], p["y"]) for p in cn["pts"]]
             for k in range(len(pts) - 1):
@@ -696,6 +901,9 @@ class PatentApp(tk.Tk):
         if kind == "conn":
             self.connectors[i]["pts"].insert(k + 1, {"x": nx, "y": ny})
             self.sel = ("conn", i)
+        elif kind == "arrow":
+            self.arrows[i]["pts"].insert(k + 1, {"x": nx, "y": ny})
+            self.sel = ("arrow", i)
         else:
             self.labels[i].setdefault("waypoints", []).insert(k, {"x": nx, "y": ny})
             self.sel = ("label", i)
@@ -737,6 +945,11 @@ class PatentApp(tk.Tk):
         elif kind == "conn" and i < len(self.connectors):
             cn = self.connectors[i]
             self.sel_label.config(text=f"Connector ({len(cn['pts'])} pts)")
+        elif kind == "arrow" and i < len(self.arrows):
+            a = self.arrows[i]
+            crv = "curved" if (a.get("spline", True) and len(a["pts"]) >= 3) else "straight"
+            self.sel_label.config(
+                text=f"Flow arrow · {len(a['pts'])} pts · {crv}\nw={a['width']:.02f}  op={a['opacity']:.02f}")
         else:
             self.sel = None; self.sel_label.config(text="(none)")
 
@@ -768,7 +981,8 @@ class PatentApp(tk.Tk):
         if not self.sel:
             return
         kind, i = self.sel
-        arr = {"label": self.labels, "box": self.boxes, "conn": self.connectors}[kind]
+        arr = {"label": self.labels, "box": self.boxes,
+               "conn": self.connectors, "arrow": self.arrows}[kind]
         if 0 <= i < len(arr):
             arr.pop(i)
         self.sel = None; self._after_change()
@@ -777,13 +991,14 @@ class PatentApp(tk.Tk):
         if not self.sel:
             messagebox.showinfo("Select a line", "Select a connector or callout first."); return
         kind, i = self.sel
-        if kind == "conn":
-            pts = [self.n2c(p["x"], p["y"]) for p in self.connectors[i]["pts"]]
+        if kind in ("conn", "arrow"):
+            obj = self.connectors[i] if kind == "conn" else self.arrows[i]
+            pts = [self.n2c(p["x"], p["y"]) for p in obj["pts"]]
             k = max(range(len(pts) - 1),
                     key=lambda j: (pts[j + 1][0] - pts[j][0]) ** 2 + (pts[j + 1][1] - pts[j][1]) ** 2)
             mx, my = (pts[k][0] + pts[k + 1][0]) / 2, (pts[k][1] + pts[k + 1][1]) / 2
             nx, ny = self.c2n(mx, my)
-            self.connectors[i]["pts"].insert(k + 1, {"x": nx, "y": ny})
+            obj["pts"].insert(k + 1, {"x": nx, "y": ny})
         elif kind == "label":
             path = self.label_path_canvas(self.labels[i])
             k = max(range(len(path) - 1),
@@ -810,11 +1025,23 @@ class PatentApp(tk.Tk):
         cn["dashed"] = not cn.get("dashed", False)
         self._after_change()
 
+    def toggle_spline(self):
+        if not self.sel or self.sel[0] not in ("conn", "arrow"):
+            messagebox.showinfo("Spline", "Select a connector or flow arrow first."); return
+        kind, i = self.sel
+        obj = self.connectors[i] if kind == "conn" else self.arrows[i]
+        obj["spline"] = not obj.get("spline", kind == "arrow")
+        if obj["spline"] and len(obj["pts"]) < 3:
+            messagebox.showinfo("Spline", "Add at least one bend (double-click the line, or "
+                                          "use ADD BEND) so the curve has something to bend through.")
+        self._after_change()
+
     # ── color ─────────────────────────────────────────────────────────────
     def set_path_color(self, hexc):
         self.current_color = hexc
-        if self.sel and self.sel[0] in ("label", "conn"):
-            arr = self.labels if self.sel[0] == "label" else self.connectors
+        if self.sel and self.sel[0] in ("label", "conn", "arrow"):
+            arr = {"label": self.labels, "conn": self.connectors,
+                   "arrow": self.arrows}[self.sel[0]]
             if self.sel[1] < len(arr):
                 arr[self.sel[1]]["color"] = hexc
                 self.update_overlays(); self.render_now()
@@ -822,8 +1049,9 @@ class PatentApp(tk.Tk):
 
     def _refresh_swatches(self):
         active = self.current_color
-        if self.sel and self.sel[0] in ("label", "conn"):
-            arr = self.labels if self.sel[0] == "label" else self.connectors
+        if self.sel and self.sel[0] in ("label", "conn", "arrow"):
+            arr = {"label": self.labels, "conn": self.connectors,
+                   "arrow": self.arrows}[self.sel[0]]
             if self.sel[1] < len(arr):
                 active = arr[self.sel[1]].get("color", self.current_color)
         for b, hexc in zip(self._swatches, PRESET_COLORS):
@@ -841,13 +1069,47 @@ class PatentApp(tk.Tk):
         scale = min(cw / iw, ch / ih, 1.0)
         self.dw, self.dh = max(1, int(iw * scale)), max(1, int(ih * scale))
         self.dx = (cw - self.dw) // 2; self.dy = (ch - self.dh) // 2
-        disp = self.source_img.resize((self.dw, self.dh), Image.LANCZOS)
-        self._src_photo = ImageTk.PhotoImage(disp)
+        key = (id(self.source_img), self.dw, self.dh)
+        if getattr(self, "_src_key", None) != key:
+            disp = self.source_img.resize((self.dw, self.dh), Image.BILINEAR)
+            self._src_photo = ImageTk.PhotoImage(disp)
+            self._src_key = key
         self.src_canvas.create_image(self.dx, self.dy, anchor="nw", image=self._src_photo, tags="img")
         self.update_overlays()
 
     def update_overlays(self):
         c = self.src_canvas; c.delete("ov")
+        # flow arrows (drawn first, underneath handles)
+        for i, a in enumerate(self.arrows):
+            on = (self.sel == ("arrow", i))
+            base = a.get("color", "#1f3a93")
+            col = base if base != "#0e0e0e" else "#cfcfcf"
+            pts = [self.n2c(p["x"], p["y"]) for p in a["pts"]]
+            shaft = a.get("width", 0.06) * min(self.dw, self.dh)
+            if len(pts) == 2:
+                poly = block_arrow_polygon(pts[0][0], pts[0][1], pts[1][0], pts[1][1], shaft)
+            else:
+                path = catmull_rom_spline(pts) if a.get("spline", True) else pts
+                poly = curved_block_arrow(path, shaft)
+            if poly:
+                flat = [v for p in poly for v in p]
+                c.create_polygon(*flat, fill=col, stipple="gray50",
+                                 outline=ACCENT if on else col,
+                                 width=2 if on else 1, tags="ov")
+            for j, (px, py) in enumerate(pts):
+                ends = (j == 0 or j == len(pts) - 1)
+                r = HANDLE_R if ends else WP_R
+                if ends:
+                    c.create_oval(px - r, py - r, px + r, py + r, fill="#0e0e0e",
+                                  outline=ACCENT if on else col, width=2 if on else 1, tags="ov")
+                else:
+                    c.create_polygon(px, py - r, px + r, py, px, py + r, px - r, py,
+                                     fill="#1a1a1a", outline=ACCENT if on else col,
+                                     width=2 if on else 1, tags="ov")
+            mid = pts[len(pts) // 2]
+            c.create_rectangle(mid[0] - 6, mid[1] - 6, mid[0] + 6, mid[1] + 6,
+                               fill="#333" if on else "#222",
+                               outline=ACCENT if on else col, tags="ov")
         # block boxes
         for i, b in enumerate(self.boxes):
             on = (self.sel == ("box", i))
@@ -868,7 +1130,8 @@ class PatentApp(tk.Tk):
             pts = [self.n2c(p["x"], p["y"]) for p in cn["pts"]]
             flat = [v for p in pts for v in p]
             c.create_line(*flat, fill=col, width=3 if on else 2,
-                          dash=(5, 3) if cn.get("dashed") else None, tags="ov")
+                          dash=(5, 3) if cn.get("dashed") else None,
+                          smooth=bool(cn.get("spline")), splinesteps=18, tags="ov")
             for j, (px, py) in enumerate(pts):
                 ends = (j == 0 or j == len(pts) - 1)
                 r = HANDLE_R if ends else WP_R
@@ -902,17 +1165,46 @@ class PatentApp(tk.Tk):
                           fill="#0e0e0e", outline=col, width=2 if on else 1, tags="ov")
 
     # ── output ────────────────────────────────────────────────────────────
-    def schedule_render(self):
+    def schedule_render(self, fast=False):
         if self._dirty_job:
             self.after_cancel(self._dirty_job)
-        self._dirty_job = self.after(120, self.render_now)
+        delay = 16 if fast else 90
+        self._dirty_job = self.after(delay, self.render_now)
+
+    def _preview_scale(self):
+        """Scale factor so the preview renders at roughly on-screen size."""
+        if self.source_img is None:
+            return 1.0
+        cw = max(200, self.out_canvas.winfo_width())
+        ch = max(150, self.out_canvas.winfo_height())
+        iw, ih = self.source_img.size
+        return max(0.15, min(1.0, min(cw / (iw + 120), ch / (ih + 190))))
+
+    def _graded_for(self, scale):
+        """Return the color-graded source at `scale`, cached so dragging is cheap."""
+        gray = self.gray_var.get()
+        strength = round(float(self.grade_var.get()), 3)
+        tw = max(1, int(self.source_img.width * scale))
+        th = max(1, int(self.source_img.height * scale))
+        key = (id(self.source_img), gray, strength, tw, th)
+        if self._grade_key == key:
+            return self._grade_img
+        small = self.source_img if scale >= 0.999 else \
+            self.source_img.resize((tw, th), Image.BILINEAR)
+        img = patent_grade(small, grayscale=gray, strength=strength)
+        self._grade_key, self._grade_img = key, img
+        return img
 
     def render_now(self):
         self._dirty_job = None
         if self.source_img is None:
             return
+        sc = self._preview_scale()
+        graded = self._graded_for(sc)
+        opts = self._opts()
         self._rendered = render_patent(self.source_img, self.labels, self.boxes,
-                                       self.connectors, **self._opts())
+                                       self.connectors, self.arrows,
+                                       pre_graded=graded, scale=sc, **opts)
         self.redraw_output()
 
     def redraw_output(self):
@@ -924,8 +1216,11 @@ class PatentApp(tk.Tk):
             return
         iw, ih = self._rendered.size
         scale = min(cw / iw, ch / ih, 1.0)
-        dw, dh = max(1, int(iw * scale)), max(1, int(ih * scale))
-        disp = self._rendered.resize((dw, dh), Image.LANCZOS)
+        if scale > 0.98:
+            disp = self._rendered
+        else:
+            dw, dh = max(1, int(iw * scale)), max(1, int(ih * scale))
+            disp = self._rendered.resize((dw, dh), Image.BILINEAR)
         self._out_photo = ImageTk.PhotoImage(disp)
         self.out_canvas.create_image(cw // 2, ch // 2, image=self._out_photo)
 
