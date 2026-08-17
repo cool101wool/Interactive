@@ -993,7 +993,7 @@ function resize(){
 addEventListener("resize",resize); resize();
 
 const M={x:-9e9,y:-9e9,down:false,click:false,rdown:false,rclick:false,mdown:false,
-         wheel:0,pdx:0,pdy:0,pressUI:false,rpressUI:false};
+         wheel:0,pdx:0,pdy:0,pressUI:false,rpressUI:false,ctrl:false,alt:false};
 const KEYS=new Set();
 const toV=e=>({x:e.clientX*DPR,y:e.clientY*DPR});
 app.addEventListener("contextmenu",e=>e.preventDefault());
@@ -1004,6 +1004,9 @@ app.addEventListener("mousedown",e=>{
   // is now meant dragging off the tps slider onto the board started painting.
   const onUI=overUI();
   if(modal!=="world"&&modal!=="load"&&!schemOpen) focusField=null;
+  // Latched with the press: the key can be let go mid-drag and the drag still
+  // finishes as the add or the cut it started out as.
+  M.ctrl=e.ctrlKey||e.metaKey; M.alt=e.altKey;
   if(e.button===0){M.down=true;M.click=true;M.pressUI=onUI;}
   if(e.button===1){M.mdown=true;e.preventDefault();}
   if(e.button===2){M.rdown=true;M.rclick=true;M.rpressUI=onUI;}
@@ -1160,6 +1163,12 @@ addEventListener("keydown",e=>{
     e.preventDefault(); return;
   }
   KEYS.add(e.key.toLowerCase()); audioUnlock();
+  // F fills a selection with the cell the palette is on -- the whole dialog
+  // skipped for the case that needs no choices made.
+  if(e.key.toLowerCase()==="f"&&!modal&&scr==="game"&&sel&&lastCell&&mode!=="level"){
+    fillOnly(lastCell.t,selRot); fillSelection();
+    say("filled with "+(NAMES[lastCell.t]||"cells"));
+  }
   if(e.key==="Escape"){
     // Escape out of the confirm is a "no", not a second way to leave.
     if(modal==="exit") modal=null;
@@ -1470,7 +1479,8 @@ function exportV3(w,mask,name){
   return `V3;${b74e(w.W)};${b74e(w.H)};${parts.join("")};;${(name||"").replace(/;/g,"")};0`;
 }
 
-const DB_NAME="webaccel", DB_VER=1;
+const DB_NAME="webaccel", DB_VER=1;   // never change this: it is where saved
+                                      // levels and schematics already live
 let db=null, dbFailed=false;
 let levelsMem=[], schemMem=[];          // what the UI draws
 let storeReady=false;
@@ -1647,11 +1657,68 @@ let won=false, hadEnemies=false, winCheckAt=-1e9;
 let initG=null, initMask=null;
 let dragCell=null;            // {c,fromX,fromY} while dragging one cell
 let sel=null, selDrag=null, carry=null;   // rectangle select + clipboard
+/* A selection is a bitmask over the board. `sel` stays as its bounding box so
+   everything that reads a rectangle still works, and selMask is null whenever
+   the selection is exactly that rectangle -- the common case, which keeps a
+   plain drag as cheap as it was. ctrl-drag adds a box, alt-drag cuts one out. */
+let selMask=null;
+function clearSel(){ sel=null; selMask=null; }
+function selHas(x,y){
+  if(!sel) return false;
+  if(x<sel.x0||x>sel.x1||y<sel.y0||y>sel.y1) return false;
+  return selMask?!!selMask[y*world.W+x]:true;
+}
+const SEL_MASK_MAX=64e6;                     // a mask past this is 64MB of nothing
+function selToMask(){
+  if(selMask) return selMask;
+  if(world.W*world.H>SEL_MASK_MAX) return null;
+  selMask=new Uint8Array(world.W*world.H);
+  if(sel) for(let y=sel.y0;y<=sel.y1;y++)
+    for(let x=sel.x0;x<=sel.x1;x++) selMask[y*world.W+x]=1;
+  return selMask;
+}
+// Shrink `sel` onto what the mask actually covers; drop the mask if the result
+// is solid again. Only the bounding box can hold anything, so this never walks
+// the whole board.
+function reboundSel(){
+  if(!selMask||!sel) return;
+  let x0=1e9,y0=1e9,x1=-1,y1=-1,n=0;
+  for(let y=sel.y0;y<=sel.y1;y++)for(let x=sel.x0;x<=sel.x1;x++)
+    if(selMask[y*world.W+x]){ n++;
+      if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y; }
+  if(!n){ clearSel(); return; }
+  sel={x0,y0,x1,y1};
+  if(n===(x1-x0+1)*(y1-y0+1)) selMask=null;
+}
+function commitSelDrag(d){
+  const r=normSel(d);
+  if(!d.add&&!d.sub){ sel=r; selMask=null; return; }
+  if(!sel&&d.sub) return;                    // nothing to cut out of
+  const msk=selToMask();
+  if(!msk){ sel=r; say("board too large for a compound selection",true); return; }
+  const v=d.sub?0:1;
+  for(let y=r.y0;y<=r.y1;y++)for(let x=r.x0;x<=r.x1;x++) msk[y*world.W+x]=v;
+  if(d.add) sel=sel?{x0:Math.min(sel.x0,r.x0),y0:Math.min(sel.y0,r.y0),
+                     x1:Math.max(sel.x1,r.x1),y1:Math.max(sel.y1,r.y1)}:r;
+  reboundSel();
+}
 // switching away from select drops what was selected, so a stale box cannot
 // linger over the board while you are painting
 function setTool(i){
-  if(selTool===TOOL_SELECT&&i!==TOOL_SELECT){ sel=null; selDrag=null; }
+  if(selTool===TOOL_SELECT&&i!==TOOL_SELECT){ clearSel(); selDrag=null; }
+  if(i<9) lastCell={t:PALETTE[i]};
   selTool=i;
+}
+// The cell the palette was last on. Picking the select tool hides it, but a
+// fill still wants to know what you were building with.
+let lastCell=null;
+// One cell type, one facing, nothing else -- the overwhelmingly common fill.
+function fillOnly(t,rot){
+  for(const k of Object.keys(fillW)) delete fillW[k];
+  for(const k of Object.keys(fillRW)) delete fillRW[k];
+  fillW[t]=100;
+  if(t>=0&&nrots(t)>1) for(let r=0;r<nrots(t);r++) fillRW[t+":"+r]=(r===rot?100:0);
+  fillPick=t; fillRotPick=rot; focusRot=false; fillBox="100";
 }
 let importedLevel=null;
 let schemOpen=false;
@@ -1687,13 +1754,13 @@ function restoreInitial(){
   world=w; placeMask=initMask.slice();
   rescanMask();
   tickCount=0; playing=false; won=false; started=false; acc=0; tickDur=0;
-  sel=null; selDrag=null; carry=null; dragCell=null;
+  clearSel(); selDrag=null; carry=null; dragCell=null;
 }
 function beginRun(){ if(!started){ snapshotInitial(); started=true; } }
 function togglePlay(){ if(!world) return; if(!playing) beginRun(); playing=!playing; acc=0; }
 function afterLoad(m){
   mode=m||mode;
-  started=false; won=false; sel=null; carry=null; dragCell=null;
+  started=false; won=false; clearSel(); carry=null; dragCell=null;
   hadEnemies=false;
   for(let y=0;y<world.H&&!hadEnemies;y++)
     for(let x=0;x<world.W;x++)
@@ -2256,11 +2323,33 @@ function drawBoard(){
 function drawBoardOverlays(){
   const z=zoomPx();
   const sx=Math.round(-cam.x), sy=Math.round(-cam.y);
-  const r=selDrag?normSel(selDrag):sel;
-  if(r){
+  if(sel){
     X.fillStyle="rgba(110,198,255,.18)";
-    X.fillRect(sx+r.x0*z,sy+r.y0*z,(r.x1-r.x0+1)*z,(r.y1-r.y0+1)*z);
     X.strokeStyle="#6ec6ff"; X.lineWidth=Math.max(1,U);
+    if(!selMask){
+      X.fillRect(sx+sel.x0*z,sy+sel.y0*z,(sel.x1-sel.x0+1)*z,(sel.y1-sel.y0+1)*z);
+      X.strokeRect(sx+sel.x0*z+U/2,sy+sel.y0*z+U/2,
+                   (sel.x1-sel.x0+1)*z-U,(sel.y1-sel.y0+1)*z-U);
+    }else{
+      // only what is on screen: the bounding box can be the whole board
+      const cx0=Math.max(sel.x0,Math.floor(-sx/z)), cx1=Math.min(sel.x1,Math.ceil((W-sx)/z));
+      const cy0=Math.max(sel.y0,Math.floor(-sy/z)), cy1=Math.min(sel.y1,Math.ceil((H-sy)/z));
+      for(let y=cy0;y<=cy1;y++)for(let x=cx0;x<=cx1;x++){
+        if(!selHas(x,y)) continue;
+        X.fillRect(sx+x*z,sy+y*z,z,z);
+        // outline only the edges that face something unselected
+        if(!selHas(x,y-1)){X.beginPath();X.moveTo(sx+x*z,sy+y*z+U/2);X.lineTo(sx+(x+1)*z,sy+y*z+U/2);X.stroke();}
+        if(!selHas(x,y+1)){X.beginPath();X.moveTo(sx+x*z,sy+(y+1)*z-U/2);X.lineTo(sx+(x+1)*z,sy+(y+1)*z-U/2);X.stroke();}
+        if(!selHas(x-1,y)){X.beginPath();X.moveTo(sx+x*z+U/2,sy+y*z);X.lineTo(sx+x*z+U/2,sy+(y+1)*z);X.stroke();}
+        if(!selHas(x+1,y)){X.beginPath();X.moveTo(sx+(x+1)*z-U/2,sy+y*z);X.lineTo(sx+(x+1)*z-U/2,sy+(y+1)*z);X.stroke();}
+      }
+    }
+  }
+  if(selDrag){
+    const r=normSel(selDrag);
+    X.fillStyle=selDrag.sub?"rgba(255,110,110,.20)":"rgba(110,198,255,.18)";
+    X.fillRect(sx+r.x0*z,sy+r.y0*z,(r.x1-r.x0+1)*z,(r.y1-r.y0+1)*z);
+    X.strokeStyle=selDrag.sub?"#ff6e6e":"#6ec6ff"; X.lineWidth=Math.max(1,U);
     X.strokeRect(sx+r.x0*z+U/2,sy+r.y0*z+U/2,(r.x1-r.x0+1)*z-U,(r.y1-r.y0+1)*z-U);
   }
   const h=hoverCell();
@@ -2316,6 +2405,45 @@ function hoverCellRaw(){
   return {x:Math.floor((M.x+cam.x)/z),y:Math.floor((M.y+cam.y)/z)};
 }
 /* --- selection clipboard ---------------------------------------------------- */
+/* The random fill, weighted in two levels. A cell type carries a weight, and
+   within a type its facings carry their own -- so "movers, mostly facing right"
+   is expressible without inventing a separate entry per rotation. Numbers are
+   typed as percentages but used as weights, and the percentage each one really
+   works out to is shown next to it. */
+const FILL_ROTS={};
+FILL_ROTS[T_MOVER]=4; FILL_ROTS[T_GEN]=4; FILL_ROTS[T_SLIDE]=2;
+const FILL_TYPES=[-1].concat(PALETTE);       // -1 is empty
+const nrots=t=>FILL_ROTS[t]||1;
+const fillW={};                              // type -> weight, absent means unused
+const fillRW={};                             // "type:rot" -> weight, absent means even
+let fillPick=null;                           // the type the box will apply to
+let fillRotPick=0, focusRot=false;           // ...or one of its facings
+let fillBox="";                              // the typed number
+const fillTypes=()=>FILL_TYPES.filter(t=>(fillW[t]|0)>0);
+function fillTotal(){ let n=0; for(const t of fillTypes()) n+=fillW[t]; return n; }
+function fillPctOf(t){ const n=fillTotal(); return n?Math.round(fillW[t]*100/n):0; }
+function rotWeight(t,r){ const v=fillRW[t+":"+r]; return v===undefined?1:v; }
+function rotTotal(t){ let n=0; for(let r=0;r<nrots(t);r++) n+=rotWeight(t,r); return n; }
+function rotPctOf(t,r){ const n=rotTotal(t); return n?Math.round(rotWeight(t,r)*100/n):0; }
+function pickRot(t){
+  const tot=rotTotal(t);
+  if(tot<=0) return 0;
+  let r=Math.random()*tot;
+  for(let i=0;i<nrots(t);i++){ r-=rotWeight(t,i); if(r<=0) return i; }
+  return 0;
+}
+function fillSelection(){
+  const ts=fillTypes(), tot=fillTotal();
+  if(!sel||!ts.length||tot<=0) return;
+  for(let y=sel.y0;y<=sel.y1;y++)for(let x=sel.x0;x<=sel.x1;x++){
+    if(!selHas(x,y)) continue;
+    if(mode==="level"&&!placeMask[y*world.W+x]) continue;
+    let r=Math.random()*tot, t=ts[ts.length-1];
+    for(const c of ts){ r-=fillW[c]; if(r<=0){ t=c; break; } }
+    world.place(x,y,t<0?0:mk(t,pickRot(t)));
+  }
+  sfx("place");
+}
 function normSel(r){
   return {x0:Math.min(r.x0,r.x1),y0:Math.min(r.y0,r.y1),
           x1:Math.max(r.x0,r.x1),y1:Math.max(r.y0,r.y1)};
@@ -2325,11 +2453,12 @@ function grabSel(clone){
   const {x0,y0,x1,y1}=sel, w=x1-x0+1, h=y1-y0+1;
   const cells=new Uint8Array(w*h);
   for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+    if(!selHas(x0+x,y0+y)) continue;          // holes cut with alt stay empty
     cells[y*w+x]=world.g[world.idx(x0+x,y0+y)];
     if(!clone) world.place(x0+x,y0+y,0);
   }
   carry={w,h,cells,from:clone?null:{x:x0,y:y0}};
-  sel=null; sfx("click");
+  clearSel(); sfx("click");
 }
 // Rotating a block turns the layout and every cell's facing together, which is
 // what makes a rotated machine still work.
@@ -2362,7 +2491,7 @@ function selCode(name){
   const {x0,y0,x1,y1}=sel, w=x1-x0+1, h=y1-y0+1;
   const tw=new World(w,h), tm=new Uint8Array(w*h);
   for(let y=0;y<h;y++)for(let x=0;x<w;x++){
-    const c=src.g[src.idx(x0+x,y0+y)];
+    const c=selHas(x0+x,y0+y)?src.g[src.idx(x0+x,y0+y)]:0;
     if(c) tw.setCell(tw.idx(x,y),c);
     tm[y*w+x]=msk[(y0+y)*src.W+(x0+x)];
   }
@@ -2377,12 +2506,13 @@ function carryFromCode(code){
     cells[y*L.W+x]=mk(cid>9?T_WALL:CM_TO_T[cid],L.rot[y*L.W+x]);
   }
   carry={w:L.W,h:L.H,cells,from:null};
-  sel=null;
+  clearSel();
 }
 function deleteSel(){
   if(!sel) return;
-  for(let y=sel.y0;y<=sel.y1;y++)for(let x=sel.x0;x<=sel.x1;x++) world.place(x,y,0);
-  sel=null; sfx("del");
+  for(let y=sel.y0;y<=sel.y1;y++)for(let x=sel.x0;x<=sel.x1;x++)
+    if(selHas(x,y)) world.place(x,y,0);
+  clearSel(); sfx("del");
 }
 
 /* A frame only sees where the pointer is now, not the path it took. Drag fast
@@ -2430,13 +2560,16 @@ function boardInput(dt){
     if(!placed) world.place(dragCell.fromX,dragCell.fromY,dragCell.c);
     dragCell=null;
   }
-  if(selDrag&&!M.down){ sel=normSel(selDrag); selDrag=null; }
+  if(selDrag&&!M.down){ commitSelDrag(selDrag); selDrag=null; }
   if(overUI()) return;
   if(selTool===TOOL_SELECT&&!carry){
     const c=hoverCellClamped();
-    if(M.click&&!M.pressUI&&c){ selDrag={x0:c.x,y0:c.y,x1:c.x,y1:c.y}; sel=null; }
+    if(M.click&&!M.pressUI&&c){
+      selDrag={x0:c.x,y0:c.y,x1:c.x,y1:c.y,add:M.ctrl&&!M.alt,sub:M.alt};
+      if(!M.ctrl&&!M.alt) clearSel();
+    }
     else if(M.down&&selDrag&&c){ selDrag.x1=c.x; selDrag.y1=c.y; }
-    if(M.rclick) sel=null;
+    if(M.rclick) clearSel();
     return;
   }
   // While a stroke is live, a pointer that has wandered off the board still
@@ -2480,9 +2613,12 @@ function boardInput(dt){
   }
   if(selTool===TOOL_SELECT){
     const c=hoverCellClamped();
-    if(M.click&&!M.pressUI&&c){ selDrag={x0:c.x,y0:c.y,x1:c.x,y1:c.y}; sel=null; }
+    if(M.click&&!M.pressUI&&c){
+      selDrag={x0:c.x,y0:c.y,x1:c.x,y1:c.y,add:M.ctrl&&!M.alt,sub:M.alt};
+      if(!M.ctrl&&!M.alt) clearSel();
+    }
     else if(M.down&&selDrag&&c){ selDrag.x1=c.x; selDrag.y1=c.y; }
-    if(M.rclick) sel=null;
+    if(M.rclick) clearSel();
     return;
   }
   if(selTool===TOOL_PLUS){                 // paint / erase the placeable region
@@ -2715,6 +2851,8 @@ const CONTROLS=[["Q/E","Rotate the cell you will place"],["WASD","Move camera ar
   ["MIDDLE CLICK","Drag camera around"],["LEFT CLICK","Place cells"],
   ["RIGHT CLICK","Delete cells"],["1-9","Pick a cell from the palette"],
   ["HOLD B","Show plus blocks under cells"],
+  ["CTRL DRAG","Add to the selection"],
+  ["ALT DRAG","Cut out of the selection"],
   ["SPACE","Play / pause the simulation"],
   ["R","Reset to the initial state"],
   ["ESCAPE","Open pause menu"],["SCROLL","Zoom in/out"]];
@@ -2840,7 +2978,7 @@ function screenGame(dt){
     // Finger-sized on touch: these were laid out for a cursor and were by far
     // the smallest targets on the screen.
     const is=touchUsed?Math.max(TAP(),U*30):Math.max(20,U*13);
-    const gp=touchUsed?3*U:4*U, totW=5*is+4*gp;
+    const gp=touchUsed?3*U:4*U, totW=6*is+5*gp;
     // transportRight is the real right edge of the transport block, hoisted
     // above so this row cannot land on top of it.
     let axx=Math.max(transportRight,Math.round((W-totW)/2));
@@ -2875,6 +3013,14 @@ function screenGame(dt){
     }
     iconClipCookie(axx+4*(is+gp),ay,is);
     if(storageBlocked()){ X.fillStyle="rgba(0,0,0,.55)"; X.fillRect(axx+4*(is+gp),ay,is,is); }
+    // fill the selection with a random arrangement
+    if(uiBtn(axx+5*(is+gp),ay,is,is,"",1)){
+    // Start from the cell you were last building with, so the usual case is
+    // open-and-press-FILL rather than a form to fill in.
+    if(!fillTypes().length&&lastCell) fillOnly(lastCell.t,selRot);
+    openModal("fill");
+  }
+    iconFill(axx+5*(is+gp),ay,is);
     if(!touchUsed)
       textFit("q/e turns a picked-up block",axx,ay-textH(U)-2*U,
               Math.max(totW,W-pad-axx),textH(U),DIM,"left",1,U);
@@ -3356,14 +3502,165 @@ function overlayHelp(){
     y+=lineH;
   }
 }
+function iconFill(x,y,s){
+  // a blocky F, drawn as bars so it holds up at any size like the other icons
+  const t=Math.max(2,s*0.13), lx=x+s*0.30, ty=y+s*0.22, bw=s*0.40, hh=s*0.56;
+  X.fillStyle=ICON;
+  X.fillRect(lx,ty,t,hh);
+  X.fillRect(lx,ty,bw,t);
+  X.fillRect(lx,ty+hh*0.42,bw*0.72,t);
+}
+// One tile in the fill panel: a cell picture, an optional percentage strip,
+// and a highlight when it is what the weight box is pointed at.
+function fillTile(x,y,ts,t,rot,on,lab){
+  X.fillStyle=on?"#1d3448":"#111"; X.fillRect(x,y,ts,ts);
+  if(t<0){
+    X.strokeStyle="#555"; X.lineWidth=Math.max(1,U);
+    X.strokeRect(x+ts*0.26+U/2,y+ts*0.16+U/2,ts*0.48-U,ts*0.40-U);
+    textFit("EMPTY",x,y+ts*0.60,ts,textH(U),DIM,"center",1,U);
+  }else{
+    const isz=Math.round(ts*0.78);
+    X.drawImage(spriteFor(t,rot,isz),x+(ts-isz)/2,y+(ts-isz)/2*0.8,isz,isz);
+  }
+  if(lab){
+    X.fillStyle="rgba(0,0,0,.75)"; X.fillRect(x,y+ts-textH(U)-U,ts,textH(U)+U);
+    textFit(lab,x,y+ts-textH(U),ts,textH(U),"#6ec6ff","center",1,U);
+  }
+  X.strokeStyle=on?WHITE:"#333"; X.lineWidth=Math.max(1,U);
+  X.strokeRect(x+U/2,y+U/2,ts-U,ts-U);
+  return uiBtn(x,y,ts,ts,"",1);
+}
+function overlayFill(){
+  const m=8*U, hs=U*2, head=Math.max(textH(hs),U*11);
+  const cols=Math.min(FILL_TYPES.length,W<560?5:10);
+  const rows=Math.ceil(FILL_TYPES.length/cols);
+  const gap=3*U;
+  const picked=fillTypes();
+  const cur=(fillPick!==null&&(fillW[fillPick]|0)>0)?fillPick:null;
+  const hasRots=cur!==null&&cur>=0&&nrots(cur)>1;
+  const ctlH=Math.max(btnH(hs),textH(hs)+4*U);
+  let ts=Math.max(12*U,Math.min(26*U,(W*0.86-2*m-(cols-1)*gap)/cols));
+  const needH=()=>m+head+4*U+textH(U)+3*U+rows*(ts+gap)
+                 +(cur!==null?ctlH+6*U:0)+btnH(hs)+m;
+  for(let i=0;i<30&&needH()>H-8*U&&ts>7*U;i++) ts-=U;
+  const pw=Math.max(2*m+cols*ts+(cols-1)*gap,
+                    2*m+textW("FILL SELECTION",hs,2)+16*U,
+                    2*m+textW("MOVER",U,1)+70*U+btnW("FACINGS",hs)+16*U);
+  const p=panelRect(pw,needH());
+  textFit("FILL SELECTION",p.x+m,p.y+m,p.w-2*m-14*U,head,WHITE,"left",2,hs);
+  if(closeBtn(p,U)) modal=null;
+  let y=p.y+m+head+4*U;
+  textFit(picked.length?"click a cell to drop it - the numbers are its share of the fill"
+                       :"click the cells you want scattered over the selection",
+          p.x+m,y,p.w-2*m,textH(U),DIM,"left",1,U);
+  y+=textH(U)+3*U;
+
+  // --- the cells. click adds, clicking the highlighted one again drops it
+  const gx=p.x+Math.round((p.w-(cols*ts+(cols-1)*gap))/2);
+  FILL_TYPES.forEach((t,i)=>{
+    const cx=gx+(i%cols)*(ts+gap), cy=y+Math.floor(i/cols)*(ts+gap);
+    const w=fillW[t]|0;
+    const rot=(t>=0&&nrots(t)>1)?topRot(t):0;
+    if(fillTile(cx,cy,ts,t,rot,fillPick===t&&w>0,w>0?fillPctOf(t)+"%":"")){
+      if(w>0&&fillPick===t){ delete fillW[t];
+        for(let r=0;r<4;r++) delete fillRW[t+":"+r];
+        fillPick=null;
+      } else { if(!w) fillW[t]=50; fillPick=t; }
+      consumeClick();
+    }
+  });
+  y+=rows*(ts+gap);
+
+  // --- one control for the highlighted cell, plus the way into its facings
+  if(cur!==null){
+    const nm=(cur<0?"EMPTY":(NAMES[cur]||"CELL")).toUpperCase();
+    const nw=textW(nm,U,1);
+    textFit(nm,p.x+m,y+(ctlH-textH(U))/2,nw,textH(U),WHITE,"left",1,U);
+    const fbW=hasRots?btnW("FACINGS",hs)+6*U:0;
+    const sx=p.x+m+nw+8*U;
+    const pctW=textW("100%",U,1)+4*U;
+    const sw=Math.max(24*U,p.x+p.w-m-fbW-pctW-sx-6*U);
+    const v=uiSlider("fw",sx,y+ctlH/2,sw,(fillW[cur]-1)/99);
+    fillW[cur]=Math.max(1,Math.round(v*99)+1);
+    textFit(fillPctOf(cur)+"%",sx+sw+4*U,y+(ctlH-textH(U))/2,pctW,textH(U),"#6ec6ff","left",1,U);
+    if(hasRots&&uiBtn(p.x+p.w-m-btnW("FACINGS",hs),y,0,0,"FACINGS",hs)){
+      fillRotPick=0; openModal("fillrot");
+    }
+    y+=ctlH+6*U;
+  }
+
+  const by=p.y+p.h-m-btnH(hs);
+  if(uiBtn(p.x+m,by,0,0,"CLEAR",hs)){
+    for(const k of Object.keys(fillW)) delete fillW[k];
+    for(const k of Object.keys(fillRW)) delete fillRW[k];
+    fillPick=null;
+  }
+  const okw=btnW("FILL",hs);
+  if(uiBtn(p.x+p.w-m-okw,by,0,0,"FILL",hs)){
+    if(!picked.length) say("click at least one cell first",true);
+    else { fillSelection(); modal=null; }
+  }
+}
+// The facings of one cell type, behind their own button so the main panel
+// stays a single row of choices.
+function overlayFillRot(){
+  const t=fillPick;
+  if(t===null||t<0||nrots(t)<2){ modal="fill"; return; }
+  const m=8*U, hs=U*2, head=Math.max(textH(hs),U*11);
+  const n=nrots(t), gap=4*U;
+  const rowH=Math.max(btnH(hs),textH(hs)+4*U);
+  let ts=Math.max(12*U,Math.min(24*U,W*0.16));
+  const needH=m+head+4*U+textH(U)+3*U+n*(Math.max(ts,rowH)+gap)+btnH(hs)+m;
+  const pw=Math.max(2*m+ts+8*U+60*U+textW("100%",U,1)+8*U,
+                    2*m+textW("FACINGS OF GENERATOR",hs,2)+16*U);
+  const p=panelRect(pw,Math.min(needH,H-8*U));
+  textFit("FACINGS OF "+((NAMES[t]||"CELL").toUpperCase()),
+          p.x+m,p.y+m,p.w-2*m-14*U,head,WHITE,"left",2,hs);
+  if(closeBtn(p,U)) modal="fill";           // back to the fill panel, not the board
+  let y=p.y+m+head+4*U;
+  textFit("how often each direction comes up",p.x+m,y,p.w-2*m,textH(U),DIM,"left",1,U);
+  y+=textH(U)+3*U;
+  const pctW=textW("100%",U,1)+4*U;
+  for(let r=0;r<n;r++){
+    const rh=Math.max(ts,rowH);
+    const isz=Math.round(ts*0.78);
+    X.fillStyle="#111"; X.fillRect(p.x+m,y,ts,ts);
+    X.drawImage(spriteFor(t,r,isz),p.x+m+(ts-isz)/2,y+(ts-isz)/2,isz,isz);
+    X.strokeStyle="#333"; X.lineWidth=Math.max(1,U);
+    X.strokeRect(p.x+m+U/2,y+U/2,ts-U,ts-U);
+    const sx=p.x+m+ts+6*U;
+    const sw=Math.max(24*U,p.x+p.w-m-pctW-6*U-sx);
+    const v=uiSlider("fr"+r,sx,y+rh/2,sw,rotWeight(t,r)/100);
+    fillRW[t+":"+r]=Math.round(v*100);
+    textFit(rotPctOf(t,r)+"%",sx+sw+4*U,y+(rh-textH(U))/2,pctW,textH(U),"#6ec6ff","left",1,U);
+    y+=rh+gap;
+  }
+  const by=p.y+p.h-m-btnH(hs);
+  if(uiBtn(p.x+m,by,0,0,"EVEN",hs)) for(let r=0;r<n;r++) fillRW[t+":"+r]=50;
+  const dw=btnW("DONE",hs);
+  if(uiBtn(p.x+p.w-m-dw,by,0,0,"DONE",hs)){
+    let tot=0; for(let r=0;r<n;r++) tot+=rotWeight(t,r);
+    if(tot<=0) for(let r=0;r<n;r++) fillRW[t+":"+r]=50;   // never leave it unfillable
+    modal="fill";
+  }
+}
+// The facing a tile should show: whichever one is most likely.
+function topRot(t){
+  let best=0, bw=-1;
+  for(let r=0;r<nrots(t);r++){ const w=rotWeight(t,r); if(w>bw){ bw=w; best=r; } }
+  return best;
+}
 function overlaySettings(){
   const m=8*U, hs=U*2, head=Math.max(textH(hs),U*11);
-  const labW=Math.max(textW("MUSIC VOL",hs,2),textW("SFX VOL",hs,2),textW("FAST GRAPHICS",hs,2));
+  const labW=Math.max(textW("MUSIC VOL",hs,2),textW("SFX VOL",hs,2),
+                      textW("FAST GRAPHICS",hs,2),textW("DISABLE GRAPHICS",hs,2));
   const ctlW=Math.max(40*U,Math.min(80*U,W*0.28));
   const noteMax=Math.max(textW("turns off motion interpolation - cells jump between ticks",U,1),
+                         textW("stops drawing the board entirely - the simulation still runs",U,1),
                          textW("a 32-beat loop, boosted 3x over the file",U,1));
   const needW=Math.max(labW+6*U+ctlW,noteMax)+2*m;
-  const needH=m+head+5*U+3*(textH(hs)+textH(U)+7*U)+m;
+  // four rows, not three: DISABLE GRAPHICS was drawn past the bottom edge
+  const needH=m+head+5*U+4*(textH(hs)+textH(U)+7*U)+m;
     // shrink to fit the window height rather than running off the bottom
   const u=Math.max(1,Math.min(U,Math.floor(U*(H-8*U)/Math.max(1,needH))));
   const _k=u/U;
@@ -3413,6 +3710,7 @@ const FIELD={
   h:{get:()=>fieldH,set:v=>fieldH=v,numeric:true,max:4},
   loadq:{get:()=>loadQuery,set:v=>{loadQuery=v;loadScroll=0;},max:24},
   schemq:{get:()=>schemQuery,set:v=>{schemQuery=v;schemScroll=0;},max:24},
+  fillw:{get:()=>fillBox,set:v=>fillBox=v,numeric:true,max:4},
 };
 // One box, drawn and focused the same way wherever it appears.
 // Wheel over a list scrolls it, and the wheel is consumed so it cannot also
@@ -3461,7 +3759,7 @@ function resizeWorld(nw,nh,anchor){
   world=nWorld; placeMask=nMask;
   rescanMask();
   tickCount=0; playing=false; won=false; started=false;
-  sel=null; carry=null; dragCell=null;
+  clearSel(); carry=null; dragCell=null;
   snapshotInitial(); centreCam();
 }
 function iconWorld(x,y,s){
@@ -3722,6 +4020,8 @@ function loop(t){
   if(modal==="exit") overlayExitConfirm();
   if(modal==="help") overlayHelp();
   if(modal==="settings") overlaySettings();
+  if(modal==="fill") overlayFill();
+  if(modal==="fillrot") overlayFillRot();
   if(modal==="world") overlayWorld();
   if(modal==="schemhelp") overlaySchemHelp();
   if(modal==="load") overlayLoad();
