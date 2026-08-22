@@ -3264,8 +3264,14 @@ function screenGame(dt){
      playing it -- two different kinds of text, so they no longer look alike.
      The title is larger and white with a rule under it; the description is
      small, grey and indented beneath. */
+  /* The box has to be measured in the glyphs actually drawn. At 60*U it was
+     sized as though the text were scale 1, so the title never fitted at U*2 and
+     fitScale shrank it to scale 1 -- leaving the name three times smaller than
+     its own description. */
+  const glyph=(FONT_W+1)*U;
+  const textBoxW=Math.max(Math.min(24*glyph,W-2*pad),Math.min(40*glyph,W*0.42));
   if(levelName&&!tickBeside)
-    textFitMid(levelName,pad+U,ty0+textH(U*2)+2*U,60*U,textH(U*2),WHITE,"left",2,U*2);
+    textFitMid(levelName,pad+U,ty0+textH(U*2)+2*U,textBoxW,textH(U*2),WHITE,"left",2,U*2);
   /* A level's description is written for whoever is playing it, so it belongs
      on screen rather than buried in a menu. Wrapped to the width it has and
      capped at three lines. */
@@ -3273,8 +3279,7 @@ function screenGame(dt){
     /* 70*U was sized as though the text were drawn at scale 1. It is drawn at
        scale U, so each glyph is U times wider and the box held about seven
        characters. Size it from the glyph width actually used. */
-    const glyph=(FONT_W+1)*U;
-    const dw=Math.max(Math.min(24*glyph,W-2*pad),Math.min(40*glyph,W*0.42));
+    const dw=textBoxW;
     let dy=(tickBeside?pad+textH(U*3)+3*U
                      :ty0+textH(U*2)+2*U+(levelName?textH(U*2)+2*U:0));
     /* The tool column owns the left edge from colY down. Above it there is
