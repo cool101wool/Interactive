@@ -2513,6 +2513,10 @@ function hoverCellRaw(){
    works out to is shown next to it. */
 const FILL_ROTS={};
 FILL_ROTS[T_MOVER]=4; FILL_ROTS[T_GEN]=4; FILL_ROTS[T_SLIDE]=2;
+// The placeable mark has two states rather than four facings: put one down, or
+// take one away. Clearing them in bulk had no other route.
+FILL_ROTS[-2]=2;
+const ST_PLACE=0, ST_UNPLACE=1;
 const FILL_TYPES=[-1,-2].concat(PALETTE);    // -1 air, -2 the placeable mark
 // What the fill is allowed to write over. Both on means it ignores what was
 // already there, which is what it always used to do.
@@ -2581,10 +2585,9 @@ function fillSelection(){
     if(t===-2){
       /* The plus mark sits underneath whatever is already on the tile -- it
          says where a level lets you build, which is a separate thing from what
-         is standing there. It used to clear the cell first, so scattering
-         placeable through a machine deleted the machine. */
-      const o=y*world.W+x;
-      if(!placeMask[o]){ placeMask[o]=1; noteMaskCell(x,y,true); }
+         is standing there, so the cell is left alone either way. */
+      const o=y*world.W+x, want=pickRot(-2)===ST_PLACE?1:0;
+      if(placeMask[o]!==want){ placeMask[o]=want; noteMaskCell(x,y,!!want); }
       continue;
     }
     world.place(x,y,t<0?0:mk(t,pickRot(t)));
@@ -3738,12 +3741,20 @@ function iconFill(x,y,s){
 function fillTile(x,y,ts,t,rot,on,lab){
   X.fillStyle=on?"#1d3448":"#111"; X.fillRect(x,y,ts,ts);
   if(t===-2){
-    // the plus that marks where a level lets you build
+    // the plus that marks where a level lets you build, struck through when
+    // the entry is the one that takes the mark away again
+    const off=rot===1;
     const th=Math.max(2,ts*0.11), cx=x+ts/2, cy=y+ts*0.38, arm=ts*0.20;
-    X.fillStyle="#3fa63f";
+    X.fillStyle=off?"#7a3a3a":"#3fa63f";
     X.fillRect(cx-arm,cy-th/2,arm*2,th);
     X.fillRect(cx-th/2,cy-arm,th,arm*2);
-    textFit("PLACE",x,y+ts*0.62,ts,textH(U),DIM,"center",1,U);
+    if(off){
+      X.strokeStyle="#e05a5a"; X.lineWidth=Math.max(2,ts*0.07);
+      X.beginPath();
+      X.moveTo(cx-arm*1.35,cy+arm*1.35); X.lineTo(cx+arm*1.35,cy-arm*1.35);
+      X.stroke();
+    }
+    textFit(off?"CLEAR":"PLACE",x,y+ts*0.62,ts,textH(U),DIM,"center",1,U);
   }else if(t<0){
     X.strokeStyle="#555"; X.lineWidth=Math.max(1,U);
     X.strokeRect(x+ts*0.26+U/2,y+ts*0.16+U/2,ts*0.48-U,ts*0.40-U);
@@ -3767,7 +3778,7 @@ function overlayFill(){
   const gap=3*U;
   const picked=fillTypes();
   const cur=(fillPick!==null&&(fillW[fillPick]|0)>0)?fillPick:null;
-  const hasRots=cur!==null&&cur>=0&&nrots(cur)>1;
+  const hasRots=cur!==null&&nrots(cur)>1;
   const ctlH=Math.max(btnH(hs),textH(hs)+4*U);
   let ts=Math.max(12*U,Math.min(26*U,(W*0.86-2*m-(cols-1)*gap)/cols));
   const swH=Math.max(toggleH(),textH(U))+4*U;
@@ -3793,7 +3804,7 @@ function overlayFill(){
   FILL_TYPES.forEach((t,i)=>{
     const cx=gx+(i%cols)*(ts+gap), cy=y+Math.floor(i/cols)*(ts+gap);
     const w=fillW[t]|0;
-    const rot=(t>=0&&nrots(t)>1)?topRot(t):0;
+    const rot=nrots(t)>1?topRot(t):0;
     const lab=w>0?fillPctOf(t)+"%":"";
     const hit=fillTile(cx,cy,ts,t,rot,fillPick===t&&w>0,lab);
     if(hitR(cx,cy,ts,ts)){                    // right: take it out of the mix
@@ -3810,7 +3821,16 @@ function overlayFill(){
       if(w>0&&fillPick===t){ delete fillW[t];
         for(let r=0;r<4;r++) delete fillRW[t+":"+r];
         fillPick=null;
-      } else { if(!w) fillW[t]=50; fillPick=t; }
+      } else {
+        if(!w){
+          fillW[t]=50;
+          // an even split of place and unplace would be nonsense as a default
+          if(t===-2&&fillRW["-2:0"]===undefined&&fillRW["-2:1"]===undefined){
+            fillRW["-2:0"]=100; fillRW["-2:1"]=0;
+          }
+        }
+        fillPick=t;
+      }
       consumeClick();
     }
   });
@@ -3818,7 +3838,8 @@ function overlayFill(){
 
   // --- one control for the highlighted cell, plus the way into its facings
   if(cur!==null){
-    const nm=(cur===-2?"PLACEABLE":cur<0?"AIR":(NAMES[cur]||"CELL")).toUpperCase();
+    const nm=(cur===-2?(rotPctOf(-2,ST_UNPLACE)>rotPctOf(-2,ST_PLACE)?"CLEAR PLACEABLE":"PLACEABLE")
+             :cur<0?"AIR":(NAMES[cur]||"CELL")).toUpperCase();
     const nw=textW(nm,U,1);
     textFit(nm,p.x+m,y+(ctlH-textH(U))/2,nw,textH(U),WHITE,"left",1,U);
     const fbW=hasRots?btnW("FACINGS",hs)+6*U:0;
@@ -3832,7 +3853,8 @@ function overlayFill(){
     // the raw weight as well as the share, since the weight is now unbounded
     textFit(fillW[cur]+"  "+fillPctOf(cur)+"%",sx+sw+4*U,y+(ctlH-textH(U))/2,
             pctW,textH(U),"#6ec6ff","left",1,U);
-    if(hasRots&&uiBtn(p.x+p.w-m-btnW("FACINGS",hs),y,0,0,"FACINGS",hs)){
+    const rotLab=cur===-2?"STATES":"FACINGS";
+    if(hasRots&&uiBtn(p.x+p.w-m-btnW(rotLab,hs),y,0,0,rotLab,hs)){
       fillRotPick=0; rotSnapshot(cur); openModal("fillrot");
     }
     y+=ctlH+6*U;
@@ -3868,7 +3890,7 @@ function overlayFill(){
 // stays a single row of choices.
 function overlayFillRot(){
   const t=fillPick;
-  if(t===null||t<0||nrots(t)<2){ modal="fill"; return; }
+  if(t===null||nrots(t)<2){ modal="fill"; return; }
   const m=8*U, hs=U*2, head=Math.max(textH(hs),U*11);
   const n=nrots(t), gap=4*U;
   const rowH=Math.max(btnH(hs),textH(hs)+4*U);
@@ -3877,21 +3899,26 @@ function overlayFillRot(){
   const pw=Math.max(2*m+ts+8*U+60*U+textW("100%",U,1)+8*U,
                     2*m+textW("FACINGS OF GENERATOR",hs,2)+16*U);
   const p=panelRect(pw,Math.min(needH,H-8*U));
-  textFit("FACINGS OF "+((NAMES[t]||"CELL").toUpperCase()),
+  textFit(t===-2?"PLACEABLE STATES"
+                :"FACINGS OF "+((NAMES[t]||"CELL").toUpperCase()),
           p.x+m,p.y+m,p.w-2*m-14*U,head,WHITE,"left",2,hs);
   if(closeBtn(p,U)){ rotRestore(t); modal="fill"; }   // back to the panel, not the board
   let y=p.y+m+head+4*U;
-  textFit("right click zeroes a direction - middle click keeps only that one",
+  textFit(t===-2?"right click zeroes one - middle click keeps only that one"
+                :"right click zeroes a direction - middle click keeps only that one",
           p.x+m,y,p.w-2*m,textH(U),DIM,"left",1,U);
   y+=textH(U)+3*U;
   const pctW=textW("99999  100%",U,1)+4*U;
   for(let r=0;r<n;r++){
     const rh=Math.max(ts,rowH);
-    const isz=Math.round(ts*0.78);
-    X.fillStyle="#111"; X.fillRect(p.x+m,y,ts,ts);
-    X.drawImage(spriteFor(t,r,isz),p.x+m+(ts-isz)/2,y+(ts-isz)/2,isz,isz);
-    X.strokeStyle="#333"; X.lineWidth=Math.max(1,U);
-    X.strokeRect(p.x+m+U/2,y+U/2,ts-U,ts-U);
+    if(t<0) fillTile(p.x+m,y,ts,t,r,false,"");
+    else{
+      const isz=Math.round(ts*0.78);
+      X.fillStyle="#111"; X.fillRect(p.x+m,y,ts,ts);
+      X.drawImage(spriteFor(t,r,isz),p.x+m+(ts-isz)/2,y+(ts-isz)/2,isz,isz);
+      X.strokeStyle="#333"; X.lineWidth=Math.max(1,U);
+      X.strokeRect(p.x+m+U/2,y+U/2,ts-U,ts-U);
+    }
     const sx=p.x+m+ts+6*U;
     const sw=Math.max(24*U,p.x+p.w-m-pctW-6*U-sx);
     rotCap=growCap(rotCap,rotWeight(t,r),false);
