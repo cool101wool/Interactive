@@ -2658,10 +2658,15 @@ function placeCarry(){
   stampAt(carry,o.x,o.y);
   carry=null; sfx("place");
 }
-// Put it back where it came from, if it was cut rather than copied.
+/* Put it back where it came from, if it was cut rather than copied. Restore
+   from the untouched copy kept for the ghost, not from what is in hand: turning
+   the block clears `from` because a rotated block no longer lines up, and
+   cancelling after a turn used to drop the cut cells on the floor. */
 function cancelCarry(){
   if(!carry) return;
-  if(carry.from) stampAt(carry,carry.from.x,carry.from.y);
+  const S2=carry.src;
+  if(S2) stampAt({w:S2.w,h:S2.h,cells:S2.cells},S2.x,S2.y);
+  else if(carry.from) stampAt(carry,carry.from.x,carry.from.y);
   carry=null;
 }
 // Pinned by a click, otherwise following the pointer.
@@ -2783,8 +2788,11 @@ function boardInput(dt){
     const hc=hoverCellRaw();
     if(hc){
       if(M.click&&!M.pressUI){
-        carry.at={x:hc.x-(carry.ax|0),y:hc.y-(carry.ay|0)};
-        sfx("click");
+        /* With a cursor, click-to-place was never the problem -- a mouse goes
+           where you point it. The confirm step exists because a stray tap on a
+           phone dumped the block somewhere, so it only applies to touch. */
+        if(touchUsed){ carry.at={x:hc.x-(carry.ax|0),y:hc.y-(carry.ay|0)}; sfx("click"); }
+        else{ stampAt(carry,hc.x-(carry.ax|0),hc.y-(carry.ay|0)); carry=null; sfx("place"); }
       }
       if(M.rclick&&!M.rpressUI) cancelCarry();
     }
@@ -3176,7 +3184,7 @@ function screenGame(dt){
 
   // actions on a rectangle selection
   // A block in hand: say where it will land and how to commit or drop it.
-  if(editing&&carry){
+  if(editing&&carry&&touchUsed){
     const bh3=Math.max(btnH(U*2),touchUsed?TAP():0);
     const pw3=btnW("PLACE",U*2), cw3b=btnW("CANCEL",U*2), gp3=6*U;
     let ax3=Math.max(transportRight,Math.round((W-(pw3+cw3b+gp3))/2));
@@ -3262,32 +3270,51 @@ function screenGame(dt){
      on screen rather than buried in a menu. Wrapped to the width it has and
      capped at three lines. */
   if(levelDesc){
-    const dw=Math.min(70*U,W*0.32);
+    /* 70*U was sized as though the text were drawn at scale 1. It is drawn at
+       scale U, so each glyph is U times wider and the box held about seven
+       characters. Size it from the glyph width actually used. */
+    const glyph=(FONT_W+1)*U;
+    const dw=Math.max(Math.min(24*glyph,W-2*pad),Math.min(40*glyph,W*0.42));
     let dy=(tickBeside?pad+textH(U*3)+3*U
                      :ty0+textH(U*2)+2*U+(levelName?textH(U*2)+2*U:0));
-    /* The tool preview column and its q/e caption own the left edge from colY
-       downwards. However many lines the description has, it stops before that
-       -- it used to run straight through the column. */
-    const room=Math.max(0,colY-2*U-dy);
-    const maxLines=Math.max(0,Math.min(3,Math.floor(room/textH(U))));
-    if(maxLines>0){
-      if(levelName&&!tickBeside){          // a rule between the two
-        X.fillStyle="#5a5a5a"; X.fillRect(pad+U,dy-2*U,Math.min(dw,40*U),Math.max(1,U));
-      }
-      const words=levelDesc.split(/\s+/); const lines=[]; let cur="";
-      for(const w2 of words){
+    /* The tool column owns the left edge from colY down. Above it there is
+       often only a line or two of space, so if the whole description will not
+       fit there the text steps around the column instead of being cut: it is
+       indented past the column's right edge, where the height is free. */
+    const wrapTo=(width,cap)=>{
+      const out=[]; let cur="";
+      for(const w2 of levelDesc.split(/\s+/)){
         const t2=cur?cur+" "+w2:w2;
-        if(textW(t2,U,1)>dw&&cur){ lines.push(cur); cur=w2; if(lines.length===maxLines) break; }
+        if(textW(t2,U,1)>width-3*U&&cur){ out.push(cur); cur=w2; if(out.length===cap) return {lines:out,cut:true}; }
         else cur=t2;
       }
-      if(lines.length<maxLines&&cur) lines.push(cur);
-      // a description cut short says so rather than just stopping
-      if(lines.length===maxLines){
-        const last=lines[maxLines-1];
-        if(textW(levelDesc,U,1)>dw*maxLines) lines[maxLines-1]=clipText(last+" ...",dw-3*U,U,1);
+      if(cur) out.push(cur);
+      return {lines:out,cut:false};
+    };
+    const spot=(x,room)=>{
+      const width=Math.min(dw,Math.max(8*glyph,W-x-pad-2*glyph));
+      const cap=Math.max(0,Math.min(4,Math.floor(room/textH(U))));
+      const r=wrapTo(width,cap);
+      return {x,width,cap,lines:r.lines,cut:r.cut||r.lines.length>cap};
+    };
+    let put=spot(pad+3*U,Math.max(0,colY-2*U-dy));
+    if(put.cut){
+      // beside the column rather than above it
+      const alt=spot(pad+bs+6*U,Math.max(0,H-barH-10*U-dy));
+      if(!alt.cut||alt.lines.length>put.lines.length) put=alt;
+    }
+    const dx=put.x, dwUse=put.width;
+    const lines=put.lines.slice(0,put.cap);
+    if(lines.length){
+      // the rule only reads as "under the name" when the text is still under it
+      if(levelName&&!tickBeside&&dx===pad+3*U){
+        X.fillStyle="#5a5a5a"; X.fillRect(pad+U,dy-2*U,Math.min(dwUse,40*U),Math.max(1,U));
       }
+      // a description cut short says so rather than just stopping
+      if(put.cut&&lines.length)
+        lines[lines.length-1]=clipText(lines[lines.length-1]+" ...",dwUse-3*U,U,1);
       for(let i=0;i<lines.length;i++)
-        textFit(lines[i],pad+3*U,dy+i*textH(U),dw-3*U,textH(U),"#8f8f8f","left",1,U);
+        textFit(lines[i],dx,dy+i*textH(U),dwUse-3*U,textH(U),"#8f8f8f","left",1,U);
     }
   }
   /* --- bottom right: the rate actually achieved.
