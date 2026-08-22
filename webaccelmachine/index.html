@@ -3182,11 +3182,13 @@ function screenGame(dt){
     let ax3=Math.max(transportRight,Math.round((W-(pw3+cw3b+gp3))/2));
     let ay3=H-barH-bh3-4*U;
     if(ax3+pw3+cw3b+gp3>W-pad){ ax3=Math.max(pad,W-pad-(pw3+cw3b+gp3)); }
-    if(uiBtn(ax3,ay3,0,0,"PLACE",U*2)){ placeCarry(); consumeClick(); }
-    if(uiBtn(ax3+pw3+gp3,ay3,0,0,"CANCEL",U*2)){ cancelCarry(); consumeClick(); }
+    /* Read the state before the buttons run: both of them clear `carry`, so
+       anything below that still reaches into it dies on the press. */
     const hint=carry.at?"press PLACE to drop it here"
                        :(touchUsed?"tap the board to position it":"click the board to position it");
     textFit(hint,ax3,ay3-textH(U)-2*U,Math.max(pw3+cw3b+gp3,W-pad-ax3),textH(U),DIM,"left",1,U);
+    if(uiBtn(ax3,ay3,0,0,"PLACE",U*2)){ placeCarry(); consumeClick(); }
+    if(uiBtn(ax3+pw3+gp3,ay3,0,0,"CANCEL",U*2)){ cancelCarry(); consumeClick(); }
   }
   if(editing&&sel&&!carry){
     // Finger-sized on touch: these were laid out for a cursor and were by far
