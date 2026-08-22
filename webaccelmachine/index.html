@@ -1809,7 +1809,15 @@ function restoreInitial(){
   clearSel(); selDrag=null; carry=null; dragCell=null;
 }
 function beginRun(){ if(!started){ snapshotInitial(); started=true; } }
-function togglePlay(){ if(!world) return; if(!playing) beginRun(); playing=!playing; acc=0; }
+function togglePlay(){
+  if(!world) return;
+  if(!playing) beginRun();
+  playing=!playing;
+  /* Start the accumulator full rather than empty. Zeroing it meant the first
+     tick waited a whole interval -- a fifth of a second at 5 tps -- so pressing
+     play looked like it had missed the press. */
+  acc=playing?1:0;
+}
 function afterLoad(m){
   mode=m||mode;
   started=false; won=false; clearSel(); carry=null; dragCell=null;
@@ -2407,18 +2415,58 @@ function drawBoardOverlays(){
   }
   const h=hoverCell();
   const hraw=carry?hoverCellRaw():null;
+  /* Where it was lifted from, barely there, so it is obvious what the move is
+     going to leave behind. Drawn before the block itself so the block wins any
+     overlap. */
+  if(carry&&carry.src){
+    const S2=carry.src;
+    X.globalAlpha=.10;
+    const gx0=Math.max(0,Math.floor((-sx)/z)-S2.x-1), gx1=Math.min(S2.w-1,Math.ceil((W-sx)/z)-S2.x+1);
+    const gy0=Math.max(0,Math.floor((-sy)/z)-S2.y-1), gy1=Math.min(S2.h-1,Math.ceil((H-sy)/z)-S2.y+1);
+    const gbig=z>=8;
+    let gT=-1;
+    for(let cy=gy0;cy<=gy1;cy++){
+      const row=cy*S2.w;
+      for(let cx=gx0;cx<=gx1;cx++){
+        const c=S2.cells[row+cx];
+        if(!c) continue;
+        const t2=c>>2;
+        if(gbig) X.drawImage(spriteFor(t2,c&3,z),sx+(S2.x+cx)*z,sy+(S2.y+cy)*z,z,z);
+        else{
+          if(t2!==gT){ X.fillStyle=avgColor(t2); gT=t2; }
+          X.fillRect(sx+(S2.x+cx)*z,sy+(S2.y+cy)*z,z,z);
+        }
+      }
+    }
+    X.globalAlpha=1;
+  }
   if(carry&&hraw){
+    const ax=carry.ax|0, ay=carry.ay|0;
     X.globalAlpha=.75;
-    for(let cy=0;cy<carry.h;cy++)for(let cx=0;cx<carry.w;cx++){
-      const c=carry.cells[cy*carry.w+cx];
-      if(!c) continue;
-      // parts hanging off the board are trimmed, exactly as placing will trim
-      // them -- so the preview shows what you are actually going to get
-      const tx=hraw.x+cx, ty=hraw.y+cy;
-      if(tx<0||tx>=world.W||ty<0||ty>=world.H) continue;
-      const t2=c>>2;
-      if(z>=8) X.drawImage(spriteFor(t2,c&3,z),sx+tx*z,sy+ty*z,z,z);
-      else{X.fillStyle=avgColor(t2);X.fillRect(sx+tx*z,sy+ty*z,z,z);}
+    /* Only the part of the carried block that is both on the board and on the
+       screen is worth walking. Scanning the whole block cost a million
+       iterations a frame on a large selection, nearly all of them for cells
+       nowhere near the window -- dragging a big build was unusable. */
+    const ox=hraw.x-ax, oy=hraw.y-ay;      // top-left, derived from the anchor
+    const cx0=Math.max(0,-ox,Math.floor((-sx)/z)-ox-1);
+    const cx1=Math.min(carry.w-1,world.W-1-ox,Math.ceil((W-sx)/z)-ox+1);
+    const cy0=Math.max(0,-oy,Math.floor((-sy)/z)-oy-1);
+    const cy1=Math.min(carry.h-1,world.H-1-oy,Math.ceil((H-sy)/z)-oy+1);
+    const big=z>=8;
+    let lastT=-1;
+    for(let cy=cy0;cy<=cy1;cy++){
+      const row=cy*carry.w;
+      for(let cx=cx0;cx<=cx1;cx++){
+        const c=carry.cells[row+cx];
+        if(!c) continue;
+        const t2=c>>2;
+        if(big) X.drawImage(spriteFor(t2,c&3,z),sx+(ox+cx)*z,sy+(oy+cy)*z,z,z);
+        else{
+          // one fillStyle change per run of the same type rather than per cell
+          if(t2!==lastT){ X.fillStyle=avgColor(t2); lastT=t2; }
+          X.fillRect(sx+(ox+cx)*z,sy+(oy+cy)*z,z,z);
+        }
+      }
     }
     X.globalAlpha=1;
   }
@@ -2530,8 +2578,11 @@ function fillSelection(){
     if(wasAir?!fillOverAir:!fillOverCells) continue;
     let r=Math.random()*tot, t=ts[ts.length-1];
     for(const c of ts){ r-=fillW[c]; if(r<=0){ t=c; break; } }
-    if(t===-2){                               // the plus mark, not a cell
-      world.place(x,y,0);
+    if(t===-2){
+      /* The plus mark sits underneath whatever is already on the tile -- it
+         says where a level lets you build, which is a separate thing from what
+         is standing there. It used to clear the cell first, so scattering
+         placeable through a machine deleted the machine. */
       const o=y*world.W+x;
       if(!placeMask[o]){ placeMask[o]=1; noteMaskCell(x,y,true); }
       continue;
@@ -2553,7 +2604,14 @@ function grabSel(clone){
     cells[y*w+x]=world.g[world.idx(x0+x,y0+y)];
     if(!clone) world.place(x0+x,y0+y,0);
   }
-  carry={w,h,cells,from:clone?null:{x:x0,y:y0}};
+  /* ax,ay is the cell of the block sitting under the cursor. Everything
+     positions the block from that rather than from its top-left corner, so
+     turning it pivots about the pointer instead of swinging the whole thing
+     around the corner. */
+  const hv=hoverCellRaw()||{x:x0,y:y0};
+  const ax=Math.max(0,Math.min(w-1,hv.x-x0)), ay=Math.max(0,Math.min(h-1,hv.y-y0));
+  carry={w,h,cells,ax,ay,from:clone?null:{x:x0,y:y0},
+         src:clone?null:{x:x0,y:y0,w,h,cells:cells.slice()}};
   clearSel(); sfx("click");
 }
 // Rotating a block turns the layout and every cell's facing together, which is
@@ -2569,7 +2627,13 @@ function rotateCarry(step){
     const ny = step===1 ? x       : (w-1-x);
     out[ny*nw+nx]=mk(c>>2,((c&3)+step)&3);
   }
-  carry={w:nw,h:nh,cells:out,from:null};   // no longer lines up with where it came from
+  // the anchor turns with everything else, which is what keeps the cell under
+  // the cursor under the cursor
+  const nax = step===1 ? (h-1-carry.ay) : carry.ay;
+  const nay = step===1 ? carry.ax       : (w-1-carry.ax);
+  carry={w:nw,h:nh,cells:out,ax:nax,ay:nay,
+         from:null,                        // no longer lines up with where it came from
+         src:carry.src};                   // ...but the ghost still marks where that was
 }
 function stampAt(cy,ax,ay){
   for(let y=0;y<cy.h;y++)for(let x=0;x<cy.w;x++){
@@ -2679,7 +2743,10 @@ function boardInput(dt){
   if(carry){
     const hc=hoverCellRaw();
     if(hc){
-      if(M.click&&!M.pressUI){ stampAt(carry,hc.x,hc.y); carry=null; sfx("place"); }
+      if(M.click&&!M.pressUI){
+        stampAt(carry,hc.x-(carry.ax|0),hc.y-(carry.ay|0));
+        carry=null; sfx("place");
+      }
       if(M.rclick&&!M.rpressUI){
         if(carry.from) stampAt(carry,carry.from.x,carry.from.y);
         carry=null;
@@ -3066,7 +3133,9 @@ function screenGame(dt){
   const ty=H-barH-th-4*U;
   // reset stacks above play/step only when the column has the height for it
   const stack=touchUsed&&(ty-th-colGap)>(colY+bs+colGap+rSize+colGap);
-  const transportCols=stack?2:3;
+  // With reset hidden the row is one button narrower, and the space it was
+  // reserving should be given back to whatever sits beside it.
+  const transportCols=stack?2:(started?3:2);
   const transportRight=pad+transportCols*(tw+4*U)+6*U;
 
   // actions on a rectangle selection
@@ -3262,7 +3331,7 @@ function screenGame(dt){
   /* The mockup stacks these at the lower left: reset sits on its own above the
      play/step pair rather than all three in a row, which keeps them clear of
      the wider bottom bar and away from the middle of the board. */
-  if(stack){
+  if(stack&&started){
     const ry2=ty-th-4*U;
     if(uiBtn(pad,ry2,tw,th,"",1)) restoreInitial();
     X.strokeStyle=WHITE; X.lineWidth=Math.max(2,U);
@@ -3290,7 +3359,7 @@ function screenGame(dt){
   X.beginPath();X.moveTo(sx3+tw*0.3,ty+th*0.24);X.lineTo(sx3+tw*0.6,ty+th*0.5);
   X.lineTo(sx3+tw*0.3,ty+th*0.76);X.closePath();X.fill();
   X.fillRect(sx3+tw*0.64,ty+th*0.24,tw*0.08,th*0.52);
-  if(!stack){
+  if(!stack&&started){
     const rx=sx3+tw+4*U;
     if(uiBtn(rx,ty,tw,th,"",1)) restoreInitial();
     X.strokeStyle=WHITE; X.lineWidth=Math.max(2,U);
