@@ -4423,6 +4423,17 @@ function loop(t){
     voiceWorld(); checkWin();
   }
 
+  /* A text box only holds focus while whatever drew it is still on screen.
+     Closing the pause menu used to leave the name or description focused, so
+     every key afterwards went on typing into an invisible field -- and since a
+     focused field swallows the keyboard, the game's own keys stopped working. */
+  if(focusField){
+    const live={lname:paused&&!modal, ldesc:paused&&!modal,
+                w:modal==="world", h:modal==="world",
+                loadq:modal==="load", schemq:schemOpen, fillw:modal==="fill"};
+    if(live[focusField]===false) focusField=null;
+  }
+
   if(scr==="title") screenTitle(dt);
   else if(scr==="playmenu") screenPlayMenu();
   else if(scr==="options") screenOptions();
