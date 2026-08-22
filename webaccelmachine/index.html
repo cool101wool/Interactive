@@ -1272,6 +1272,10 @@ function consumeClick(){ M.click=false; M.rclick=false; M.mclick=false; }
 function hitR(x,y,w,h){ return M.rclick&&inRect(x,y,w,h); }
 function hitM(x,y,w,h){ return M.mclick&&inRect(x,y,w,h); }
 function openModal(name){ modal=name; focusField=null; consumeClick(); }
+/* Closing has to eat the click as well as opening does. A panel that vanished
+   on mouse-down left the same press to reach the board underneath, so pressing
+   FILL also placed a cell or picked a different tool. */
+function closeModal(to){ modal=to||null; focusField=null; consumeClick(); }
 function uiSlider(id,x,y,w,val){
   // The reserved zone has to cover everything the slider will react to. It used
   // to be smaller than the hot area, leaving a band where a press was neither
@@ -2440,14 +2444,14 @@ function drawBoardOverlays(){
     }
     X.globalAlpha=1;
   }
-  if(carry&&hraw){
-    const ax=carry.ax|0, ay=carry.ay|0;
+  const corg=carry?carryOrigin():null;
+  if(carry&&corg){
     X.globalAlpha=.75;
     /* Only the part of the carried block that is both on the board and on the
        screen is worth walking. Scanning the whole block cost a million
        iterations a frame on a large selection, nearly all of them for cells
        nowhere near the window -- dragging a big build was unusable. */
-    const ox=hraw.x-ax, oy=hraw.y-ay;      // top-left, derived from the anchor
+    const ox=corg.x, oy=corg.y;            // pinned, or hanging off the pointer
     const cx0=Math.max(0,-ox,Math.floor((-sx)/z)-ox-1);
     const cx1=Math.min(carry.w-1,world.W-1-ox,Math.ceil((W-sx)/z)-ox+1);
     const cy0=Math.max(0,-oy,Math.floor((-sy)/z)-oy-1);
@@ -2611,8 +2615,13 @@ function grabSel(clone){
      positions the block from that rather than from its top-left corner, so
      turning it pivots about the pointer instead of swinging the whole thing
      around the corner. */
-  const hv=hoverCellRaw()||{x:x0,y:y0};
-  const ax=Math.max(0,Math.min(w-1,hv.x-x0)), ay=Math.max(0,Math.min(h-1,hv.y-y0));
+  /* Only take an anchor from the pointer if the pointer is actually inside the
+     selection. On touch the "cursor" is wherever the finger last was -- usually
+     the copy button, nowhere near the block -- and clamping that to the edge
+     put the block half a screen from where it was picked up. */
+  const hv=hoverCellRaw();
+  const inside=hv&&hv.x>=x0&&hv.x<x0+w&&hv.y>=y0&&hv.y<y0+h;
+  const ax=inside?hv.x-x0:0, ay=inside?hv.y-y0:0;
   carry={w,h,cells,ax,ay,from:clone?null:{x:x0,y:y0},
          src:clone?null:{x:x0,y:y0,w,h,cells:cells.slice()}};
   clearSel(); sfx("click");
@@ -2634,9 +2643,33 @@ function rotateCarry(step){
   // the cursor under the cursor
   const nax = step===1 ? (h-1-carry.ay) : carry.ay;
   const nay = step===1 ? carry.ax       : (w-1-carry.ax);
-  carry={w:nw,h:nh,cells:out,ax:nax,ay:nay,
+  /* If it is pinned, keep the cell under the anchor exactly where it is: the
+     top-left moves by however much the anchor moved within the block. */
+  const at=carry.at?{x:carry.at.x+carry.ax-nax,y:carry.at.y+carry.ay-nay}:null;
+  carry={w:nw,h:nh,cells:out,ax:nax,ay:nay,at,
          from:null,                        // no longer lines up with where it came from
          src:carry.src};                   // ...but the ghost still marks where that was
+}
+// Commit the carried block wherever the preview currently is.
+function placeCarry(){
+  if(!carry) return;
+  const o=carryOrigin();
+  if(!o) return;
+  stampAt(carry,o.x,o.y);
+  carry=null; sfx("place");
+}
+// Put it back where it came from, if it was cut rather than copied.
+function cancelCarry(){
+  if(!carry) return;
+  if(carry.from) stampAt(carry,carry.from.x,carry.from.y);
+  carry=null;
+}
+// Pinned by a click, otherwise following the pointer.
+function carryOrigin(){
+  if(!carry) return null;
+  if(carry.at) return carry.at;
+  const h=hoverCellRaw();
+  return h?{x:h.x-(carry.ax|0),y:h.y-(carry.ay|0)}:null;
 }
 function stampAt(cy,ax,ay){
   for(let y=0;y<cy.h;y++)for(let x=0;x<cy.w;x++){
@@ -2744,16 +2777,16 @@ function boardInput(dt){
      matching the preview. It is handled before the on-board guard below,
      because that guard would otherwise reject the whole action. */
   if(carry){
+    /* A click used to stamp immediately, which on touch meant every stray tap
+       dumped the block somewhere. Now a click only says where it goes, and
+       PLACE commits it. */
     const hc=hoverCellRaw();
     if(hc){
       if(M.click&&!M.pressUI){
-        stampAt(carry,hc.x-(carry.ax|0),hc.y-(carry.ay|0));
-        carry=null; sfx("place");
+        carry.at={x:hc.x-(carry.ax|0),y:hc.y-(carry.ay|0)};
+        sfx("click");
       }
-      if(M.rclick&&!M.rpressUI){
-        if(carry.from) stampAt(carry,carry.from.x,carry.from.y);
-        carry=null;
-      }
+      if(M.rclick&&!M.rpressUI) cancelCarry();
     }
     return;
   }
@@ -3142,6 +3175,19 @@ function screenGame(dt){
   const transportRight=pad+transportCols*(tw+4*U)+6*U;
 
   // actions on a rectangle selection
+  // A block in hand: say where it will land and how to commit or drop it.
+  if(editing&&carry){
+    const bh3=Math.max(btnH(U*2),touchUsed?TAP():0);
+    const pw3=btnW("PLACE",U*2), cw3b=btnW("CANCEL",U*2), gp3=6*U;
+    let ax3=Math.max(transportRight,Math.round((W-(pw3+cw3b+gp3))/2));
+    let ay3=H-barH-bh3-4*U;
+    if(ax3+pw3+cw3b+gp3>W-pad){ ax3=Math.max(pad,W-pad-(pw3+cw3b+gp3)); }
+    if(uiBtn(ax3,ay3,0,0,"PLACE",U*2)){ placeCarry(); consumeClick(); }
+    if(uiBtn(ax3+pw3+gp3,ay3,0,0,"CANCEL",U*2)){ cancelCarry(); consumeClick(); }
+    const hint=carry.at?"press PLACE to drop it here"
+                       :(touchUsed?"tap the board to position it":"click the board to position it");
+    textFit(hint,ax3,ay3-textH(U)-2*U,Math.max(pw3+cw3b+gp3,W-pad-ax3),textH(U),DIM,"left",1,U);
+  }
   if(editing&&sel&&!carry){
     // Finger-sized on touch: these were laid out for a cursor and were by far
     // the smallest targets on the screen.
@@ -3217,18 +3263,30 @@ function screenGame(dt){
     const dw=Math.min(70*U,W*0.32);
     let dy=(tickBeside?pad+textH(U*3)+3*U
                      :ty0+textH(U*2)+2*U+(levelName?textH(U*2)+2*U:0));
-    if(levelName&&!tickBeside){            // a rule between the two
-      X.fillStyle="#5a5a5a"; X.fillRect(pad+U,dy-2*U,Math.min(dw,40*U),Math.max(1,U));
+    /* The tool preview column and its q/e caption own the left edge from colY
+       downwards. However many lines the description has, it stops before that
+       -- it used to run straight through the column. */
+    const room=Math.max(0,colY-2*U-dy);
+    const maxLines=Math.max(0,Math.min(3,Math.floor(room/textH(U))));
+    if(maxLines>0){
+      if(levelName&&!tickBeside){          // a rule between the two
+        X.fillStyle="#5a5a5a"; X.fillRect(pad+U,dy-2*U,Math.min(dw,40*U),Math.max(1,U));
+      }
+      const words=levelDesc.split(/\s+/); const lines=[]; let cur="";
+      for(const w2 of words){
+        const t2=cur?cur+" "+w2:w2;
+        if(textW(t2,U,1)>dw&&cur){ lines.push(cur); cur=w2; if(lines.length===maxLines) break; }
+        else cur=t2;
+      }
+      if(lines.length<maxLines&&cur) lines.push(cur);
+      // a description cut short says so rather than just stopping
+      if(lines.length===maxLines){
+        const last=lines[maxLines-1];
+        if(textW(levelDesc,U,1)>dw*maxLines) lines[maxLines-1]=clipText(last+" ...",dw-3*U,U,1);
+      }
+      for(let i=0;i<lines.length;i++)
+        textFit(lines[i],pad+3*U,dy+i*textH(U),dw-3*U,textH(U),"#8f8f8f","left",1,U);
     }
-    const words=levelDesc.split(/\s+/); const lines=[]; let cur="";
-    for(const w2 of words){
-      const t2=cur?cur+" "+w2:w2;
-      if(textW(t2,U,1)>dw&&cur){ lines.push(cur); cur=w2; if(lines.length===3) break; }
-      else cur=t2;
-    }
-    if(lines.length<3&&cur) lines.push(cur);
-    for(let i=0;i<lines.length;i++)
-      textFit(lines[i],pad+3*U,dy+i*textH(U),dw-3*U,textH(U),"#8f8f8f","left",1,U);
   }
   /* --- bottom right: the rate actually achieved.
      Three things already live in this corner, so it has to clear all of them:
@@ -3690,7 +3748,7 @@ function overlayExitConfirm(){
   textFit(q,p.x+m,p.y+m,p.w-2*m,textH(u*2),YELLOW,"center",1,u*2);
   textFit(sub,p.x+m,p.y+m+textH(u*2)+3*u,p.w-2*m,textH(u),YELLOW,"center",1,u);
   const by=p.y+p.h-m-btnH(u*2);
-  if(uiBtn(p.x+p.w-m-btnW("STAY",u*2),by,0,0,"STAY",u*2,YELLOW)){ modal=null; consumeClick(); }
+  if(uiBtn(p.x+p.w-m-btnW("STAY",u*2),by,0,0,"STAY",u*2,YELLOW)) closeModal();
   if(uiBtn(p.x+m,by,0,0,"EXIT",u*2,YELLOW)){
     modal=null; paused=false; won=false; nav("title");
   }
@@ -3714,7 +3772,7 @@ function overlayHelp(){
   const p=panelRect(pw,ph);
   const u=U;
   textFit("CONTROLS",p.x+m,p.y+m,p.w-2*m-14*u,head,WHITE,"left",2,u*2);
-  if(closeBtn(p,u)) modal=null;
+  if(closeBtn(p,u)) closeModal();
   // dark plate behind the list: blue on grey would be unreadable
   const ly=p.y+m+head+3*u;
   const lh=Math.min(CONTROLS.length*lineH+2*u,p.y+p.h-m-ly);
@@ -3792,7 +3850,7 @@ function overlayFill(){
                     2*m+textW("Overwrite cells",U,1)+(touchUsed?Math.round(toggleH()*2):16*U)+10*U);
   const p=panelRect(pw,needH());
   textFit("FILL SELECTION",p.x+m,p.y+m,p.w-2*m-14*U,head,WHITE,"left",2,hs);
-  if(closeBtn(p,U)){ fillRestore(); modal=null; }
+  if(closeBtn(p,U)){ fillRestore(); closeModal(); }
   let y=p.y+m+head+4*U;
   textFit(picked.length?"right click removes - middle click opens facings"
                        :"click the cells you want scattered over the selection",
@@ -3873,10 +3931,10 @@ function overlayFill(){
   const by=p.y+p.h-m-btnH(hs);
   if(uiBtn(p.x+m,by,0,0,"FILL",hs)){
     if(!picked.length) say("click at least one cell first",true);
-    else { fillSelection(); modal=null; }
+    else { fillSelection(); closeModal(); }
   }
   const cw2=btnW("CANCEL",hs);
-  if(uiBtn(p.x+p.w-m-cw2,by,0,0,"CANCEL",hs)){ fillRestore(); modal=null; }
+  if(uiBtn(p.x+p.w-m-cw2,by,0,0,"CANCEL",hs)){ fillRestore(); closeModal(); }
   // CLEAR is not apply and not cancel, so it sits between them
   const clw=btnW("CLEAR",hs);
   const cmid=p.x+p.w-m-cw2-6*U-clw;
@@ -3902,7 +3960,7 @@ function overlayFillRot(){
   textFit(t===-2?"PLACEABLE STATES"
                 :"FACINGS OF "+((NAMES[t]||"CELL").toUpperCase()),
           p.x+m,p.y+m,p.w-2*m-14*U,head,WHITE,"left",2,hs);
-  if(closeBtn(p,U)){ rotRestore(t); modal="fill"; }   // back to the panel, not the board
+  if(closeBtn(p,U)){ rotRestore(t); closeModal("fill"); }  // back to the panel, not the board
   let y=p.y+m+head+4*U;
   textFit(t===-2?"right click zeroes one - middle click keeps only that one"
                 :"right click zeroes a direction - middle click keeps only that one",
@@ -3939,10 +3997,10 @@ function overlayFillRot(){
   if(uiBtn(p.x+m,by,0,0,"DONE",hs)){
     let tot=0; for(let r=0;r<n;r++) tot+=rotWeight(t,r);
     if(tot<=0) for(let r=0;r<n;r++) fillRW[t+":"+r]=50;   // never leave it unfillable
-    modal="fill";
+    closeModal("fill");
   }
   const cw3=btnW("CANCEL",hs);
-  if(uiBtn(p.x+p.w-m-cw3,by,0,0,"CANCEL",hs)){ rotRestore(t); modal="fill"; }
+  if(uiBtn(p.x+p.w-m-cw3,by,0,0,"CANCEL",hs)){ rotRestore(t); closeModal("fill"); }
   const ew=btnW("EVEN",hs), emid=p.x+p.w-m-cw3-6*U-ew;
   if(emid>p.x+m+btnW("DONE",hs)+6*U&&uiBtn(emid,by,0,0,"EVEN",hs))
     for(let r=0;r<n;r++) fillRW[t+":"+r]=50;
@@ -3969,7 +4027,7 @@ function overlaySettings(){
   const _k=u/U;
 const p=panelRect(needW*_k,needH*_k);
   textFit("SETTINGS",p.x+m,p.y+m,p.w-2*m-14*u,head,WHITE,"left",2,hs);
-  if(closeBtn(p,u)) modal=null;
+  if(closeBtn(p,u)) closeModal();
   let y=p.y+m+head+5*u;
   const cx=p.x+m+labW+6*u;
   const row=(label,note,ctl)=>{
@@ -4113,7 +4171,7 @@ function overlayWorld(){
   let ts=u*3;                       // keep the title clear of the close button
   while(ts>1&&textW("WORLD SIZE",ts,2)>p.w-2*m-14*u) ts--;
   text("WORLD SIZE",p.x+m,p.y+m,ts,WHITE,"left",2);
-  if(closeBtn(p,u)) modal=null;
+  if(closeBtn(p,u)) closeModal();
   let y=p.y+m+textH(ts)+6*u;
   // a click anywhere else drops focus, so typing cannot leak into the game
   const box=(label,key,val)=>{
@@ -4146,7 +4204,7 @@ function overlayWorld(){
   }
   const by=p.y+p.h-m-btnH(HS);
   // Cancel on the left, apply on the right.
-  if(uiBtn(p.x+p.w-m-btnW("CANCEL",HS),by,0,0,"CANCEL",HS)){ focusField=null; modal=null; }
+  if(uiBtn(p.x+p.w-m-btnW("CANCEL",HS),by,0,0,"CANCEL",HS)) closeModal();
   if(uiBtn(p.x+m,by,0,0,"APPLY",HS)){
     // 9999 x 9999 is 100 million cells -- around 270 MB of engine state, which
     // is heavy but real. Anything past the 32-bit index ceiling is refused by
@@ -4158,7 +4216,7 @@ function overlayWorld(){
       try{
         resizeWorld(nw,nh,szAnchor);
         say(`world is ${nw} x ${nh}`+(nw*nh>4e6?` (${(nw*nh/1e6).toFixed(1)}M cells)`:""));
-        focusField=null; modal=null;
+        closeModal();
       }catch(e){ say("could not resize: "+e.message,true); }
     }
   }
@@ -4191,7 +4249,7 @@ function overlaySchemHelp(){
   while(u>1&&blockH(u)>bodyH) u--;
   const p=panelRect(pw,ph);
   textFit("SCHEMATICS",p.x+m,p.y+m,p.w-2*m-14*U,head,WHITE,"left",2,U*2);
-  if(closeBtn(p,U)) modal=null;
+  if(closeBtn(p,U)) closeModal();
   let y=p.y+m+head+2*U;
   for(const para of SCHEM_HELP){
     if(!para){ y+=Math.round(textH(u)/2); continue; }
@@ -4253,7 +4311,7 @@ function overlayLoad(){
     textFit(`${loadScroll+1}-${Math.min(saves.length,loadScroll+visible)} of ${saves.length}`,
             p.x+m+btnW("BACK",u)+6*u,p.y+p.h-m-btnH(u),p.w-2*m-btnW("BACK",u)-8*u,
             btnH(u),"#222","right",1,u);
-  if(uiBtn(p.x+m,p.y+p.h-m-btnH(u),0,0,"BACK",u)) modal=null;
+  if(uiBtn(p.x+m,p.y+p.h-m-btnH(u),0,0,"BACK",u)) closeModal();
 }
 const gapPad=()=>10*U;
 function overlayVariant(){
@@ -4273,7 +4331,7 @@ const p=panelRect(needW*_k,needH*_k);
   let y=p.y+m+textH(u*2)+4*u+textH(u)+6*u;
   VARIANTS.forEach(v=>{
     if(uiBtn(p.x+m,y,p.w-2*m,rowH,"",1)){
-      loadLevel(pending); pending=null; modal=null; paused=false;
+      loadLevel(pending); pending=null; paused=false; closeModal();
       afterLoad(mode);
       say("loaded "+world.W+"x"+world.H);
     }
