@@ -1669,6 +1669,7 @@ async function copyText(t){
 const S={musicVol:.8,sfxVol:.8,fast:false,noDraw:false};
 let scr="title", paused=false, modal=null, pending=null, toast="", toastT=-1e9;
 let world=null, placeMask=null, levelName="", levelDesc="", tickCount=0;
+let tpsRowBottom=0;                          // bottom of the speed row, for the drawer
 /* The rate actually achieved, which is not the rate asked for once the board
    is big enough to fall behind. Counted over a moving second. */
 let tpsMark=0, tpsSeen=0, tpsReal=0;
@@ -3169,6 +3170,14 @@ function screenGame(dt){
   const colTop=colBot-stackH;
   const menuBottom=pad+btnH(touchUsed?U*3:U*2)+6*U;
   const tightCol=touchUsed&&colTop<menuBottom;
+  /* How far right the left-hand column actually reaches. The preview box is
+     the narrowest part of it -- the "Q / E" caption underneath is wider, and in
+     level mode the status line is wider still -- so anything stepping around
+     the column has to clear this, not just the box. */
+  const colWidest=(mode==="level")
+    ? Math.max(44*U,bs*2)
+    : (touchUsed ? (tightCol?bs+3*U+rSize:bs)
+                 : Math.max(bs,textW("Q / E",U,1)+2*U));
   const colX=pad;
   const colY=touchUsed?(tightCol?Math.round(menuBottom):Math.round(colTop))
                       :Math.round(H/2-bs/2);
@@ -3187,9 +3196,14 @@ function screenGame(dt){
   if(editing&&carry&&touchUsed){
     const bh3=Math.max(btnH(U*2),touchUsed?TAP():0);
     const pw3=btnW("PLACE",U*2), cw3b=btnW("CANCEL",U*2), gp3=6*U;
-    let ax3=Math.max(transportRight,Math.round((W-(pw3+cw3b+gp3))/2));
+    const tot3=pw3+cw3b+gp3;
+    let ax3=Math.max(transportRight,Math.round((W-tot3)/2));
     let ay3=H-barH-bh3-4*U;
-    if(ax3+pw3+cw3b+gp3>W-pad){ ax3=Math.max(pad,W-pad-(pw3+cw3b+gp3)); }
+    if(ax3+tot3>W-pad){
+      ax3=Math.max(pad,W-pad-tot3);
+      // no room beside the transport: take a line of its own above it
+      if(ax3<transportRight) ay3-=bh3+4*U;
+    }
     /* Read the state before the buttons run: both of them clear `carry`, so
        anything below that still reaches into it dies on the press. */
     const hint=carry.at?"press PLACE to drop it here"
@@ -3272,19 +3286,32 @@ function screenGame(dt){
   /* Title and description live in a column down the left, clear of the board.
      At 42% of the width they ran nearly to the middle of the screen; a little
      over a quarter keeps them in their own lane. */
-  const textColW=Math.max(Math.min(20*glyph,W-2*pad),Math.min(W*0.26,W-2*pad));
+  /* An open drawer takes the right-hand side of the screen, so the text column
+     stops at its edge rather than sliding underneath it. */
+  const schemTab=(touchUsed?Math.max(TAP(),U*32):Math.max(22,U*15))+3*U;
+  const schemW0=(schemOpen?(touchUsed?Math.min(Math.round(W*0.72),260*U)
+                                     :Math.min(Math.round(W*0.42),190*U)):0)+schemTab;
+  const textRoom=W-2*pad-schemW0;
+  const textColW=Math.max(0,Math.min(Math.max(12*glyph,W*0.26),textRoom));
+  /* Below about eight characters a line there is nothing useful to show -- an
+     open drawer on a small phone leaves that little -- so the level's text
+     stands down rather than being drawn over the drawer. */
+  const textRoomOK=textColW>=8*glyph;
   const textBoxW=textColW;
-  if(levelName&&!tickBeside)
+  if(levelName&&!tickBeside&&textRoomOK)
     textFitMid(levelName,pad+U,ty0+textH(U*2)+2*U,textBoxW,textH(U*2),WHITE,"left",2,U*2);
   /* A level's description is written for whoever is playing it, so it belongs
      on screen rather than buried in a menu. Wrapped to the width it has and
      capped at three lines. */
-  if(levelDesc){
+  if(levelDesc&&textRoomOK){
     /* 70*U was sized as though the text were drawn at scale 1. It is drawn at
        scale U, so each glyph is U times wider and the box held about seven
        characters. Size it from the glyph width actually used. */
     const dw=textBoxW;
-    let dy=(tickBeside?pad+textH(U*3)+3*U
+    // menuBottom, not the tick text: on touch the MENU button is taller than
+    // the counter beside it, so measuring from the counter started the text
+    // part-way up the button.
+    let dy=(tickBeside?Math.max(pad+textH(U*3)+3*U,menuBottom+2*U)
                      :ty0+textH(U*2)+2*U+(levelName?textH(U*2)+2*U:0));
     /* The tool column owns the left edge from colY down. Above it there is
        often only a line or two of space, so if the whole description will not
@@ -3302,7 +3329,7 @@ function screenGame(dt){
     };
     const right=pad+U+textColW;                 // the same edge the title stops at
     const spot=(x,room)=>{
-      const width=Math.max(8*glyph,Math.min(dw,right-x));
+      const width=Math.min(dw,Math.max(0,right-x));
       const cap=Math.max(0,Math.min(4,Math.floor(room/textH(U))));
       const r=wrapTo(width,cap);
       return {x,width,cap,lines:r.lines,cut:r.cut||r.lines.length>cap};
@@ -3310,7 +3337,11 @@ function screenGame(dt){
     let put=spot(pad+3*U,Math.max(0,colY-2*U-dy));
     if(put.cut){
       // beside the column rather than above it
-      const alt=spot(pad+bs+6*U,Math.max(0,H-barH-10*U-dy));
+      /* Stepping aside has to clear the transport buttons as well as the tool
+         preview -- with more lines the text reaches further down, and in level
+         mode the column is narrower than the transport row beneath it. */
+      const altX=Math.max(pad+colWidest+6*U,transportRight+6*U);
+      const alt=spot(altX,Math.max(0,H-barH-10*U-dy));
       if(!alt.cut||alt.lines.length>put.lines.length) put=alt;
     }
     const dx=put.x, dwUse=put.width;
@@ -3335,15 +3366,34 @@ function screenGame(dt){
     const lab=grp(tpsReal>=100?Math.round(tpsReal):tpsReal>=10?tpsReal.toFixed(0)
                  :tpsReal.toFixed(1))+" tps";
     const bw2=textW("888,888 tps",U,1)+4*U, bh2=textH(U)+3*U;
+    /* Either the selection row or the place/cancel row can be above the palette
+       bar. The selection row also drops onto a line of its own when it cannot
+       fit beside the transport, which is the usual case in portrait -- so this
+       has to mirror that decision, not assume a single row. */
     const selIs=touchUsed?Math.max(TAP(),U*30):Math.max(20,U*13);
-    const selRowH=(editing&&sel&&!carry)?selIs+8*U:0;
+    let selRowH=0;
+    if(editing&&sel&&!carry){
+      const sgp=touchUsed?3*U:4*U, stotW=6*selIs+5*sgp;
+      let sax=Math.max(transportRight,Math.round((W-stotW)/2));
+      selRowH=selIs+8*U;
+      if(sax+stotW>W-pad){
+        sax=Math.max(pad,W-pad-stotW);
+        if(sax<transportRight) selRowH+=selIs+4*U;   // it went up a line
+      }
+    } else if(editing&&carry&&touchUsed){
+      selRowH=Math.max(btnH(U*2),TAP())+textH(U)+10*U;
+    }
     const schW=schemOpen?(touchUsed?Math.min(Math.round(W*0.72),260*U)
                                    :Math.min(Math.round(W*0.42),190*U)):0;
     const bx2=W-schW-pad-bw2, by2=H-barH-selRowH-bh2-4*U;
-    X.fillStyle="rgba(0,0,0,.55)"; X.fillRect(bx2,by2,bw2,bh2);
-    textFit(playing?lab:"paused",bx2,by2+1.5*U,bw2,textH(U),
-            playing?"#8f8f8f":"#5a5a5a","center",1,U);
-    reserve(bx2,by2,bw2,bh2);
+    // Pushed left by an open drawer it lands on the transport, and it is the
+    // least important thing on screen, so it simply steps out of the way.
+    if(!(schemOpen&&touchUsed)){
+      X.fillStyle="rgba(0,0,0,.55)"; X.fillRect(bx2,by2,bw2,bh2);
+      textFit(playing?lab:"paused",bx2,by2+1.5*U,bw2,textH(U),
+              playing?"#8f8f8f":"#5a5a5a","center",1,U);
+      reserve(bx2,by2,bw2,bh2);
+    }
   }
   // --- top right
   // Twice the old length: a longer track means finer control over the speed,
@@ -3399,6 +3449,10 @@ function screenGame(dt){
   text(tpsLabel(),labelInline?sx2-4*U:W-pad,pad+U,U*2,WHITE,"right",1);
   const t=uiSlider("tps",sx2,slY,sw,tpsIdx/(TPS.length-1));
   tpsIdx=Math.round(t*(TPS.length-1));
+  /* When the label will not share the row it moves onto its own line and the
+     track drops below it. The drawer used a fixed guess at where that row ends,
+     so in portrait it opened straight over the speed slider. */
+  tpsRowBottom=slY+(touchUsed?Math.max(TAP()/2,8*U):5*U);
   // --- left column: preview + transport
   const px=colX, py=colY;
   if(editing){
@@ -3484,7 +3538,7 @@ function drawSchematics(pad,barH){
   const is=touchUsed?Math.max(TAP(),U*32):Math.max(22,U*15);
   const pw=touchUsed?Math.min(Math.round(W*0.72),260*U)
                     :Math.min(Math.round(W*0.42),190*U);
-  const top=Math.round(pad+textH(U*2)+9*U);   // clear of the tps row
+  const top=Math.round(Math.max(pad+textH(U*2)+9*U,tpsRowBottom+4*U));  // clear of the tps row
   const bot=H-barH-4*U;
   const px=schemOpen?W-pw:W;
   const bx=px-is-3*U, by=top;
