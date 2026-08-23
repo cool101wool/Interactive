@@ -3269,7 +3269,11 @@ function screenGame(dt){
      fitScale shrank it to scale 1 -- leaving the name three times smaller than
      its own description. */
   const glyph=(FONT_W+1)*U;
-  const textBoxW=Math.max(Math.min(24*glyph,W-2*pad),Math.min(40*glyph,W*0.42));
+  /* Title and description live in a column down the left, clear of the board.
+     At 42% of the width they ran nearly to the middle of the screen; a little
+     over a quarter keeps them in their own lane. */
+  const textColW=Math.max(Math.min(20*glyph,W-2*pad),Math.min(W*0.26,W-2*pad));
+  const textBoxW=textColW;
   if(levelName&&!tickBeside)
     textFitMid(levelName,pad+U,ty0+textH(U*2)+2*U,textBoxW,textH(U*2),WHITE,"left",2,U*2);
   /* A level's description is written for whoever is playing it, so it belongs
@@ -3296,8 +3300,9 @@ function screenGame(dt){
       if(cur) out.push(cur);
       return {lines:out,cut:false};
     };
+    const right=pad+U+textColW;                 // the same edge the title stops at
     const spot=(x,room)=>{
-      const width=Math.min(dw,Math.max(8*glyph,W-x-pad-2*glyph));
+      const width=Math.max(8*glyph,Math.min(dw,right-x));
       const cap=Math.max(0,Math.min(4,Math.floor(room/textH(U))));
       const r=wrapTo(width,cap);
       return {x,width,cap,lines:r.lines,cut:r.cut||r.lines.length>cap};
