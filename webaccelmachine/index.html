@@ -1666,7 +1666,35 @@ async function copyText(t){
 /* ===========================================================================
    STATE
    =========================================================================== */
-const S={musicVol:.8,sfxVol:.8,fast:false,noDraw:false};
+/* The two volumes live in cookies so they survive a reload. Levels and
+   schematics stay in IndexedDB -- a cookie is far too small for those -- but a
+   single number each is exactly what a cookie is for. */
+function cookieGet(name){
+  const m=String(document.cookie||"").match(
+    new RegExp("(?:^|;\\s*)"+name+"=([^;]*)"));
+  return m?decodeURIComponent(m[1]):null;
+}
+function cookieSet(name,value){
+  try{
+    // ten years, site-wide, and not sent with cross-site requests
+    document.cookie=name+"="+encodeURIComponent(value)+
+      ";path=/;max-age=315360000;samesite=lax";
+  }catch(e){}                                  // a browser with cookies off just forgets
+}
+function volFromCookie(name,dflt){
+  const v=parseFloat(cookieGet(name));
+  return isFinite(v)?Math.max(0,Math.min(1,v)):dflt;
+}
+const S={musicVol:volFromCookie("cm_muscvol",.8),
+         sfxVol:volFromCookie("cm_sfxvol",.8),
+         fast:false,noDraw:false};
+/* Written on change rather than on every frame: the sliders are read back each
+   frame, so an unconditional write would set the cookie sixty times a second. */
+let volSaved={m:S.musicVol,s:S.sfxVol};
+function saveVolumes(){
+  if(S.musicVol!==volSaved.m){ volSaved.m=S.musicVol; cookieSet("cm_muscvol",S.musicVol.toFixed(3)); }
+  if(S.sfxVol!==volSaved.s){ volSaved.s=S.sfxVol; cookieSet("cm_sfxvol",S.sfxVol.toFixed(3)); }
+}
 let scr="title", paused=false, modal=null, pending=null, toast="", toastT=-1e9;
 let world=null, placeMask=null, levelName="", levelDesc="", tickCount=0;
 let tpsRowBottom=0;                          // bottom of the speed row, for the drawer
@@ -1811,7 +1839,13 @@ function restoreInitial(){
   world=w; placeMask=initMask.slice();
   rescanMask();
   tickCount=0; playing=false; won=false; started=false; acc=0; tickDur=0;
-  clearSel(); selDrag=null; carry=null; dragCell=null;
+  clearSel(); selDrag=null; dragCell=null;
+  /* Whatever is held on the cursor survives a reset. Copying something out of a
+     running simulation and pressing R used to throw the copy away, which is the
+     opposite of what reset is for -- it puts the board back, not your hands.
+     The board it came from is gone, though, so cancelling can no longer put it
+     back where it was. */
+  if(carry){ carry.from=null; carry.src=null; carry.at=null; }
 }
 function beginRun(){ if(!started){ snapshotInitial(); started=true; } }
 function togglePlay(){
@@ -4491,6 +4525,7 @@ function loop(t){
      Closing the pause menu used to leave the name or description focused, so
      every key afterwards went on typing into an invisible field -- and since a
      focused field swallows the keyboard, the game's own keys stopped working. */
+  saveVolumes();
   if(focusField){
     const live={lname:paused&&!modal, ldesc:paused&&!modal,
                 w:modal==="world", h:modal==="world",
