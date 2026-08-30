@@ -961,6 +961,73 @@ function tailOf(str,w,sc,sp){
   const n=Math.max(1,Math.floor(w/cw));
   return str.slice(str.length-n);
 }
+/* Level titles carry Unity rich-text markup:
+     <size="24"><color="grey">Mystic Mod - <color=#8ABE23ff>Clock1
+   Colours are worth honouring. Sizes are not: they are absolute points chosen
+   for a different renderer, and a title that decides it wants 72pt would walk
+   straight across the board. A size may shrink text but never grow it. */
+const RICH_BASE=24;                          // the size these titles are written against
+const RICH_NAMES={black:"#000000",blue:"#4c6fff",brown:"#8b5a2b",cyan:"#4fd6d6",
+  darkblue:"#26268c",green:"#3fa63f",grey:"#8f8f8f",gray:"#8f8f8f",lightblue:"#9fd6ff",
+  lime:"#7ee04a",magenta:"#e04ae0",maroon:"#8c2626",navy:"#1a1a5c",olive:"#8c8c26",
+  orange:"#e08a1e",purple:"#a04ae0",red:"#e05a5a",silver:"#c0c0c0",teal:"#2f8c8c",
+  white:"#ffffff",yellow:"#e0d24a"};
+function richColour(v){
+  if(!v) return null;
+  v=String(v).trim().replace(/^["']|["']$/g,"");
+  if(v[0]==="#"){
+    const h=v.slice(1);
+    if(h.length===8) return "#"+h.slice(0,6);   // drop the alpha, we draw opaque
+    if(h.length===6||h.length===3) return "#"+h;
+    return null;
+  }
+  return RICH_NAMES[v.toLowerCase()]||null;
+}
+// -> [{t,colour,scale}]; scale is a multiplier, never above 1
+function richRuns(str){
+  const out=[]; const cols=[], sizes=[];
+  const re=/<\/?(color|size|b|i)(?:\s*=\s*([^>]*))?>/gi;
+  let last=0, m;
+  const push=t=>{ if(t) out.push({t,colour:cols[cols.length-1]||null,
+                                  scale:sizes.length?sizes[sizes.length-1]:1}); };
+  while((m=re.exec(str))){
+    push(str.slice(last,m.index));
+    last=re.lastIndex;
+    const close=m[0][1]==="/", tag=m[1].toLowerCase();
+    if(tag==="color"){ if(close) cols.pop(); else cols.push(richColour(m[2])); }
+    else if(tag==="size"){
+      if(close) sizes.pop();
+      else{
+        const n=parseFloat(String(m[2]||"").replace(/["']/g,""));
+        // shrink only: an upward size is ignored outright
+        sizes.push(isFinite(n)&&n>0?Math.min(1,n/RICH_BASE):1);
+      }
+    }
+  }
+  push(str.slice(last));
+  return out.length?out:[{t:"",colour:null,scale:1}];
+}
+const richPlain=str=>richRuns(str).map(r=>r.t).join("");
+// words, each carrying the colour and scale in force where it appeared
+function richTokens(str){
+  const out=[];
+  for(const r of richRuns(str))
+    for(const w of r.t.split(/(\s+)/))
+      if(w!=="") out.push({t:w,colour:r.colour,scale:r.scale,space:/^\s+$/.test(w)});
+  return out;
+}
+const richW=(toks,base,sp)=>toks.reduce((n,k)=>
+  n+textW(k.t,Math.max(1,Math.round(base*k.scale)),sp),0);
+// draw a run of tokens on one line, returning where it ended
+function richDraw(toks,x,y,base,sp,dflt){
+  let cx=x;
+  for(const k of toks){
+    const sc=Math.max(1,Math.round(base*k.scale));
+    if(!k.space) text(k.t,cx,y+Math.max(0,(textH(base)-textH(sc))/2),sc,k.colour||dflt,"left",sp);
+    cx+=textW(k.t,sc,sp);
+  }
+  return cx;
+}
 function wrapWords(str,w,sc,sp){
   const words=String(str).split(" "), out=[];
   let cur="";
@@ -3332,8 +3399,18 @@ function screenGame(dt){
      stands down rather than being drawn over the drawer. */
   const textRoomOK=textColW>=8*glyph;
   const textBoxW=textColW;
-  if(levelName&&!tickBeside&&textRoomOK)
-    textFitMid(levelName,pad+U,ty0+textH(U*2)+2*U,textBoxW,textH(U*2),WHITE,"left",2,U*2);
+  if(levelName&&!tickBeside&&textRoomOK){
+    const ny=ty0+textH(U*2)+2*U;
+    let toks=richTokens(levelName), base=U*2;
+    while(base>1&&richW(toks,base,2)>textBoxW) base--;
+    if(richW(toks,base,2)>textBoxW){
+      // still too wide at the smallest size: drop words off the end
+      const dots=[{t:"...",colour:null,scale:1}];
+      while(toks.length>1&&richW(toks.concat(dots),base,2)>textBoxW) toks.pop();
+      toks=toks.concat(dots);
+    }
+    richDraw(toks,pad+U,ny,base,2,WHITE);
+  }
   /* A level's description is written for whoever is playing it, so it belongs
      on screen rather than buried in a menu. Wrapped to the width it has and
      capped at three lines. */
@@ -3351,14 +3428,21 @@ function screenGame(dt){
        often only a line or two of space, so if the whole description will not
        fit there the text steps around the column instead of being cut: it is
        indented past the column's right edge, where the height is free. */
+    // wrapped as coloured tokens rather than a plain string
+    const dtoks=richTokens(levelDesc).filter(k=>!k.space||true);
     const wrapTo=(width,cap)=>{
-      const out=[]; let cur="";
-      for(const w2 of levelDesc.split(/\s+/)){
-        const t2=cur?cur+" "+w2:w2;
-        if(textW(t2,U,1)>width-3*U&&cur){ out.push(cur); cur=w2; if(out.length===cap) return {lines:out,cut:true}; }
-        else cur=t2;
+      const out=[]; let cur=[];
+      const flush=()=>{ while(cur.length&&cur[cur.length-1].space) cur.pop();
+                        if(cur.length) out.push(cur); cur=[]; };
+      for(const k of dtoks){
+        const next=cur.concat([k]);
+        if(!k.space&&richW(next,U,1)>width-3*U&&cur.length){
+          flush(); if(out.length===cap) return {lines:out,cut:true};
+          cur=[k];
+        } else if(k.space&&!cur.length){ /* no leading spaces */ }
+        else cur=next;
       }
-      if(cur) out.push(cur);
+      flush();
       return {lines:out,cut:false};
     };
     const right=pad+U+textColW;                 // the same edge the title stops at
@@ -3387,9 +3471,9 @@ function screenGame(dt){
       }
       // a description cut short says so rather than just stopping
       if(put.cut&&lines.length)
-        lines[lines.length-1]=clipText(lines[lines.length-1]+" ...",dwUse-3*U,U,1);
+        lines[lines.length-1]=lines[lines.length-1].concat([{t:" ...",colour:null,scale:1}]);
       for(let i=0;i<lines.length;i++)
-        textFit(lines[i],dx,dy+i*textH(U),dwUse-3*U,textH(U),"#8f8f8f","left",1,U);
+        richDraw(lines[i],dx,dy+i*textH(U),U,1,"#8f8f8f");
     }
   }
   /* --- bottom right: the rate actually achieved.
@@ -3813,11 +3897,11 @@ function overlayPause(){
   y+=textH(hs)+gap*2;
   // The level's name and description arrive with the code. Click one and type.
   textFit("NAME",p.x+m,y+(capH-textH(u))/2,capW,textH(u),DIM,"left",1,u);
-  if(mode==="level") readOnlyField(levelName||"untitled",p.x+m+capW,y,p.w-2*m-capW,capH,u,WHITE,u*2);
+  if(mode==="level") readOnlyField(richPlain(levelName)||"untitled",p.x+m+capW,y,p.w-2*m-capW,capH,u,WHITE,u*2);
   else textField("lname",p.x+m+capW,y,p.w-2*m-capW,capH,"untitled",u);
   y+=capH+2*u;
   textFit("DESCRIPTION",p.x+m,y+(capH-textH(u))/2,capW,textH(u),DIM,"left",1,u);
-  if(mode==="level") readOnlyField(levelDesc||"none",p.x+m+capW,y,p.w-2*m-capW,capH,u,"#8f8f8f",u);
+  if(mode==="level") readOnlyField(richPlain(levelDesc)||"none",p.x+m+capW,y,p.w-2*m-capW,capH,u,"#8f8f8f",u);
   else textField("ldesc",p.x+m+capW,y,p.w-2*m-capW,capH,"none",u);
   y+=capH+gap;
   if(mode==="level")
