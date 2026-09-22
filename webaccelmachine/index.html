@@ -1570,20 +1570,91 @@ function exportV3(w,mask,name,desc){
   }
   let end=n;
   while(end>0&&raw[end-1]===72) end--;       // trailing empties are implied
+
+  /* A back-reference copies `len` cells from `dist` places back, and because the
+     decoder copies them one at a time, len may exceed dist -- a distance of 1 is
+     how a plain run is written. The old exporter only ever used distance 1, so a
+     board that repeats a row, or a block of rows, had to spell out every row
+     again. Matching against everything already emitted turns those into one
+     reference each: on a 1000-wide board the useful distances come out as 1000,
+     3000, 6000 and so on, because that is what "the row above" means. */
+  const ref=(dist,len)=>{
+    const o=b74e(dist-1), l=b74e(len);
+    if(o.length===1&&l.length===1) return ")"+o+l;    //  )ol
+    if(l.length===1) return "("+o+")"+l;              //  (o)l
+    return "("+o+"("+l+")";                           //  (o(l)
+  };
+  const refCost=(dist,len)=>{
+    const o=b74e(dist-1).length, l=b74e(len).length;
+    return (o===1&&l===1)?3:(l===1?o+3:o+l+3);
+  };
+  // hash chain over three-cell sequences: enough to find row-length repeats
+  // without scanning the whole history at every position
+  const HB=17, HSIZE=1<<HB, HMASK=HSIZE-1;
+  const head=new Int32Array(HSIZE).fill(-1);
+  const prev=new Int32Array(end>0?end:1).fill(-1);
+  const h3=i=>((raw[i]*74+raw[i+1])*74+raw[i+2])&HMASK;
+  const MAXCHAIN=48;                          // deep enough for row repeats, cheap enough for 19M cells
   const parts=[];
+  let lit=0;                                  // literals waiting to be flushed
+  const flush=i=>{ if(!lit) return;
+    let sOut="";
+    for(let k=i-lit;k<i;k++) sOut+=B74[raw[k]];
+    parts.push(sOut); lit=0; };
+  const matchLen=(a,b,cap2)=>{ let k=0; while(k<cap2&&raw[a+k]===raw[b+k]) k++; return k; };
+  /* The hash chain alone is not enough on a board like this. A three-cell
+     sequence such as "ege" recurs every few cells in a striped pattern, so the
+     most recent entries in its chain are all a few cells back and a whole row
+     is never reached. The distances that matter here are structural -- one row,
+     two rows, and so on -- so they are tried directly. */
+  const W=w.W;
+  const rowDists=[1];
+  for(let k=1;k<=12;k++) rowDists.push(k*W);
   for(let i=0;i<end;){
-    let j=i+1;
-    const v=raw[i];
+    let bestLen=0,bestDist=0,bestSave=0;
+    const consider=dist=>{
+      if(dist<1||dist>i) return;
+      const l=matchLen(i-dist,i,end-i);
+      if(l<2) return;
+      const save=l-refCost(dist,l);
+      if(save>bestSave||(save===bestSave&&l>bestLen)){ bestSave=save; bestLen=l; bestDist=dist; }
+    };
+    for(const d2 of rowDists) consider(d2);
+    if(i+2<end){
+      let c=head[h3(i)], probes=0;
+      while(c>=0&&probes++<MAXCHAIN){ consider(i-c); c=prev[c]; }
+    }
+    const take=bestSave>0?bestLen:0;
+    if(take>=2&&refCost(bestDist,take)<take){
+      flush(i);
+      parts.push(ref(bestDist,take));
+      for(let k=0;k<take;k++){ if(i+k+2<end){ const h=h3(i+k); prev[i+k]=head[h]; head[h]=i+k; } }
+      i+=take;
+    }else{
+      if(i+2<end){ const h=h3(i); prev[i]=head[h]; head[h]=i; }
+      lit++; i++;
+    }
+  }
+  flush(end);
+
+  /* On a tiny board the matcher can come out a character or two longer than
+     plain run-length would. Both are valid codes, so build the simple one too
+     and keep whichever is shorter -- this can then never be a regression. */
+  const rle=[];
+  for(let i=0;i<end;){
+    let j=i+1; const v=raw[i];
     while(j<end&&raw[j]===v) j++;
     const run=j-i, ch=B74[v];
-    if(run<4) parts.push(ch.repeat(run));
-    else if(run-1<74) parts.push(ch+")0"+b74e(run-1));
-    else parts.push(ch+"(0("+b74e(run-1)+")");
+    if(run<4) rle.push(ch.repeat(run));
+    else if(run-1<74) rle.push(ch+")0"+b74e(run-1));
+    else rle.push(ch+"(0("+b74e(run-1)+")");
     i=j;
   }
+  const lzBody=parts.join(""), rleBody=rle.join("");
+  const body=lzBody.length<=rleBody.length?lzBody:rleBody;
   // field 4 is the description, field 5 the name -- both were being thrown away
   const clean=t=>String(t||"").replace(/;/g,",");
-  return `V3;${b74e(w.W)};${b74e(w.H)};${parts.join("")};${clean(desc)};${clean(name)};0`;
+  return `V3;${b74e(w.W)};${b74e(w.H)};${body};${clean(desc)};${clean(name)};0`;
 }
 
 const DB_NAME="webaccel", DB_VER=1;   // never change this: it is where saved
