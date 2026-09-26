@@ -24,7 +24,11 @@
    the level-code convention exactly, so no remapping on import.
    =========================================================================== */
 const T_EMPTY=0,T_PUSH=1,T_SLIDE=2,T_WALL=3,T_MOVER=4,T_GEN=5,T_CW=6,T_CCW=7,
-      T_ENEMY=8,T_TRASH=9,T_BORDER=10;
+      T_ENEMY=8,T_TRASH=9,T_BORDER=10,T_UNKNOWN=11;
+/* A stand-in for a cell this build has no rules for -- a modded cell out of an
+   imported level. It cannot be placed by hand, it sits there like a wall while
+   you are editing so the level still reads as its author drew it, and pressing
+   play removes every one of them rather than guessing at what they did. */
 const mk=(t,r)=>((t<<2)|r), ty=c=>c>>2, rt=c=>c&3;
 
 // level-code id -> internal type. ids: 0 gen,1 CW,2 CCW,3 mover,4 slide,
@@ -341,7 +345,7 @@ class World{
       }
       const t=c>>2;
       if(t===T_EMPTY||t===T_TRASH||t===T_ENEMY) break;
-      if(t===T_WALL||t===T_BORDER) return false;
+      if(t===T_WALL||t===T_BORDER||t===T_UNKNOWN) return false;
       if(t===T_SLIDE){ if((((c&3)^d)&1)!==0) return false; }
       else if(t===T_MOVER){
         const r=c&3;
@@ -533,7 +537,198 @@ function b74(s){
   return r;
 }
 
+
+/* --- K3, the Cellua level format -------------------------------------------
+   K3:<name>:<desc>;W;H;?;<base64 of a zlib stream>;
+   The stream is one character per cell, row-major from the top-left, in
+   0-9a-zA-Z where the value is id*4+rot and rot is 0 R, 1 D, 2 L, 3 U. The
+   ids, read off the samples:
+       1 wall   2 mover   3 generator   4 push   5 slide
+       9 cw    10 ccw    12 trash      13 enemy   0 empty
+   Anything else is a cell this build has no rules for, so it comes in as the
+   unknown placeholder rather than being silently dropped or guessed at. */
+/* Just enough of RFC 1950/1951 to read a level: stored, fixed and dynamic
+   Huffman blocks. Written out because DecompressionStream needs Safari 16.4
+   and the phones this has to run on are older than that. */
+function inflateRaw(bytes){
+  let pos=0, bit=0;
+  const getbit=()=>{ const b=(bytes[pos]>>bit)&1; if(++bit===8){ bit=0; pos++; } return b; };
+  const getbits=n=>{ let v=0; for(let i=0;i<n;i++) v|=getbit()<<i; return v; };
+  // canonical Huffman: build a (count,symbol) table from code lengths
+  const build=lens=>{
+    const MAXBITS=15;
+    const count=new Array(MAXBITS+1).fill(0);
+    for(const l of lens) count[l]++;
+    count[0]=0;
+    const offs=new Array(MAXBITS+2).fill(0);
+    for(let i=1;i<=MAXBITS;i++) offs[i+1]=offs[i]+count[i];
+    const symbol=new Array(lens.length);
+    for(let s=0;s<lens.length;s++) if(lens[s]) symbol[offs[lens[s]]++]=s;
+    return {count,symbol};
+  };
+  const decode=h=>{
+    let code=0,first=0,index=0;
+    for(let len=1;len<=15;len++){
+      code|=getbit();
+      const count=h.count[len];
+      if(code-first<count) return h.symbol[index+(code-first)];
+      index+=count; first+=count; first<<=1; code<<=1;
+    }
+    throw new Error("bad Huffman code");
+  };
+  const LBASE=[3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+  const LEXTRA=[0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+  const DBASE=[1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+  const DEXTRA=[0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+  let out=[];
+  let fixedL=null,fixedD=null;
+  for(;;){
+    const last=getbit(), type=getbits(2);
+    if(type===0){                                  // stored
+      if(bit){ bit=0; pos++; }
+      const len=bytes[pos]|(bytes[pos+1]<<8); pos+=4;
+      for(let i=0;i<len;i++) out.push(bytes[pos++]);
+    }else if(type===1||type===2){
+      let hl,hd;
+      if(type===1){
+        if(!fixedL){
+          const l=new Array(288);
+          for(let i=0;i<144;i++) l[i]=8;
+          for(let i=144;i<256;i++) l[i]=9;
+          for(let i=256;i<280;i++) l[i]=7;
+          for(let i=280;i<288;i++) l[i]=8;
+          fixedL=build(l); fixedD=build(new Array(30).fill(5));
+        }
+        hl=fixedL; hd=fixedD;
+      }else{
+        const nlen=getbits(5)+257, ndist=getbits(5)+1, ncode=getbits(4)+4;
+        const ORDER=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+        const lens=new Array(19).fill(0);
+        for(let i=0;i<ncode;i++) lens[ORDER[i]]=getbits(3);
+        const hcl=build(lens);
+        const all=new Array(nlen+ndist).fill(0);
+        for(let i=0;i<nlen+ndist;){
+          const sym=decode(hcl);
+          if(sym<16) all[i++]=sym;
+          else if(sym===16){ const prev=all[i-1]; let r=3+getbits(2); while(r--) all[i++]=prev; }
+          else if(sym===17){ let r=3+getbits(3);  while(r--) all[i++]=0; }
+          else             { let r=11+getbits(7); while(r--) all[i++]=0; }
+        }
+        hl=build(all.slice(0,nlen)); hd=build(all.slice(nlen));
+      }
+      for(;;){
+        const sym=decode(hl);
+        if(sym<256) out.push(sym);
+        else if(sym===256) break;
+        else{
+          const s=sym-257;
+          const len=LBASE[s]+getbits(LEXTRA[s]);
+          const ds=decode(hd);
+          const dist=DBASE[ds]+getbits(DEXTRA[ds]);
+          const from=out.length-dist;
+          if(from<0) throw new Error("distance runs before the start of the data");
+          for(let i=0;i<len;i++) out.push(out[from+i]);
+        }
+      }
+    }else throw new Error("reserved deflate block type");
+    if(last) break;
+  }
+  return out;
+}
+function inflate(bytes){
+  // a zlib stream starts with a two-byte header; raw deflate does not
+  if(bytes.length>1&&(bytes[0]&0x0f)===8&&(((bytes[0]<<8)|bytes[1])%31)===0)
+    return inflateRaw(bytes.slice(2));
+  return inflateRaw(bytes);
+}
+const B64="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function b64bytes(s){
+  s=String(s).replace(/[^A-Za-z0-9+/]/g,"");
+  const out=[];
+  for(let i=0;i<s.length;i+=4){
+    const a=B64.indexOf(s[i]),b=B64.indexOf(s[i+1]);
+    const c=B64.indexOf(s[i+2]),d=B64.indexOf(s[i+3]);
+    out.push((a<<2)|(b>>4));
+    if(i+2<s.length&&c>=0) out.push(((b&15)<<4)|(c>>2));
+    if(i+3<s.length&&d>=0) out.push(((c&3)<<6)|d);
+  }
+  return out;
+}
+
+
+const K3_ALPHA="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const K3_ID=[];                            // K3 id -> engine type
+K3_ID[1]=T_WALL; K3_ID[2]=T_MOVER; K3_ID[3]=T_GEN; K3_ID[4]=T_PUSH;
+K3_ID[5]=T_SLIDE; K3_ID[9]=T_CW; K3_ID[10]=T_CCW; K3_ID[12]=T_TRASH;
+K3_ID[13]=T_ENEMY;
+function importK3(code){
+  const f=String(code).trim().split(";");
+  if(f.length<5) throw new Error("not a K3 code: needs at least 5 ';' fields");
+  const head=f[0].split(":");
+  // the dimensions use the same base74 digits as a V3 code, not decimal
+  const W=b74(f[1]), H=b74(f[2]);
+  if(!(W>0&&H>0)) throw new Error("bad K3 dimensions");
+  if((W+2)*(H+2)>=2**31) throw new Error("K3 level too big to index: "+W+"x"+H);
+  let body;
+  try{ body=inflate(b64bytes(f[4])); }
+  catch(e){ throw new Error("could not unpack the K3 payload: "+e.message); }
+  const L={version:"K3",name:head[1]||"",tutorial:head[2]||"",wallEffect:0,
+           W,H,id:null,rot:null,place:null,maxId:0,nPlaceable:0,
+           fields:f.length,flip:false,unsupported:0,unknownVariants:0,props:0};
+  const cells=W*H;
+  L.id=new Uint8Array(cells).fill(9);
+  L.rot=new Uint8Array(cells);
+  L.place=new Uint8Array(cells);
+  L.decor=new Uint8Array(cells);
+  /* The payload is a token stream, not one character per cell:
+       <char>          a cell: its base74 value is id*4 + rot
+       ( <hi> <lo>     a cell whose value does not fit in one digit, two
+                       base84 digits -- id 21 is "(10", id 1200 is "(Vc"
+       ] < name <      marks the NEXT cell as a variant; "placeable" is the
+                       one in the wild, and lands on the plus overlay
+       [ n < text <    a property hanging off the cell just written, which is
+                       how a script cell carries its source
+     Reading it as fixed-width is what makes a 60x40 level look like it has
+     2402 cells instead of 2400. */
+  const val=ch=>B74.indexOf(ch);
+  let k=0, pending=null;
+  for(let i=0;i<body.length&&k<cells;){
+    const ch=String.fromCharCode(body[i]);
+    if(ch==="]"||ch==="["){                       // a marker or a property
+      const open=body.indexOf(60,i+1);            // '<'
+      const close=open<0?-1:body.indexOf(60,open+1);
+      if(close<0) break;                          // truncated: stop cleanly
+      if(ch==="]"){
+        pending="";
+        for(let q=open+1;q<close;q++) pending+=String.fromCharCode(body[q]);
+      }else L.props++;                            // kept only as a count
+      i=close+1; continue;
+    }
+    let v;
+    if(ch==="("){                                 // two base84 digits follow
+      if(i+2>=body.length) break;
+      const hi=val(String.fromCharCode(body[i+1])), lo=val(String.fromCharCode(body[i+2]));
+      v=(hi<0||lo<0)?-1:hi*84+lo;
+      i+=3;
+    }else{ v=val(ch); i++; }
+    if(pending!==null){
+      if(pending==="placeable"){ L.place[k]=1; L.nPlaceable++; }
+      else { L.decor[k]=1; L.unknownVariants++; }   // paint, nothing more
+      pending=null;
+    }
+    if(v>0){
+      const id=v>>2, rot=v&3, t=K3_ID[id];
+      if(t===undefined){ L.unsupported++; L.id[k]=90; L.rot[k]=0; }
+      else{ L.id[k]=T_TO_CM[t]; L.rot[k]=rot;
+            if(L.id[k]>L.maxId) L.maxId=L.id[k]; }
+    }else if(v<0){ L.unsupported++; L.id[k]=90; }  // a digit we do not know
+    k++;
+  }
+  return L;
+}
+
 function importCode(code,flip=true){
+  if(/^K3[:;]/.test(String(code).trim())) return importK3(code);
   const f=code.trim().split(";");
   if(f.length<6) throw new Error("not enough ';' fields — is the whole code pasted?");
   const L={version:f[0],name:"",tutorial:"",wallEffect:0,W:0,H:0,
@@ -709,10 +904,12 @@ const COLORS={};
 COLORS[T_GEN]="#2f9e5a"; COLORS[T_CW]="#cf7726"; COLORS[T_CCW]="#26a08f";
 COLORS[T_MOVER]="#3d6fc4"; COLORS[T_SLIDE]="#c2a03c"; COLORS[T_PUSH]="#a8862f";
 COLORS[T_WALL]="#4d4d4d"; COLORS[T_ENEMY]="#a52836"; COLORS[T_TRASH]="#8f2fb2";
+COLORS[T_UNKNOWN]="#b0219b";
 const NAMES={};
 NAMES[T_GEN]="Generator";NAMES[T_CW]="CW rotator";NAMES[T_CCW]="CCW rotator";
 NAMES[T_MOVER]="Mover";NAMES[T_SLIDE]="Slide";NAMES[T_PUSH]="Push";
 NAMES[T_WALL]="Wall";NAMES[T_ENEMY]="Enemy";NAMES[T_TRASH]="Trash";
+NAMES[T_UNKNOWN]="Unknown cell";
 
 /* --- sprites ---------------------------------------------------------------
    Each cell is a bevelled tile plus a drawn icon, rendered once per (type,
@@ -805,7 +1002,17 @@ const spriteCache=new Map();
 // rotation only reads on cells that have one; slide has two states, not four
 // Every cell carries a rotation and shows it -- generator, mover, both
 // rotators, push, slide, enemy and trash. Only the wall has no oriented form.
-const normRot=(t,r)=>t===T_WALL?0:r;
+ICONS[T_UNKNOWN]=c=>{                   // a question mark: nobody knows
+  /* Icons are authored centred on the origin in a 20-unit box, not in pixels
+     from the corner -- the first version of this was drawn off the tile. */
+  c.fillStyle=ICON;
+  c.fillRect(-3.2,-6.6,6.4,2.2);        // top bar
+  c.fillRect( 1.2,-6.6,2.2,3.6);        // down the right
+  c.fillRect(-1.1,-3.6,4.5,2.2);        // shoulder back to the middle
+  c.fillRect(-1.1,-2.0,2.2,3.8);        // the stem
+  c.fillRect(-1.1, 3.4,2.2,2.4);        // the dot
+};
+const normRot=(t,r)=>(t===T_WALL||t===T_UNKNOWN)?0:r;
 /* Sprites are baked at a fixed size and cached by that size. That is fine for a
    ladder of ~24 fixed zoom levels, but pinch zoom is continuous: every frame
    asks for a slightly different fractional size, so every frame baked nine
@@ -1565,7 +1772,11 @@ function exportV3(w,mask,name,desc){
     const base=(y+1)*ST+1, mrow=y*w.W;
     for(let x=0;x<w.W;x++){
       const c=w.g[base+x], t=c>>2, p=mask&&mask[mrow+x]?1:0;
-      raw[k++]=(t===T_EMPTY)?72+p:T_TO_CM[t]*2+(c&3)*18+p;
+      /* T_UNKNOWN has no id in the format, and T_TO_CM[t] came back undefined
+         -- the arithmetic then produced NaN, which a Uint8Array stores as 0,
+         and 0 is a generator. A cell whose rules are unknown is written out as
+         nothing at all. */
+      raw[k++]=(t===T_EMPTY||t===T_UNKNOWN)?72+p:T_TO_CM[t]*2+(c&3)*18+p;
     }
   }
   let end=n;
@@ -1835,6 +2046,13 @@ function saveVolumes(){
 }
 let scr="title", paused=false, modal=null, pending=null, toast="", toastT=-1e9;
 let world=null, placeMask=null, levelName="", levelDesc="", tickCount=0;
+/* Tiles an imported level marked with a variant this build has no rules for --
+   backgrounds and the like. They are drawn like the plus overlay so you can see
+   where the author put them, but they are only paint: they grant nothing, the
+   simulation never reads them, they are not saved, and pressing play clears
+   them along with the unknown cells. Kept apart from placeMask precisely so
+   they cannot hand the player somewhere to build that the author did not. */
+let decorMask=null;
 let tpsRowBottom=0;                          // bottom of the speed row, for the drawer
 /* The rate actually achieved, which is not the rate asked for once the board
    is big enough to fall behind. Counted over a moving second. */
@@ -1985,7 +2203,25 @@ function restoreInitial(){
      back where it was. */
   if(carry){ carry.from=null; carry.src=null; carry.at=null; }
 }
-function beginRun(){ if(!started){ snapshotInitial(); started=true; } }
+function beginRun(){
+  if(started) return;
+  /* Unknown cells are placeholders for rules this build does not have. Rather
+     than guess at what a modded cell would have done, they are swept off the
+     board the moment the level starts running. */
+  let swept=0;
+  for(let y=0;y<world.H;y++) for(let x=0;x<world.W;x++)
+    if((world.g[world.idx(x,y)]>>2)===T_UNKNOWN){ world.place(x,y,0); swept++; }
+  let wiped=0;
+  if(decorMask){
+    for(let i=0;i<decorMask.length;i++) if(decorMask[i]){ decorMask[i]=0; wiped++; }
+    if(wiped) rescanMask();
+  }
+  const bits=[];
+  if(swept) bits.push(swept+" unknown cell"+(swept===1?"":"s"));
+  if(wiped) bits.push(wiped+" decoration"+(wiped===1?"":"s"));
+  if(bits.length) say(bits.join(" and ")+" removed for the run");
+  snapshotInitial(); started=true;
+}
 function togglePlay(){
   if(!world) return;
   if(!playing) beginRun();
@@ -2099,6 +2335,7 @@ function back(){ nav(scr==="controls"?"options":"title"); }
 
 function newWorld(w,h){
   world=new World(w,h); placeMask=new Uint8Array(w*h);   // no plus tiles by default
+  decorMask=new Uint8Array(w*h);
   rescanMask();
   levelName=""; levelDesc=""; tickCount=0; playing=false; centreCam();
 }
@@ -2112,12 +2349,25 @@ function centreCam(){
   clampCam();
 }
 function loadLevel(L){
+  /* Tell the truth about what did not survive the import rather than letting a
+     level quietly come in wrong: cells this build has no rules for become "?",
+     and variants it does not know (backgrounds and the like) are dropped. */
+  if(L&&(L.unsupported||L.unknownVariants)){
+    const bits=[];
+    if(L.unsupported) bits.push(L.unsupported+" unknown cell"+(L.unsupported===1?"":"s"));
+    if(L.unknownVariants) bits.push(L.unknownVariants+" unknown variant"+(L.unknownVariants===1?"":"s")+" dropped");
+    setTimeout(()=>say(bits.join(", ")),0);
+  }
   world=new World(L.W,L.H);
   for(let y=0;y<L.H;y++)for(let x=0;x<L.W;x++){
     const cid=L.id[y*L.W+x]; if(cid===9) continue;
-    world.place(x,y,cid>9?mk(T_WALL,0):mk(CM_TO_T[cid],L.rot[y*L.W+x]));
+    world.place(x,y, cid===90 ? mk(T_UNKNOWN,0)
+                   : cid>9    ? mk(T_WALL,0)
+                              : mk(CM_TO_T[cid],L.rot[y*L.W+x]));
   }
-  placeMask=L.place; levelName=L.name||""; levelDesc=L.tutorial||"";
+  placeMask=L.place;
+  decorMask=L.decor||new Uint8Array(L.W*L.H);
+  levelName=L.name||""; levelDesc=L.tutorial||"";
   tickCount=0; playing=false; centreCam();
   rescanMask();
 }
@@ -2181,6 +2431,7 @@ function drawCell(w,i,t,c,px,py,z,al,pw,ph){
 const packHex=h=>{const s=h.replace("#","");
   return ((255<<24)|(parseInt(s.slice(4,6),16)<<16)|(parseInt(s.slice(2,4),16)<<8)|parseInt(s.slice(0,2),16))>>>0;};
 const PACK_BG=packHex("#000000"), PACK_BOARD=packHex("#0d0d0d"), PACK_PLUS=packHex("#191919");
+const PACK_DECOR=packHex("#241a2e");
 const rgbaCache={};
 function avgRGBA(t){
   if(rgbaCache[t]!==undefined) return rgbaCache[t];
@@ -2206,6 +2457,16 @@ function rasterLayer(g,sx,sy,z,x0,x1,y0,y1,al,doMove,clip){
   else{
     for(let y=cy0;y<cy1;y++){ let o=y*W+cx0; for(let x=cx0;x<cx1;x++) U32[o++]=PACK_BG; }
     for(let y=by0;y<by1;y++){ let o=y*W+bx0; for(let x=bx0;x<bx1;x++) U32[o++]=PACK_BOARD; }
+  }
+  if(decorCount>0){                       // decoration: the same idea, dimmer
+    const dx0=Math.max(x0,decorBox[0]), dx1=Math.min(x1,decorBox[2]);
+    const dy0=Math.max(y0,decorBox[1]), dy1=Math.min(y1,decorBox[3]);
+    for(let y=dy0;y<=dy1;y++)for(let x=dx0;x<=dx1;x++){
+      if(!decorMask[y*world.W+x]) continue;
+      const qx0=Math.max(cx0,Math.round(sx+x*z)), qx1=Math.min(cx1,Math.round(sx+x*z+z));
+      const qy0=Math.max(cy0,Math.round(sy+y*z)), qy1=Math.min(cy1,Math.round(sy+y*z+z));
+      for(let yy=qy0;yy<qy1;yy++){ let o=yy*W+qx0; for(let xx=qx0;xx<qx1;xx++) U32[o++]=PACK_DECOR; }
+    }
   }
   if(maskCount>0){
     const px0=Math.max(x0,maskBox[0]), px1=Math.min(x1,maskBox[2]);
@@ -2279,15 +2540,41 @@ function rasterLayer(g,sx,sy,z,x0,x1,y0,y1,al,doMove,clip){
     }
   }
 }
+/* Decoration: the plus again, in purple, with a question mark sitting in it --
+   the same "we have no rules for this" idea as the unknown cell, on a tile
+   that grants nothing. The mark is only drawn once a tile is big enough for it
+   to read as a glyph rather than as noise. */
+const DECOR_INK="#9a5cc2", DECOR_BG="#241a2e";
+function drawDecorPlus(px,py,z,ink){
+  drawPlus(px,py,z,ink||DECOR_INK);
+  if(z<14) return;
+  const u=z/16, cx=px+z/2, cy=py+z/2;
+  const bar=(x,y,w,h)=>X.fillRect(Math.round(cx+x*u),Math.round(cy+y*u),
+                                  Math.max(1,Math.round(w*u)),Math.max(1,Math.round(h*u)));
+  X.fillStyle="#e7cdf5";
+  bar(-2.6,-5.2,5.2,1.8);      // top bar
+  bar( 0.9,-5.2,1.8,3.0);      // down the right
+  bar(-0.9,-2.7,3.6,1.8);      // shoulder
+  bar(-0.9,-1.4,1.8,3.1);      // stem
+  bar(-0.9, 2.8,1.8,1.9);      // dot
+}
 function drawPlusHighlight(sx,sy,z,x0,x1,y0,y1){
-  if(!KEYS.has("b")||maskCount<=0) return;
-  const bx0=Math.max(x0,maskBox[0]), bx1=Math.min(x1,maskBox[2]);
-  const by0=Math.max(y0,maskBox[1]), by1=Math.min(y1,maskBox[3]);
-  for(let y=by0;y<=by1;y++)for(let x=bx0;x<=bx1;x++)
+  if(!KEYS.has("b")||(maskCount<=0&&decorCount<=0)) return;
+  const lo=(a,b)=>Math.min(a<0?1e9:a,b<0?1e9:b), hi=(a,b)=>Math.max(a,b);
+  const bx0=Math.max(x0,lo(maskCount?maskBox[0]:-1,decorCount?decorBox[0]:-1));
+  const bx1=Math.min(x1,hi(maskCount?maskBox[2]:-1,decorCount?decorBox[2]:-1));
+  const by0=Math.max(y0,lo(maskCount?maskBox[1]:-1,decorCount?decorBox[1]:-1));
+  const by1=Math.min(y1,hi(maskCount?maskBox[3]:-1,decorCount?decorBox[3]:-1));
+  for(let y=by0;y<=by1;y++)for(let x=bx0;x<=bx1;x++){
+    if(decorMask&&decorMask[y*world.W+x]){
+      X.fillStyle="rgba(0,0,0,.45)"; X.fillRect(sx+x*z,sy+y*z,z,z);
+      drawDecorPlus(sx+x*z,sy+y*z,z);
+    }
     if(placeMask[y*world.W+x]){
       X.fillStyle="rgba(0,0,0,.45)"; X.fillRect(sx+x*z,sy+y*z,z,z);
       drawPlus(sx+x*z,sy+y*z,z,"#6ec6ff");
     }
+  }
 }
 function drawBoardLayer(clip){
   X.fillStyle="#000"; X.fillRect(clip?clip.x:0,clip?clip.y:0,clip?clip.w:W,clip?clip.h:H);
@@ -2322,6 +2609,18 @@ function drawBoardLayer(clip){
   X.fillStyle="#0d0d0d"; X.fillRect(sx,sy,world.W*z,world.H*z);
   // Plus tiles are usually a small patch, so keep a bounding box and never scan
   // outside it -- and skip the pass entirely when the level has none.
+  if(z>=3&&decorCount>0){
+    const ax0=Math.max(x0,decorBox[0]), ax1=Math.min(x1,decorBox[2]);
+    const ay0=Math.max(y0,decorBox[1]), ay1=Math.min(y1,decorBox[3]);
+    for(let y=ay0;y<=ay1;y++)for(let x=ax0;x<=ax1;x++){
+      if(!decorMask[y*world.W+x]) continue;
+      const qx=Math.round(sx+x*z), qy=Math.round(sy+y*z);
+      const qw=Math.round(sx+(x+1)*z)-qx, qh=Math.round(sy+(y+1)*z)-qy;
+      X.fillStyle=DECOR_BG; X.fillRect(qx,qy,qw,qh);
+      if(z>=10&&(world.g[(y+1)*world.stride+1+x]>>2)===T_EMPTY)
+        drawDecorPlus(qx,qy,z,"#5d3b78");
+    }
+  }
   if(z>=3&&maskCount>0){
     const px0=Math.max(x0,maskBox[0]), px1=Math.min(x1,maskBox[2]);
     const py0=Math.max(y0,maskBox[1]), py1=Math.min(y1,maskBox[3]);
@@ -2453,6 +2752,7 @@ function scrollCache(dx,dy){
   } finally { X=prev; }
 }
 let maskCount=0, maskBox=[0,0,-1,-1];      // count + bounding box of plus tiles
+let decorCount=0, decorBox=[0,0,-1,-1];
 function rescanMask(){
   maskCount=0; maskBox=[1e9,1e9,-1,-1];
   if(!placeMask||!world) { maskBox=[0,0,-1,-1]; return; }
@@ -2463,6 +2763,14 @@ function rescanMask(){
     if(x>maskBox[2])maskBox[2]=x; if(y>maskBox[3])maskBox[3]=y;
   }
   if(!maskCount) maskBox=[0,0,-1,-1];
+  decorCount=0; decorBox=[1e9,1e9,-1,-1];
+  if(decorMask) for(let y=0;y<world.H;y++)for(let x=0;x<world.W;x++){
+    if(!decorMask[y*world.W+x]) continue;
+    decorCount++;
+    if(x<decorBox[0])decorBox[0]=x; if(y<decorBox[1])decorBox[1]=y;
+    if(x>decorBox[2])decorBox[2]=x; if(y>decorBox[3])decorBox[3]=y;
+  }
+  if(!decorCount) decorBox=[0,0,-1,-1];
   maskRev++;
 }
 function noteMaskCell(x,y,on){
@@ -2895,6 +3203,7 @@ function deleteSel(){
    cell along it. paintFrom is cleared on release so a new stroke never joins
    itself to where the last one ended. */
 let paintFrom=null;
+let plusErase=false;                     // which way a touch stroke is going
 function eachCellOnLine(a,b,fn){
   let x0=a.x,y0=a.y;
   const x1=b.x,y1=b.y;
@@ -3002,7 +3311,13 @@ function boardInput(dt){
     return;
   }
   if(selTool===TOOL_PLUS){                 // paint / erase the placeable region
-    const on=M.down&&!M.pressUI, off=M.rdown&&!M.rpressUI;
+    /* There is no right button on a phone, so a tap decides for itself: tap a
+       tile that is already placeable and it is taken away, tap a bare tile and
+       it is added. The choice is made when the finger lands and then holds for
+       the whole stroke, so dragging does not flicker between the two. */
+    if(touchUsed&&M.click&&!M.pressUI) plusErase=!!placeMask[hb.y*world.W+hb.x];
+    const on =touchUsed?(M.down&&!M.pressUI&&!plusErase):(M.down&&!M.pressUI);
+    const off=touchUsed?(M.down&&!M.pressUI&& plusErase):(M.rdown&&!M.rpressUI);
     if(on||off){
       eachCellOnLine(paintFrom||hb,hb,(x,y)=>{
         const o2=y*world.W+x;
@@ -3175,7 +3490,7 @@ function screenPlayMenu(){
   y+=textH(u)+11*u;
 
   const nb="New sandbox";
-  if(uiBtn(cx-btnW(nb,u*2)/2,y,0,0,nb,u*2)){ newWorld(28,18); afterLoad("editable"); nav("game"); }
+  if(uiBtn(cx-btnW(nb,u*2)/2,y,0,0,nb,u*2)){ newWorld(60,40); afterLoad("editable"); nav("game"); }
 }
 function overlayWin(){
   const m=8*U;
@@ -4004,7 +4319,7 @@ function overlayPause(){
   if(storageBlocked()){ X.fillStyle="rgba(0,0,0,.55)"; X.fillRect(saveX,y,is,is); }
   slot(iconLoad,"load",()=>openModal("load"));
   slot(iconWorld,"size",()=>{
-    fieldW=String(world?world.W:28); fieldH=String(world?world.H:18);
+    fieldW=String(world?world.W:60); fieldH=String(world?world.H:40);
     focusField=null; openModal("world");
   });
   const by=p.y+p.h-m-btnH(hs);
@@ -4421,7 +4736,12 @@ function resizeWorld(nw,nh,anchor){
     if(c) nWorld.setCell(nWorld.idx(tx,ty),c);
     nMask[ty*nw+tx]=placeMask[y*ow+x];
   }
-  world=nWorld; placeMask=nMask;
+  const nDecor=new Uint8Array(nw*nh);
+  if(decorMask) for(let y=0;y<oh;y++)for(let x=0;x<ow;x++){
+    const tx=x+dx, ty=y+dy;
+    if(tx>=0&&tx<nw&&ty>=0&&ty<nh) nDecor[ty*nw+tx]=decorMask[y*ow+x];
+  }
+  world=nWorld; placeMask=nMask; decorMask=nDecor;
   rescanMask();
   tickCount=0; playing=false; won=false; started=false;
   clearSel(); carry=null; dragCell=null;
