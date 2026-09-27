@@ -935,8 +935,10 @@ ICONS[T_MOVER]=c=>{                     // solid triangle
   c.fillStyle=ICON;
   c.beginPath(); c.moveTo(-3.4,-5); c.lineTo(5.2,0); c.lineTo(-3.4,5); c.closePath(); c.fill();
 };
+/* Mirrored: the arrows were going the opposite way round to the ones these
+   cells are named after, so clockwise looked anticlockwise. */
 const rotIcon=cw=>c=>{                  // two arcs chasing each other round a ring
-  c.save(); if(!cw) c.scale(-1,1);
+  c.save(); if(cw) c.scale(-1,1);
   c.strokeStyle=ICON; c.lineWidth=1.9; c.lineCap="butt";
   for(const a of [0,Math.PI]){
     c.beginPath(); c.arc(0,0,4.4,a+0.42,a+Math.PI-0.30); c.stroke();
@@ -999,6 +1001,312 @@ OVERLAY[T_TRASH]=(c,base)=>{
 };
 
 const spriteCache=new Map();
+/* A zip reader that only ever unpacks the handful of files a texture pack is
+   allowed to contain. Anything else in the archive is never decompressed, so a
+   zip bomb has nothing to expand into: the guard is "we do not want that file",
+   not "that file turned out to be too big". Sizes are still checked, because a
+   bomb could be named mover.png. */
+const TEX_MAX_ENTRIES=4096;      // a directory this long is already nonsense
+const TEX_MAX_FILE=4*1024*1024;  // one texture; a 512x512 png is well under this
+const TEX_MAX_TOTAL=24*1024*1024;
+
+function zipEntries(bytes){
+  const u8=bytes;
+  const dv={
+    u16:o=>u8[o]|(u8[o+1]<<8),
+    u32:o=>((u8[o]|(u8[o+1]<<8)|(u8[o+2]<<16))+(u8[o+3]*16777216)),
+  };
+  // the end-of-central-directory record is at the end, after a comment of
+  // unknown length, so it has to be searched for backwards
+  let eocd=-1;
+  for(let i=u8.length-22;i>=0&&i>u8.length-22-65557;i--)
+    if(u8[i]===0x50&&u8[i+1]===0x4b&&u8[i+2]===0x05&&u8[i+3]===0x06){ eocd=i; break; }
+  if(eocd<0) throw new Error("not a zip file (no end-of-directory record)");
+  const count=dv.u16(eocd+10), cdOff=dv.u32(eocd+16);
+  if(count>TEX_MAX_ENTRIES) throw new Error("zip has too many entries ("+count+")");
+  const out=[];
+  let p=cdOff;
+  for(let i=0;i<count;i++){
+    if(p+46>u8.length) break;
+    if(dv.u32(p)!==0x02014b50) break;
+    const method=dv.u16(p+10);
+    const csize=dv.u32(p+20), usize=dv.u32(p+24);
+    const nlen=dv.u16(p+28), elen=dv.u16(p+30), clen=dv.u16(p+32);
+    const lho=dv.u32(p+42);
+    let name="";
+    for(let k=0;k<nlen;k++) name+=String.fromCharCode(u8[p+46+k]);
+    out.push({name,method,csize,usize,lho});
+    p+=46+nlen+elen+clen;
+  }
+  return {u8,dv,entries:out};
+}
+function zipRead(z,e){
+  const {u8,dv}=z;
+  if(dv.u32(e.lho)!==0x04034b50) throw new Error("bad entry header for "+e.name);
+  const nlen=dv.u16(e.lho+26), elen=dv.u16(e.lho+28);
+  const start=e.lho+30+nlen+elen;
+  if(e.usize>TEX_MAX_FILE) throw new Error(e.name+" is too big to be a texture");
+  const data=u8.subarray?u8.subarray(start,start+e.csize):u8.slice(start,start+e.csize);
+  if(e.method===0) return data;
+  if(e.method===8) return Uint8Array.from(inflateRaw(data));
+  throw new Error(e.name+" uses an unsupported compression method");
+}
+
+
+/* --- texture packs ---------------------------------------------------------
+   A .zip of 16x16 (or any square) PNGs, named the way Mystic Mod names them.
+   The archive is searched by file name only, ignoring folders, so a zip that
+   wraps everything in one -- or two -- directories works without asking the
+   person to repack it. Only these names are ever unpacked. */
+const TEX_SLOTS=[
+  ["mover.png",        "t"+T_MOVER],
+  ["push.png",         "t"+T_PUSH],
+  ["slide.png",        "t"+T_SLIDE],
+  ["immobile.png",     "t"+T_WALL],
+  ["generator.png",    "t"+T_GEN],
+  ["cwspinner_alt.png","t"+T_CW],
+  ["ccwspinner_alt.png","t"+T_CCW],
+  ["enemy.png",        "t"+T_ENEMY],
+  ["trash.png",        "t"+T_TRASH],
+  ["unknown.png",      "t"+T_UNKNOWN],
+  ["0.png",            "plus"],
+  ["bgdefault.png",    "bg"],
+  ["unknownbg.png",    "decor"],
+];
+const TEX_WANT=new Set(TEX_SLOTS.map(e=>e[0]));
+const TEX_KEY="webaccel_texpacks";
+let texPack=null;            // {name, urls:{slot:dataURL}, imgs:{slot:Image}, ready}
+let texLib={packs:{},active:""};    // everything installed, and which one is on
+/* The Mystic Mod set, carried in the page so it is there without installing
+   anything -- it is 6KB of base64, which is cheaper than asking for a download
+   on a static site. Built-in packs are never written to storage; only the name
+   of the one in use is. */
+const TEX_BUILTIN_NAME="Mystic Mod";
+const TEX_BUILTIN_ZIP=[
+"UEsDBBQAAAAAANhG+VwAAAAAAAAAAAAAAAAIACAARGVmYXVsdC91eAsAAQQAAAAABAAAAABVVA0ABzjtY2o+X7hqOO1jalBLAwQU",
+"AAgACADYRvlcAAAAAAAAAAAAAAAADQAgAERlZmF1bHQvMC5wbmd1eAsAAQQAAAAABAAAAABVVA0ABzjtY2olX7hqOO1jausM8HPn",
+"5ZLiYmBg4PX0cAkC0gIgzMEGJOU//08EUjmeLo4hFoLJJYWFiQtYNihk/us/otZ2kiPoCEuo56q0CWYb5GYwBhR7LM/IPvA6fL2k",
+"g4T8ghusJzYybOe4GyYRH+Ijso7t2IJe7gSzh5tnbtNrmMlXzNnT37vMgmdFGoNFckKxkpzhBrknJQ59ijwMPxOFtscyLTgHtJfB",
+"09XPZZ1TQhMAUEsHCEKVuAykAAAApQAAAFBLAwQUAAgACADYRvlcAAAAAAAAAAAAAAAAFQAgAERlZmF1bHQvQkdEZWZhdWx0LnBu",
+"Z3V4CwABBAAAAAAEAAAAAFVUDQAHOO1jaiVfuGo47WNq6wzwc+flkuJiYGDg9fRwCQLSAiDMwQYk5T//TwRSbp4ujiEWgskmBgYJ",
+"C1g2KGT+6z+i1naSI+gIS6jnqrQJZhvkZjAGFHssd+N1OML0ciH7VUOpjhAel4JjCoZaB6omFCtbthkwMGgdYN66bsf010ATGTxd",
+"/VzWOSU0AQBQSwcIFnYO230AAAB/AAAAUEsDBBQACAAIANhG+VwAAAAAAAAAAAAAAAAaACAARGVmYXVsdC9DQ1dzcGlubmVyX2Fs",
+"dC5wbmd1eAsAAQQAAAAABAAAAABVVA0ABzjtY2omX7hqOO1jagHuARH+iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9h",
+"AAABtUlEQVQ4EXVTyy4EURA91TNtBhmJWJuEhQ0JFoON2bPjF3yCPbHnSyTsLC0szYYfIBlrkZAMmUeXU3X7NS2qc7vv45y6Vaeq",
+"BZdnqJhW1tWllDfq6WKatNoG4hio1yHg0WgM5cBr3+BlrGQOIEuL0IUWMDsLNGIIyeqP0AltPIasr0EHP8DnF/D+YbvIHYBkPT5B",
+"9HCLpHvkh9VX9HAD1GoQetTUQUSQh6RzvJn2HzmcHQPNBqNsOpYvDRGstCGWc8nk6ry0IvL0wte6f4To/hpCjlITi8AF07jIxrac",
+"0N0DfOxiyqHpMxMuDKyYeZE0BTIvJHu+Cef7hRPpbFK9miFSEdV1zsOMHu/oLewZSHcO7QOkX6HQmXkKwhJZyTJLCLRVUPdvZB7t",
+"eOJwT0FHI9Z54inkYnUOMn9AeW6OeSGG5NCCiFRTbKOz9VcHh4VXrtFwmHUltQv/gsJK2ZqHNmaA3nOJVpryAvSeWMJllvDNDopW",
+"tva0nGWSQLc3XGVvYqE6PBCmqINvkll/a+XUiuJba3K4E4JgfZH1hv1IlvdLPwibsfnNHBQ1o0bWYVXzioTNMha/JtOWN+lGc+YA",
+"AAAASUVORK5CYIJQSwcIlhcQ1/MBAADuAQAAUEsDBBQACAAIANhG+VwAAAAAAAAAAAAAAAAZACAARGVmYXVsdC9DV3NwaW5uZXJf",
+"YWx0LnBuZ3V4CwABBAAAAAAEAAAAAFVUDQAHOO1jaiZfuGo47WNqAbUBSv6JUE5HDQoaCgAAAA1JSERSAAAAEAAAABAIBgAAAB/z",
+"/2EAAAF8SURBVDgRdVOxTsNADH0XSENFhqqigFgY2WEAMdKNgR9ghYE/YmDhFxArH4LEHyBVSARFJdDDz75LLkG11PbOfn5+9rnu",
+"+RJD80PH4O7S+2a49JKOJg5ljARA9QO8figsxboWNhsD0xFQ5g5bG0CeAVmotZIU+sodh6rxWHwD77UxtwTTwmEiBGMBbj+sUpXt",
+"+esmw/6jx9t1JgQmROpAT5TMKuuSyRJjSXteFbDnQk5lUvnlqjcrzJ+61ollDmeiBGUOjBI8ky8OOoe777dELHNoSsAmOLBYlcma",
+"7owk+i0FON8TfxBkBCGSylTXnQxFbC6ExEcl9S1HZ2YnIeRTpcaq3nv7SCAmE6NYE2ctVA1Q8AUShn9qQozExzPugzlUAae5lE2j",
+"Dfs1r30zdrrrFBu2UhVQjOeqEnAmgHUkjNW/ALHBulVeLD0OS+BTpJ3Iyg5XuZGXZCyucmRoX4G7bfvtdUmSbVNs8meKufobCcJM",
+"1edjfz1kd0mx+ANCe39qPe4R3wAAAABJRU5ErkJgglBLBwjtptzHugEAALUBAABQSwMEFAAIAAgA2Eb5XAAAAAAAAAAAAAAAABEA",
+"IABEZWZhdWx0L2VuZW15LnBuZ3V4CwABBAAAAAAEAAAAAFVUDQAHOO1jaiZfuGo47WNqAa0BUv6JUE5HDQoaCgAAAA1JSERSAAAA",
+"EAAAABAIBgAAAB/z/2EAAAF0SURBVDgRpVJJSkNBEH39fyRmQCHoJgsXxoCKeAZPo3sP4gEELxWVLDTBVUAIgpDB5A9tVXVXGUOC",
+"Czvkd3W9V69raPewd4T/rMpasF87bzs6BVRAAjtFghZStLOm4r/20c4EHygwSEu9yKkAOPgi25eApSvwleTIUcq5ggS7ZUWE2+L5",
+"ZJGIyQZcTd+iBfTrXXj+xURzX2KRFjibvQTOEtDeJRrVq3fUFOL57JXu9/Jn24KJtcq1EqaU8LB2irvFSISuawcoXSi11zjG/Xws",
+"/ttqG++Y22UmsHCO2hPqYpTT107Beg4UjsohrqImECQdbuqHYnL6SgIpqJ/SCtT4NYGq98hJnZvHy26PtvqZw1xdJtCIE72cDBXb",
+"uPcbXQRuJrhNYepzcTw1f6axrqCYchk3gdAY8lD3HjeIiC8+DOMS3UqQl1VkaPmUVB2emyfWD0dnLrukz9jl9go5AxWQ1vIbH6yM",
+"kglblo1CBZRngDr+2r8BF7uHQrs7Nr8AAAAASUVORK5CYIJQSwcImMmUYLIBAACtAQAAUEsDBBQACAAIANhG+VwAAAAAAAAAAAAA",
+"AAAVACAARGVmYXVsdC9nZW5lcmF0b3IucG5ndXgLAAEEAAAAAAQAAAAAVVQNAAc47WNqJl+4ajjtY2oBCgL1/YlQTkcNChoKAAAA",
+"DUlIRFIAAAAQAAAAEAgGAAAAH/P/YQAAAdFJREFUOBGdU0lOAzEQ7PZsEUIcWP+BBAghQPAdOBDEL1jCgR9xggMPCYhdgmTGNlXt",
+"mZBwpKN47HZXVbvb1uXzI4FFDv8wzQEy8PdqLc1SKaFSiaUTcXBzR9W+2mARomQfXvJ3L9WQUIk2jtZq8YuFhDkHDwAZdjKQYNrl",
+"Rr/6IN5lEICINNIDiRHULThwI3cJxwxoRgJwFiW6RBrg9gtQGSJRxsSek8C0qQJgpJepO/ztK1JvDiRizpwp4udBALMMAoD1zrU5",
+"pof84XTmGM3mleT3/STUMLWWQLK0WLk4nuAfz25wTmSEkcqdNcikuOunWk0I2v2X/eI3bWz69csON/OttwZS3p6Yz47Qlus3KCbP",
+"34y6APNvGTTVQFlWWLMxSJN2fD6srAmTXsJP8OtuITpOIkajuCDTah2LHpQ4P1ZtigbewzEb1JYXC5YIsHjbziWgPXYDqdsCrTyI",
+"nYAxp6D6KQI3Yu+DXQq7iZQEF7sgqAd78bJXihIDMa0R++mx0JRB9jSWyHeAXySSbW3rwjSNCvGmTPBXwHvAOaRIBL1hISMZSw2H",
+"AQu8CXCoLXgIqPLcSNvhMfFBVcDQWAOLoKPC3U4MM/J0ThnDUwsx0R8AIbOlezSQRgAAAABJRU5ErkJgglBLBwjAqiS/DwIAAAoC",
+"AABQSwMEFAAIAAgA2Eb5XAAAAAAAAAAAAAAAABQAIABEZWZhdWx0L2ltbW9iaWxlLnBuZ3V4CwABBAAAAAAEAAAAAFVUDQAHOO1j",
+"aidfuGo47WNq6wzwc+flkuJiYGDg9fRwCQLSAiDMwQQkJ0zMMANSRZ4ujiEaoslfPnxIUGDdsKfio5Ozc7OHrrxdTUKTBuumBh6O",
+"zmWSvlyrHB0cGFbwOS3KdJjstJHRV9NIPM+yi/eE1oUbBacXSl1Y8rGgfSJbxYqHn/RiGHce7BL7f+LbAs+FNxj6ZVN4MzybWTXK",
+"Hx/jTRH9cZNhYZ1uywvphitA2xk8Xf1c1jklNAEAUEsHCEDgDCerAAAAqwAAAFBLAwQUAAgACADYRvlcAAAAAAAAAAAAAAAAEQAg",
+"AERlZmF1bHQvbW92ZXIucG5ndXgLAAEEAAAAAAQAAAAAVVQNAAc47WNqJ1+4ajjtY2oB0wEs/olQTkcNChoKAAAADUlIRFIAAAAQ",
+"AAAAEAgGAAAAH/P/YQAAAZpJREFUOBGFU0FOwzAQXDtOENwoN0TVY8UBcUDiAD8A8SEeAP8oT4DP9FiBuMG1NHFsZtZ2m7YSrOLE",
+"2Z2Z3aw35vhuJgOLg/1fW1OCLm+UOB6dSO0cVi2d77C8hnd9799fJZEpAjI9PZNmMpHKB6kCVh/EhSTvrUhfWektlrNytFjI/PND",
+"gxSIzExy03ppVl4MCzRgZaOQ671E5G0PQAF2/LMUVqIVsESHzEq2Rt6ez5X68DhPEmRSFRcxAZWQQ9M0/GaLsnPqRML99Wma9krW",
+"shRDLDk0lWHDLL7ZAEjY0IoIqzGSKiGWHJpWwG7XgY0lQP17NxXSWFRsOaFNp/Yo247R/cu2I7+tm9iheTWPjYUMrBBvL68RY9BI",
+"h7SliVmgloBzjn2fG5kUSFaivkbVjhAJVbXfRB6NREwevnMrK8maOZdGAWBLE/MpePGYMA4Jz/nm4gpCqEiJqRqK8JUYYodNNJgo",
+"aTGebeNkedjICk+ObzHu6WOMGGLJgW3+Bc42x3P3xyFq15fJDKVBwlNPmLOt3v9v62n5BQSpxECM3/7/AAAAAElFTkSuQmCCUEsH",
+"CElz2ODYAQAA0wEAAFBLAwQUAAgACADYRvlcAAAAAAAAAAAAAAAAEAAgAERlZmF1bHQvcHVzaC5wbmd1eAsAAQQAAAAABAAAAABV",
+"VA0ABzjtY2onX7hqOO1jagEPAvD9iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAB1klEQVQ4EZVTS0scQRD+emZ2",
+"dDbjLq6JIkoExQfoQRQPIRjBB6K3CJKDN8GLXsSbP8eDN9Hb/gXBg4R40LMoiEkE1xlnd2dnxq7qbnVziTYzVV2P/qq6ukocLhWg",
+"V2Y2b+SC/BztnPWMZ/A/+fBLPizHQq5FmQhVSBLXE6SNBOHfAA9/Alz/JC0EefHh9t4SvGIretcuGPOuPAEhOAiyNEPX6inrr/ZH",
+"4OVDOsYgHIYie0UPbt4kBNg5RwPIQBRLL9dz5a5bZluRPFRX8Noo8rnxYV5cOGmSjdC58ou3l3uDkoewSMp5Lax8D7Ecm905Z9sR",
+"OFousuJ7+Z65kQ3ov/ov659fAIRtYWZrALarUMmyuDsKKmGmKXtLMrczjCROUAtrrOIryNdQnyq69s34cJPKoEhu9HyFNElQWj57",
+"ZQby08dNshEK86q4NwdjrOIM0kZq7G/mjVqDfTmDOIrfXcTxlY4XgKgSYfJHF9wP1CRqzW4PAZbgNn7VR/i60Yf6Yx2VW2okPQuB",
+"7G1VFP85k2+b/RAaIJWtbJ51aq0b0X0Vwe9AHpcB9DTyPLR99NFa8GRj5WDJp6WhokU1SpMUcVRHtVI1w0QmHibeqOmiIaH/f4vz",
+"ZfIEP2OTS0PMYKIAAAAASUVORK5CYIJQSwcIllxBABQCAAAPAgAAUEsDBBQACAAIANhG+VwAAAAAAAAAAAAAAAARACAARGVmYXVs",
+"dC9zbGlkZS5wbmd1eAsAAQQAAAAABAAAAABVVA0ABzjtY2oZX7hqOO1jagHhAR7+iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYA",
+"AAAf8/9hAAABqElEQVQ4EZVTO0/DQAz+7i5pSQlUFCGEWrEgNoZKTEzMMLIwsLHyq9gR/BUkBnYkJMRjoCSkTXJ32L5UVcXQ1so9",
+"4tfZn211f7aJhvz0suSpWC9qlH1/6JHupEh7KXSkEbeDiL0q2qrSwtUW+VeGn88Mr4/MhWItMd4a9JB018TQxAaallLyCLzz0G0H",
+"O6nJ+SaSTs5m4kSe4ZeTboJWJ0LUjqGNhtK0xAE9RJ9xDo74LAP2KNoRnXlIIdlYw+DqmRjL08vtISnnYHeIk/bylo2mjozcJAUT",
+"KTycd1dycnK9P3OgKK/TmwOYloGhCkj+WoEh9M3OQHrGwXrYymKST8SBpEDVCB8dwYBlZED8UAfRndumfEnBWYve+dOcwqKft7sj",
+"UZEIXO0W6f+T19QTTBJBVVQrgzi82J45KEYFji930VpvUSfGAqY0EQMZ+igAWHvUZYXyt8TonRupiSCj3g6gpMJ0nlqXjRsHjirg",
+"uAKEfkWhF99jZB8Z6SpJQfFg9IfMAJUoocYK7cxDxcQYOetQFSXGo/F0mFgkwySXMF08JLwWkcQr2x/cqZ5WEO9EywAAAABJRU5E",
+"rkJgglBLBwjx4Azj5gEAAOEBAABQSwMEFAAIAAgA2Eb5XAAAAAAAAAAAAAAAABEAIABEZWZhdWx0L3RyYXNoLnBuZ3V4CwABBAAA",
+"AAAEAAAAAFVUDQAHOO1jaihfuGo47WNqAdUBKv6JUE5HDQoaCgAAAA1JSERSAAAAEAAAABAIBgAAAB/z/2EAAAGcSURBVDgRpVPN",
+"LkNBFP5O/2hKo7ESNhI7VFiiErYsPIGEF+BZeAPv4AnECwg7S5bNldZNQ7XjfF/vVCu14buZuXPP+c43Z+45Y+e4hCNwmgDLbL/6",
+"C06Qcw07qKDqzzxaaOIet+jgTb4yZlBHY+hLnfGAO2oHCoDBC1jGrNXQRoISprCJffTwSTfyKPjIa72IFbRDojVFJKCdPbjljtRe",
+"0Q1dD+7iJKyKeG2PHl5Ez1zQc6qK25RPAoO0ExyGmhs5xhGFovUml+g4/M5x4pk7SHFhV/wce0+ykcsYQgL8YX1Pe8sOZKxjT+91",
+"7IKDiDZyyGUMQQHzv+1n7o3UclA1zoMVqd82chnjMGXA1V9BgcA6s0yxa1xYepwn2chlDGOVAZskZ0U3qygelAl4gpYlGW3kkMsY",
+"QgIsY9n7sBBKqsBpqMt51t8AB0EbK0IOuYwhtCVLsuQdRmzb0bCMMoxM9FXCnAfX8IwneSTAqrIL2cpEw45VlZ+tPO3nJkcd6zGE",
+"BLKL4Y6mUvvAe7xMIsXLRIEX33nkMsH+e52/AOqUk0aa88t4AAAAAElFTkSuQmCCUEsHCAggRYDaAQAA1QEAAFBLAQIUAxQAAAAA",
+"ANhG+VwAAAAAAAAAAAAAAAAIABgAAAAAAAAAAAD/QQAAAABEZWZhdWx0L3V4CwABBAAAAAAEAAAAAFVUBQABOO1jalBLAQIUAxQA",
+"CAAIANhG+VxClbgMpAAAAKUAAAANABgAAAAAAAAAAAC2gUYAAABEZWZhdWx0LzAucG5ndXgLAAEEAAAAAAQAAAAAVVQFAAE47WNq",
+"UEsBAhQDFAAIAAgA2Eb5XBZ2Dtt9AAAAfwAAABUAGAAAAAAAAAAAALaBRQEAAERlZmF1bHQvQkdEZWZhdWx0LnBuZ3V4CwABBAAA",
+"AAAEAAAAAFVUBQABOO1jalBLAQIUAxQACAAIANhG+VyWFxDX8wEAAO4BAAAaABgAAAAAAAAAAAC2gSUCAABEZWZhdWx0L0NDV3Nw",
+"aW5uZXJfYWx0LnBuZ3V4CwABBAAAAAAEAAAAAFVUBQABOO1jalBLAQIUAxQACAAIANhG+VztptzHugEAALUBAAAZABgAAAAAAAAA",
+"AAC2gYAEAABEZWZhdWx0L0NXc3Bpbm5lcl9hbHQucG5ndXgLAAEEAAAAAAQAAAAAVVQFAAE47WNqUEsBAhQDFAAIAAgA2Eb5XJjJ",
+"lGCyAQAArQEAABEAGAAAAAAAAAAAALaBoQYAAERlZmF1bHQvZW5lbXkucG5ndXgLAAEEAAAAAAQAAAAAVVQFAAE47WNqUEsBAhQD",
+"FAAIAAgA2Eb5XMCqJL8PAgAACgIAABUAGAAAAAAAAAAAALaBsggAAERlZmF1bHQvZ2VuZXJhdG9yLnBuZ3V4CwABBAAAAAAEAAAA",
+"AFVUBQABOO1jalBLAQIUAxQACAAIANhG+VxA4AwnqwAAAKsAAAAUABgAAAAAAAAAAAC2gSQLAABEZWZhdWx0L2ltbW9iaWxlLnBu",
+"Z3V4CwABBAAAAAAEAAAAAFVUBQABOO1jalBLAQIUAxQACAAIANhG+VxJc9jg2AEAANMBAAARABgAAAAAAAAAAAC2gTEMAABEZWZh",
+"dWx0L21vdmVyLnBuZ3V4CwABBAAAAAAEAAAAAFVUBQABOO1jalBLAQIUAxQACAAIANhG+VyWXEEAFAIAAA8CAAAQABgAAAAAAAAA",
+"AAC2gWgOAABEZWZhdWx0L3B1c2gucG5ndXgLAAEEAAAAAAQAAAAAVVQFAAE47WNqUEsBAhQDFAAIAAgA2Eb5XPHgDOPmAQAA4QEA",
+"ABEAGAAAAAAAAAAAALaB2hAAAERlZmF1bHQvc2xpZGUucG5ndXgLAAEEAAAAAAQAAAAAVVQFAAE47WNqUEsBAhQDFAAIAAgA2Eb5",
+"XAggRYDaAQAA1QEAABEAGAAAAAAAAAAAALaBHxMAAERlZmF1bHQvdHJhc2gucG5ndXgLAAEEAAAAAAQAAAAAVVQFAAE47WNqUEsF",
+"BgAAAAAMAAwAIgQAAFgVAAAAAA=="
+].join("");
+let texBuiltinUrls=null;
+function texBuiltin(){
+  if(texBuiltinUrls) return texBuiltinUrls;
+  try{ texBuiltinUrls=texFromZip(b64bytes(TEX_BUILTIN_ZIP)); }
+  catch(e){ texBuiltinUrls={}; }
+  return texBuiltinUrls;
+}
+const texIsBuiltin=n=>n===TEX_BUILTIN_NAME;
+let texScroll=0;
+function texSave(){
+  // a built-in pack is in the page already; only its name is worth keeping
+  const out={packs:{},active:texLib.active};
+  for(const k of Object.keys(texLib.packs)) if(!texIsBuiltin(k)) out.packs[k]=texLib.packs[k];
+  try{ localStorage.setItem(TEX_KEY,JSON.stringify(out)); return ""; }
+  catch(e){ return "there is not enough room left to keep that pack"; }
+}
+function texNames(){
+  return [TEX_BUILTIN_NAME].concat(
+    Object.keys(texLib.packs).filter(n=>!texIsBuiltin(n)).sort((a,b)=>a.localeCompare(b)));
+}
+function texUse(name){
+  const urls=texIsBuiltin(name)?texBuiltin():texLib.packs[name];
+  if(!name||!urls||!Object.keys(urls).length){
+    texLib.active=""; texPack=null; texRefresh(); texSave(); return;
+  }
+  texLib.active=name;
+  texApply(name,urls,false);
+  texSave();
+}
+function texInstall(name,urls){
+  let n=name||"pack", i=2;
+  while(texLib.packs[n]&&texLib.packs[n]!==urls) n=name+" "+(i++);
+  texLib.packs[n]=urls;
+  texLib.active=n;
+  const err=texSave();
+  texApply(n,urls,false);
+  return {name:n,err};
+}
+function texRemove(name){
+  if(texIsBuiltin(name)) return;        // it lives in the page, not in storage
+  delete texLib.packs[name];
+  if(texLib.active===name){ texLib.active=""; texPack=null; texRefresh(); }
+  texSave();
+}
+const texImg=slot=>(texPack&&texPack.ready)?texPack.imgs[slot]:null;
+
+function bytesToDataURL(bytes){
+  let bin="";
+  for(let i=0;i<bytes.length;i+=8192)
+    bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+8192));
+  return "data:image/png;base64,"+btoa(bin);
+}
+// pull the wanted textures out of a zip, and nothing else
+function texFromZip(bytes){
+  const z=zipEntries(bytes);
+  const urls={}; let total=0, found=0;
+  for(const e of z.entries){
+    if(e.name.endsWith("/")) continue;
+    const base=e.name.split("/").pop().split("\\").pop().toLowerCase();
+    if(!TEX_WANT.has(base)) continue;              // never decompressed
+    if(total+e.usize>TEX_MAX_TOTAL) throw new Error("that pack is too big once unpacked");
+    const data=zipRead(z,e);
+    total+=data.length;
+    if(!(data[0]===0x89&&data[1]===0x50&&data[2]===0x4e&&data[3]===0x47)) continue;  // not a png
+    const slot=TEX_SLOTS.find(t=>t[0]===base)[1];
+    urls[slot]=bytesToDataURL(data);
+    found++;
+  }
+  if(!found) throw new Error("no textures in that zip - expected files like mover.png");
+  return urls;
+}
+function texApply(name,urls,save){
+  const pack={name:name||"pack",urls,imgs:{},ready:false,pending:0};
+  const done=()=>{ if(--pack.pending<=0){ pack.ready=true; texRefresh(); } };
+  /* Every image is hung on the pack, and the pack is live, before any src is
+     set. A data URL can fire onload synchronously, and when it did the refresh
+     ran against a pack that was still being built -- so the background colour
+     came from a texture that had not been attached yet. */
+  const keys=Object.keys(urls);
+  for(const k of keys){ pack.imgs[k]=new Image(); pack.pending++; }
+  texPack=pack;
+  for(const k of keys){
+    const im=pack.imgs[k];
+    im.onload=done;
+    im.onerror=()=>{ delete pack.imgs[k]; done(); };
+    im.src=urls[k];
+  }
+  if(!pack.pending){ pack.ready=true; texRefresh(); }
+}
+function texClear(){ texUse(""); }
+function texRefresh(){                 // every cached sprite is now wrong
+  spriteCache.clear();
+  bgTile=null; bgTileZ=-1;
+  texBoardColour();
+  invalidateBoardCache();
+}
+function texRestore(){
+  let raw=null;
+  try{ raw=localStorage.getItem(TEX_KEY); }catch(e){ return; }
+  if(!raw) return;
+  try{
+    const lib=JSON.parse(raw);
+    if(lib&&lib.packs){
+      texLib=Object.assign({packs:{},active:""},lib);
+      if(texLib.active) texUse(texLib.active);
+    }else if(lib&&lib.urls){                  // the single-pack shape this used to save
+      texLib={packs:{[lib.name||"pack"]:lib.urls},active:lib.name||"pack"};
+      texApply(texLib.active,lib.urls,false);
+      texSave();
+    }
+  }catch(e){ try{ localStorage.removeItem(TEX_KEY); }catch(e2){} }
+}
+// the file picker, made on demand: there is no DOM on this page but this one
+function texPick(){
+  const inp=document.createElement("input");
+  inp.type="file"; inp.accept=".zip,application/zip";
+  inp.onchange=()=>{
+    const f=inp.files&&inp.files[0];
+    if(!f) return;
+    if(f.size>32*1024*1024){ say("that file is too large for a texture pack",true); return; }
+    const rd=new FileReader();
+    rd.onload=()=>{
+      try{
+        const urls=texFromZip(new Uint8Array(rd.result));
+        const r=texInstall(f.name.replace(/\.zip$/i,"").slice(0,40),urls);
+        say(r.err?('"'+r.name+'" is in use but '+r.err)
+                 :('"'+r.name+'" installed - '+Object.keys(urls).length+" textures"));
+      }catch(e){ say(String(e.message||e),true); }
+    };
+    rd.onerror=()=>say("could not read that file",true);
+    rd.readAsArrayBuffer(f);
+  };
+  inp.click();
+}
+
 // rotation only reads on cells that have one; slide has two states, not four
 // Every cell carries a rotation and shows it -- generator, mover, both
 // rotators, push, slide, enemy and trash. Only the wall has no oriented form.
@@ -1036,6 +1344,20 @@ function spriteFor(t,r,size){
 }
 function makeSprite(t,r,size){
   const rr=normRot(t,r);
+  const tex=texImg("t"+t);
+  if(tex&&tex.complete&&tex.naturalWidth){
+    /* A pack replaces the whole tile, face and icon together, and is turned by
+       the same rule the drawn icons use -- so a wall still does not spin. */
+    const sc=document.createElement("canvas"); sc.width=sc.height=size;
+    const cc=sc.getContext("2d");
+    cc.imageSmoothingEnabled=false;
+    cc.save();
+    cc.translate(size/2,size/2);
+    cc.rotate(rr*Math.PI/2);
+    cc.drawImage(tex,-size/2,-size/2,size,size);
+    cc.restore();
+    return sc;
+  }
   const s=document.createElement("canvas"); s.width=s.height=size;
   const c=s.getContext("2d");
   const base=COLORS[t]||"#ff00ff";
@@ -2080,7 +2402,8 @@ const alphaNow=()=>tickDur>0?Math.min(1,(now-tickAt)/tickDur):1;
 const TPS=[1,2,3,5,10,20,30,60,120,600,Infinity];
 const tpsLabelFor=i=>TPS[i]===Infinity?"max tps":TPS[i]+" tps";
 const tpsLabel=()=>tpsLabelFor(tpsIdx);
-const PALETTE=[T_GEN,T_MOVER,T_CW,T_CCW,T_PUSH,T_SLIDE,T_ENEMY,T_TRASH,T_WALL];
+// the order Mystic Mod uses, so muscle memory carries across
+const PALETTE=[T_GEN,T_CW,T_CCW,T_MOVER,T_SLIDE,T_PUSH,T_WALL,T_ENEMY,T_TRASH];
 // 9 = drag cells around, 10 = pan the camera, 11 = rectangle select
 const TOOL_PLUS=9,TOOL_DRAG=10,TOOL_SELECT=11;   // middle-drag still pans
 // A finger has no right button, so erasing needs a tool of its own. It is only
@@ -2397,7 +2720,59 @@ function avgColor(t){
   avgCache[t]=out;
   return out;
 }
+/* The background tile is laid one per cell, not stretched across the board:
+   the default one is a rounded square with transparent corners, and the gaps
+   between them are what draws the grid. One pattern fill covers the whole
+   board when the zoom is a whole number of pixels, which it is except during a
+   pinch; a fractional zoom falls back to placing each visible tile so they
+   stay lined up with the cells drawn on top of them. */
+let bgTile=null, bgTileZ=-1;
+function bgTileFor(z){
+  const tz=Math.max(1,Math.round(z));
+  if(bgTile&&bgTileZ===tz) return bgTile;
+  const tex=texImg("bg");
+  if(!(tex&&tex.complete&&tex.naturalWidth)) return null;
+  const c=document.createElement("canvas"); c.width=c.height=tz;
+  const cx=c.getContext("2d");
+  cx.imageSmoothingEnabled=false;
+  cx.drawImage(tex,0,0,tz,tz);
+  bgTile=c; bgTileZ=tz;
+  return c;
+}
+function fillBoardBg(sx,sy,z,x0,x1,y0,y1){
+  const tex=texImg("bg");
+  if(!(tex&&tex.complete&&tex.naturalWidth)){
+    X.fillStyle=boardInk; X.fillRect(sx,sy,world.W*z,world.H*z);
+    return;
+  }
+  X.fillStyle=TEX_BEHIND; X.fillRect(sx,sy,world.W*z,world.H*z);  // shows through the gaps
+  const tz=Math.round(z);
+  const tile=bgTileFor(z);
+  if(tile&&Math.abs(z-tz)<0.01){
+    const px=Math.round(sx+x0*z), py=Math.round(sy+y0*z);
+    let pat=null;
+    try{ pat=X.createPattern(tile,"repeat"); }catch(e){}
+    if(pat){
+      X.save(); X.translate(px,py);
+      X.fillStyle=pat;
+      X.fillRect(0,0,(x1-x0+1)*tz,(y1-y0+1)*tz);
+      X.restore();
+      return;
+    }
+  }
+  X.imageSmoothingEnabled=false;
+  for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){
+    const qx=Math.round(sx+x*z), qy=Math.round(sy+y*z);
+    X.drawImage(tex,qx,qy,Math.round(sx+(x+1)*z)-qx,Math.round(sy+(y+1)*z)-qy);
+  }
+}
 function drawPlus(px,py,z,color){
+  const tex=texImg("plus");
+  if(tex&&tex.complete&&tex.naturalWidth){
+    X.imageSmoothingEnabled=false;
+    X.drawImage(tex,Math.round(px),Math.round(py),Math.round(z),Math.round(z));
+    return;
+  }
   const t=Math.max(1,Math.round(z*0.15)), L=Math.round(z*0.60);
   const cx=Math.round(px+z/2), cy=Math.round(py+z/2);
   X.fillStyle=color;
@@ -2430,7 +2805,48 @@ function drawCell(w,i,t,c,px,py,z,al,pw,ph){
    unavailable. */
 const packHex=h=>{const s=h.replace("#","");
   return ((255<<24)|(parseInt(s.slice(4,6),16)<<16)|(parseInt(s.slice(2,4),16)<<8)|parseInt(s.slice(0,2),16))>>>0;};
-const PACK_BG=packHex("#000000"), PACK_BOARD=packHex("#0d0d0d"), PACK_PLUS=packHex("#191919");
+const PACK_BG=packHex("#000000"), PACK_BOARD_DEF=packHex("#0d0d0d"), PACK_PLUS=packHex("#191919");
+/* The board's empty colour can come from the pack's background tile. Tiling the
+   image itself would mean giving up the packed-pixel path the board is drawn
+   with, which is the fastest thing in the renderer, so its average colour is
+   taken instead -- one read when the pack loads, nothing per frame. */
+let PACK_BOARD=PACK_BOARD_DEF, boardInk="#0d0d0d";
+let PACK_PLUS_CUR=null;          // the plus tile's averaged colour, when a pack has one
+const TEX_BEHIND="#2a2a2a";   // what a pack's background tiles sit on
+// the averaged colour of one of the pack's tiles, over what shows through it
+function texAverage(slot){
+  const tex=texImg(slot);
+  if(!(tex&&tex.complete&&tex.naturalWidth)) return null;
+  try{
+    const c=document.createElement("canvas"); c.width=c.height=1;
+    const cx=c.getContext("2d");
+    cx.drawImage(tex,0,0,1,1);
+    const d=cx.getImageData(0,0,1,1).data;
+    const a=d[3]/255, base=0x2a;
+    const hex=n=>("0"+Math.round(n).toString(16)).slice(-2);
+    return "#"+hex(d[0]*a+base*(1-a))+hex(d[1]*a+base*(1-a))+hex(d[2]*a+base*(1-a));
+  }catch(e){ return null; }
+}
+function texBoardColour(){
+  PACK_BOARD=PACK_BOARD_DEF; boardInk="#0d0d0d";
+  const plus=texAverage("plus");
+  PACK_PLUS_CUR=plus?packHex(plus):null;
+  const tex=texImg("bg");
+  if(!(tex&&tex.complete&&tex.naturalWidth)) return;
+  try{
+    const c=document.createElement("canvas"); c.width=c.height=1;
+    const cx=c.getContext("2d");
+    cx.drawImage(tex,0,0,1,1);
+    const d=cx.getImageData(0,0,1,1).data;
+    // the tile has transparent corners, so its average has to be taken over
+    // black -- otherwise the far-out board comes back lighter than it looks
+    // over TEX_BEHIND, not over black: that is what the gaps show
+    const a=d[3]/255, base=0x2a;
+    const hex=n=>("0"+Math.round(n).toString(16)).slice(-2);
+    boardInk="#"+hex(d[0]*a+base*(1-a))+hex(d[1]*a+base*(1-a))+hex(d[2]*a+base*(1-a));
+    PACK_BOARD=packHex(boardInk);
+  }catch(e){}                      // a tainted canvas just keeps the default
+}
 const PACK_DECOR=packHex("#241a2e");
 const rgbaCache={};
 function avgRGBA(t){
@@ -2475,7 +2891,8 @@ function rasterLayer(g,sx,sy,z,x0,x1,y0,y1,al,doMove,clip){
       if(!placeMask[y*world.W+x]) continue;
       const qx0=Math.max(cx0,Math.round(sx+x*z)), qx1=Math.min(cx1,Math.round(sx+x*z+z));
       const qy0=Math.max(cy0,Math.round(sy+y*z)), qy1=Math.min(cy1,Math.round(sy+y*z+z));
-      for(let yy=qy0;yy<qy1;yy++){ let o=yy*W+qx0; for(let xx=qx0;xx<qx1;xx++) U32[o++]=PACK_PLUS; }
+      const pk=PACK_PLUS_CUR===null?PACK_PLUS:PACK_PLUS_CUR;
+      for(let yy=qy0;yy<qy1;yy++){ let o=yy*W+qx0; for(let xx=qx0;xx<qx1;xx++) U32[o++]=pk; }
     }
   }
   const G=world.g, ST=world.stride, OCC=world.occ;
@@ -2546,6 +2963,12 @@ function rasterLayer(g,sx,sy,z,x0,x1,y0,y1,al,doMove,clip){
    to read as a glyph rather than as noise. */
 const DECOR_INK="#9a5cc2", DECOR_BG="#241a2e";
 function drawDecorPlus(px,py,z,ink){
+  const tex=texImg("decor");
+  if(tex&&tex.complete&&tex.naturalWidth){
+    X.imageSmoothingEnabled=false;
+    X.drawImage(tex,Math.round(px),Math.round(py),Math.round(z),Math.round(z));
+    return;
+  }
   drawPlus(px,py,z,ink||DECOR_INK);
   if(z<14) return;
   const u=z/16, cx=px+z/2, cy=py+z/2;
@@ -2565,14 +2988,30 @@ function drawPlusHighlight(sx,sy,z,x0,x1,y0,y1){
   const bx1=Math.min(x1,hi(maskCount?maskBox[2]:-1,decorCount?decorBox[2]:-1));
   const by0=Math.max(y0,lo(maskCount?maskBox[1]:-1,decorCount?decorBox[1]:-1));
   const by1=Math.min(y1,hi(maskCount?maskBox[3]:-1,decorCount?decorBox[3]:-1));
+  /* Holding B shows the plus tiles hiding under cells. With a pack the plus is
+     a texture rather than a bright shape, so it needs help standing out: the
+     cell is dimmed, the tile is drawn, and it is tinted rather than left to
+     compete with whatever is on top of it. */
+  const tinted=(px,py,tex,tint)=>{
+    X.fillStyle="rgba(0,0,0,.55)"; X.fillRect(px,py,z,z);
+    X.imageSmoothingEnabled=false;
+    X.drawImage(tex,Math.round(px),Math.round(py),Math.round(z),Math.round(z));
+    X.save();
+    X.globalCompositeOperation="source-atop";
+    X.globalAlpha=0.45;
+    X.fillStyle=tint; X.fillRect(Math.round(px),Math.round(py),Math.round(z),Math.round(z));
+    X.restore();
+  };
+  const plusTex=texImg("plus"), decorTex=texImg("decor");
   for(let y=by0;y<=by1;y++)for(let x=bx0;x<=bx1;x++){
+    const px=sx+x*z, py=sy+y*z;
     if(decorMask&&decorMask[y*world.W+x]){
-      X.fillStyle="rgba(0,0,0,.45)"; X.fillRect(sx+x*z,sy+y*z,z,z);
-      drawDecorPlus(sx+x*z,sy+y*z,z);
+      if(decorTex&&decorTex.complete&&decorTex.naturalWidth) tinted(px,py,decorTex,DECOR_INK);
+      else{ X.fillStyle="rgba(0,0,0,.45)"; X.fillRect(px,py,z,z); drawDecorPlus(px,py,z); }
     }
     if(placeMask[y*world.W+x]){
-      X.fillStyle="rgba(0,0,0,.45)"; X.fillRect(sx+x*z,sy+y*z,z,z);
-      drawPlus(sx+x*z,sy+y*z,z,"#6ec6ff");
+      if(plusTex&&plusTex.complete&&plusTex.naturalWidth) tinted(px,py,plusTex,"#6ec6ff");
+      else{ X.fillStyle="rgba(0,0,0,.45)"; X.fillRect(px,py,z,z); drawPlus(px,py,z,"#6ec6ff"); }
     }
   }
 }
@@ -2606,7 +3045,7 @@ function drawBoardLayer(clip){
       return;
     }catch(e){ /* no ImageData -- fall through to the vector path */ }
   }
-  X.fillStyle="#0d0d0d"; X.fillRect(sx,sy,world.W*z,world.H*z);
+  fillBoardBg(sx,sy,z,x0,x1,y0,y1);
   // Plus tiles are usually a small patch, so keep a bounding box and never scan
   // outside it -- and skip the pass entirely when the level has none.
   if(z>=3&&decorCount>0){
@@ -2628,9 +3067,19 @@ function drawBoardLayer(clip){
       if(!placeMask[y*world.W+x]) continue;
       const qx=Math.round(sx+x*z), qy=Math.round(sy+y*z);
       const qw=Math.round(sx+(x+1)*z)-qx, qh=Math.round(sy+(y+1)*z)-qy;
-      X.fillStyle="#191919"; X.fillRect(qx,qy,qw,qh);
-      if(z>=10&&(world.g[(y+1)*world.stride+1+x]>>2)===T_EMPTY)
-        drawPlus(qx,qy,z,"#3d3d3d");
+      const ptex=texImg("plus");
+      if(ptex&&ptex.complete&&ptex.naturalWidth){
+        /* The pack's tile replaces the background tile here, so it must not be
+           laid over the dark plate the drawn version uses -- its own corners
+           are transparent, and the plate showed through them as a dark ring
+           around every placeable tile. */
+        X.imageSmoothingEnabled=false;
+        X.drawImage(ptex,qx,qy,qw,qh);
+      }else{
+        X.fillStyle="#191919"; X.fillRect(qx,qy,qw,qh);
+        if(z>=10&&(world.g[(y+1)*world.stride+1+x]>>2)===T_EMPTY)
+          drawPlus(qx,qy,z,"#3d3d3d");
+      }
     }
   }
   if(z>=9){
@@ -3509,38 +3958,75 @@ const p=panelRect(needW*_k,needH*_k);
 function screenOptions(){
   X.fillStyle="#000"; X.fillRect(0,0,W,H);
   if(backArrow()) nav("title");
-  const lx=10*U, ls=U*2, ns=U;
-  // The back arrow is twice the size on touch, so the first row has to stop
-  // short of it rather than running underneath.
-  const backW=(touchUsed?24*U*2:24*U)+9*U;
-  const backH=(touchUsed?18*U*2:18*U)+9*U;
-  const right=W-12*U;
-  let y=12*U;
-  function row(label,note,ctl){
-    text(label,lx,y,ls,WHITE,"left",2);
-    const cx=lx+textW(label,ls,2)+8*U;
-    // The row's control must stop before the back arrow if their bands overlap
-    // vertically. Comparing the row's top against the arrow's height was not
-    // enough -- a tall touch-sized slider still reached up into it.
-    const rowBot=y+textH(ls);
-    /* A slider reserves a grab radius either side of its track, so the drawn
-       width has to stop that much further short of the arrow than the track
-       alone would suggest. */
-    const grab=touchUsed?Math.max(TAP()/2,8*U):5*U;
-    const lim=(rowBot>7*U&&y<backH?W-backW-grab:right)-cx;
-    ctl(cx,y+textH(ls)/2,Math.max(24*U,Math.min(lim,150*U)));
-    y+=textH(ls)+3*U;
+  const ROWS=[
+    ["MUSIC VOL","a 32-beat loop, boosted 3x over the file",
+      (u,x,cy,w)=>{S.musicVol=uiSlider("m",x,cy,w,S.musicVol);}],
+    ["SFX VOL",null,(u,x,cy,w)=>{S.sfxVol=uiSlider("s",x,cy,w,S.sfxVol);}],
+    ["FAST GRAPHICS","turns off motion interpolation - cells jump between ticks",
+      (u,x,cy)=>{const f=uiToggleAt(x,cy,S.fast); if(f!==S.fast) S.fast=f;}],
+    ["DISABLE GRAPHICS","stops drawing the board entirely - the simulation still runs",
+      (u,x,cy)=>{const f=uiToggleAt(x,cy,S.noDraw); if(f!==S.noDraw){ S.noDraw=f; bkey=""; }}],
+    ["TEXTURE PACK","packs may cost a little speed",
+      (u,x,cy,w)=>{ const lab=texPack?texPack.name:"Default";
+        const bh=btnH(u*2), by=cy-bh/2;
+        if(uiBtn(x,by,Math.max(8*u,Math.min(w,Math.max(btnW(lab,u*2),34*u))),bh,lab,u*2))
+          openModal("textures"); }],
+  ];
+  /* Five rows do not fit a landscape phone at full size, and this screen had no
+     check at all -- it simply drew off the bottom, through the VIEW CONTROLS
+     button. The unit shrinks until the whole column fits above it. */
+  const fit=u=>{
+    const ls=u*2, ns=u;
+    const labW=Math.max(...ROWS.map(r=>textW(r[0],ls,2)));
+    const ctlMin=Math.max(24*u,btnH(ls));
+    // as in the settings panel: when the longest label plus a usable control is
+    // wider than the screen, the control goes under the label instead of past
+    // the right-hand edge
+    const side=10*u+labW+8*u+ctlMin<=W-12*u;
+    let h=0;
+    for(const r of ROWS){
+      h+=textH(ls)+3*u;
+      if(!side) h+=Math.max(btnH(ls),toggleH())+3*u;
+      if(r[1]) h+=textH(ns);
+      h+=9*u;
+    }
+    return {u,ls,ns,labW,side,need:h};
+  };
+  let g=fit(U);
+  const bottom=()=>H-btnH(g.u*2)-10*g.u-6*g.u;
+  while(g.u>1&&12*g.u+g.need>bottom()) g=fit(g.u-1);
+  const {u,ls,ns,side}=g;
+  const lx=10*u;
+  const backW=(touchUsed?24*u*2:24*u)+9*u;
+  const backH=(touchUsed?18*u*2:18*u)+9*u;
+  const right=W-12*u;
+  let y=12*u;
+  for(const [label,note,ctl] of ROWS){
+    textFit(label,lx,y,side?(right-lx):(W-lx-6*u),textH(ls),WHITE,"left",2,ls);
+    const grab=touchUsed?Math.max(TAP()/2,8*u):5*u;
+    /* A toggle ignores the width it is handed and draws at its own size, so the
+       left edge has to be pulled back far enough for it rather than trusting
+       the width to hold it in. */
+    const ctlMin=Math.max(16*u,touchUsed?Math.round(toggleH()*2):16*u);
+    if(side){
+      const cx=Math.min(lx+textW(label,ls,2)+8*u,W-6*u-ctlMin);
+      // the control stops before the back arrow when their bands overlap
+      const rowBot=y+textH(ls);
+      // whatever else constrains it, a control never reaches past the window
+      const room=W-6*u-cx;
+      const lim=Math.min((rowBot>7*u&&y<backH?W-backW-grab:right)-cx,room);
+      ctl(u,cx,y+textH(ls)/2,Math.max(8*u,Math.min(lim,150*u)));
+      y+=textH(ls)+3*u;
+    }else{
+      y+=textH(ls)+3*u;
+      const ch=Math.max(btnH(ls),toggleH());
+      ctl(u,lx,y+ch/2,Math.max(8*u,Math.min(right-lx-grab,150*u)));
+      y+=ch+3*u;
+    }
     if(note){ textFit(note,lx,y,right-lx,textH(ns),DIM,"left",1,ns); y+=textH(ns); }
-    y+=9*U;
+    y+=9*u;
   }
-  row("MUSIC VOL","a 32-beat loop, boosted 3x over the file",
-      (x,cy,w)=>{S.musicVol=uiSlider("m",x,cy,w,S.musicVol);});
-  row("SFX VOL",null,(x,cy,w)=>{S.sfxVol=uiSlider("s",x,cy,w,S.sfxVol);});
-  row("FAST GRAPHICS","turns off motion interpolation - cells jump between ticks",
-      (x,cy)=>{const f=uiToggleAt(x,cy,S.fast); if(f!==S.fast) S.fast=f;});
-  row("DISABLE GRAPHICS","stops drawing the board entirely - the simulation still runs",
-      (x,cy)=>{const f=uiToggleAt(x,cy,S.noDraw); if(f!==S.noDraw){ S.noDraw=f; bkey=""; }});
-  if(uiBtn(lx,H-btnH(U*2)-10*U,0,0,"VIEW CONTROLS",U*2)) nav("controls");
+  if(uiBtn(lx,H-btnH(u*2)-10*u,0,0,"VIEW CONTROLS",u*2)) nav("controls");
 }
 const CONTROLS=[["Q/E","Rotate the cell you will place"],["WASD","Move camera around"],
   ["MIDDLE CLICK","Drag camera around"],["LEFT CLICK","Place cells"],
@@ -3572,8 +4058,10 @@ function screenControls(){
 }
 function paletteIcon(i,x,y,s){
   if(i<9){ X.drawImage(spriteFor(PALETTE[i],selRot,s),x,y,s,s); return; }
-  X.fillStyle="#111"; X.fillRect(x,y,s,s);
-  X.strokeStyle="#444"; X.lineWidth=Math.max(1,U); X.strokeRect(x+U/2,y+U/2,s-U,s-U);
+  if(i!==TOOL_PLUS){
+    X.fillStyle="#111"; X.fillRect(x,y,s,s);
+    X.strokeStyle="#444"; X.lineWidth=Math.max(1,U); X.strokeRect(x+U/2,y+U/2,s-U,s-U);
+  }
   X.fillStyle=WHITE;
   const c=s/2, q=Math.max(2,s*0.09);
   if(i===TOOL_ERASE){
@@ -3597,11 +4085,20 @@ function paletteIcon(i,x,y,s){
   }
   if(i===TOOL_SELECT){ X.strokeStyle=WHITE; X.lineWidth=Math.max(1,U);
     X.strokeRect(x+s*0.2,y+s*0.2,s*0.6,s*0.6); }
-  if(i===TOOL_PLUS){                       // the placeable tile, as drawn on the board
-    X.fillStyle="#191919"; X.fillRect(x+s*0.14,y+s*0.14,s*0.72,s*0.72);
-    X.strokeStyle="#555"; X.lineWidth=Math.max(1,U);
-    X.strokeRect(x+s*0.14,y+s*0.14,s*0.72,s*0.72);
-    drawPlus(x+s*0.14,y+s*0.14,s*0.72,"#8fa0b0");
+  if(i===TOOL_PLUS){
+    /* Drawn filling its slot like any other cell rather than as a small inset
+       square: with a pack loaded the inset looked like a picture of a tile
+       sitting on a tile. */
+    const tex=texImg("plus");
+    if(tex&&tex.complete&&tex.naturalWidth){
+      X.imageSmoothingEnabled=false;
+      X.drawImage(tex,x,y,s,s);
+    }else{
+      X.fillStyle="#191919"; X.fillRect(x,y,s,s);
+      drawPlus(x,y,s,"#8fa0b0");
+      X.strokeStyle="#555"; X.lineWidth=Math.max(1,U);
+      X.strokeRect(x+U/2,y+U/2,s-U,s-U);
+    }
   }
 }
 function screenGame(dt){
@@ -4609,38 +5106,66 @@ function topRot(t){
   return best;
 }
 function overlaySettings(){
-  const m=8*U, hs=U*2, head=Math.max(textH(hs),U*11);
-  const labW=Math.max(textW("MUSIC VOL",hs,2),textW("SFX VOL",hs,2),
-                      textW("FAST GRAPHICS",hs,2),textW("DISABLE GRAPHICS",hs,2));
-  const ctlW=Math.max(40*U,Math.min(80*U,W*0.28));
-  const noteMax=Math.max(textW("turns off motion interpolation - cells jump between ticks",U,1),
-                         textW("stops drawing the board entirely - the simulation still runs",U,1),
-                         textW("a 32-beat loop, boosted 3x over the file",U,1));
-  const needW=Math.max(labW+6*U+ctlW,noteMax)+2*m;
-  // four rows, not three: DISABLE GRAPHICS was drawn past the bottom edge
-  const needH=m+head+5*U+4*(textH(hs)+textH(U)+7*U)+m;
-    // shrink to fit the window height rather than running off the bottom
-  const u=Math.max(1,Math.min(U,Math.floor(U*(H-8*U)/Math.max(1,needH))));
-  const _k=u/U;
-const p=panelRect(needW*_k,needH*_k);
+  /* Measured and drawn at the same unit. It used to measure at full size, shrink
+     the panel to fit the window, then draw the rows at full size anyway -- with
+     four rows that was survivable, with five it was not. */
+  const ROWS=[
+    ["MUSIC VOL","a 32-beat loop, boosted 3x over the file",
+      (u,x,cy,w)=>{S.musicVol=uiSlider("sm",x,cy,w,S.musicVol);}],
+    ["SFX VOL","place, generate, destroy",
+      (u,x,cy,w)=>{S.sfxVol=uiSlider("ss",x,cy,w,S.sfxVol);}],
+    ["FAST GRAPHICS","turns off motion interpolation - cells jump between ticks",
+      (u,x,cy)=>{const f=uiToggleAt(x,cy,S.fast); if(f!==S.fast) S.fast=f;}],
+    ["DISABLE GRAPHICS","stops drawing the board entirely - the simulation still runs",
+      (u,x,cy)=>{const f=uiToggleAt(x,cy,S.noDraw); if(f!==S.noDraw){ S.noDraw=f; bkey=""; }}],
+    ["TEXTURE PACK","packs may cost a little speed",
+      (u,x,cy,w)=>{ const lab=texPack?texPack.name:"Default";
+        const bh=btnH(u*2), by=cy-bh/2;
+        if(uiBtn(x,by,Math.max(8*u,Math.min(w,Math.max(btnW(lab,u*2),34*u))),bh,lab,u*2))
+          openModal("textures"); }],
+  ];
+  const fit=u=>{
+    const hs=u*2, m=8*u, head=Math.max(textH(hs),u*11);
+    const labW=Math.max(...ROWS.map(r=>textW(r[0],hs,2)));
+    const ctlW=Math.max(34*u,Math.min(80*u,W*0.28));
+    const noteMax=Math.max(...ROWS.map(r=>textW(r[1],u,1)));
+    /* On a narrow phone the longest label is wider than the whole panel, so no
+       amount of shrinking puts a control beside it. Below that width each row
+       becomes two lines, label then control, instead of the control being
+       pushed off the side of the window. */
+    const avail=Math.min(W,W-8*u)-2*m;
+    const side=labW+6*u+ctlW<=avail;
+    const rowH=textH(hs)+2*u+(side?0:(Math.max(btnH(u*2),toggleH())+2*u))+textH(u)+5*u;
+    return {u,hs,m,head,labW,ctlW,side,
+            needW:Math.min(Math.max(side?labW+6*u+ctlW:Math.max(labW,ctlW),noteMax)+2*m,W-8*u),
+            needH:m+head+5*u+ROWS.length*rowH+m};
+  };
+  let g=fit(U);
+  while(g.u>1&&(g.needH>H-8*U||g.needW>W-8*U)) g=fit(g.u-1);
+  const {u,hs,m,head,labW,ctlW,side}=g;
+  const p=panelRect(g.needW,g.needH);
   textFit("SETTINGS",p.x+m,p.y+m,p.w-2*m-14*u,head,WHITE,"left",2,hs);
   if(closeBtn(p,u)) closeModal();
   let y=p.y+m+head+5*u;
   const cx=p.x+m+labW+6*u;
-  const row=(label,note,ctl)=>{
-    text(label,p.x+m,y,hs,WHITE,"left",2);
-    ctl(cx,y+textH(hs)/2,Math.min(ctlW,p.x+p.w-m-cx));
-    y+=textH(hs)+2*u;
-    textFit(note,p.x+m,y,p.w-2*m,textH(u),"#222","left",1,u); y+=textH(u)+5*u;
-  };
-  row("MUSIC VOL","a 32-beat loop, boosted 3x over the file",
-      (x,cy,w)=>{S.musicVol=uiSlider("sm",x,cy,w,S.musicVol);});
-  row("SFX VOL","place, generate, destroy",
-      (x,cy,w)=>{S.sfxVol=uiSlider("ss",x,cy,w,S.sfxVol);});
-  row("FAST GRAPHICS","turns off motion interpolation - cells jump between ticks",
-      (x,cy)=>{const f=uiToggleAt(x,cy,S.fast); if(f!==S.fast) S.fast=f;});
-  row("DISABLE GRAPHICS","stops drawing the board entirely - the simulation still runs",
-      (x,cy)=>{const f=uiToggleAt(x,cy,S.noDraw); if(f!==S.noDraw){ S.noDraw=f; bkey=""; }});
+  for(const [label,note,ctl] of ROWS){
+    // textFit, not text: a label that will not fit is clipped rather than drawn
+    // straight out of the panel
+    textFit(label,p.x+m,y,side?labW:(p.w-2*m),textH(hs),WHITE,"left",2,hs);
+    if(side){
+      const tmin=Math.max(16*u,touchUsed?Math.round(toggleH()*2):16*u);
+      const cxx=Math.min(cx,p.x+p.w-m-tmin);
+      ctl(u,cxx,y+textH(hs)/2,Math.max(8*u,Math.min(ctlW,p.x+p.w-m-cxx)));
+      y+=textH(hs)+2*u;
+    }else{
+      y+=textH(hs)+2*u;
+      const ch=Math.max(btnH(u*2),toggleH());
+      ctl(u,p.x+m,y+ch/2,Math.max(8*u,p.w-2*m));
+      y+=ch+2*u;
+    }
+    textFit(note,p.x+m,y,p.w-2*m,textH(u),"#222","left",1,u);
+    y+=textH(u)+5*u;
+  }
 }
 let szAnchor=0;                  // 0 TL, 1 TR, 2 BL, 3 BR
 let fieldW="", fieldH="", focusField=null;   // typed boxes: sizes and searches
@@ -4916,6 +5441,48 @@ function overlayLoad(){
   if(uiBtn(p.x+m,p.y+p.h-m-btnH(u),0,0,"BACK",u)) closeModal();
 }
 const gapPad=()=>10*U;
+/* The installed packs, "Default" meaning the drawn graphics this build ships
+   with. A list rather than one slot, because swapping between a couple of packs
+   should not mean re-importing the zip every time. */
+function overlayTextures(){
+  const u=U, hs=U*2, m=6*u, rowH=Math.max(textH(u)+5*u,touchUsed?TAP():0);
+  const addW=btnW("ADD ZIP",u);
+  const names=texNames();
+  const rows=[""].concat(names);                   // "" is Default
+  const minW=Math.max(textW("TEXTURE PACKS",hs,2)+addW+10*u,
+                      textW("packs may cost a little speed",u,1)+4*u,
+                      40*u)+2*m;
+  const p=panelRect(Math.max(minW,Math.round(W*0.52)),Math.round(H*0.72));
+  textFit("TEXTURE PACKS",p.x+m,p.y+m,p.w-2*m-addW-6*u,Math.max(textH(hs),rowH),WHITE,"left",2,hs);
+  if(uiBtn(p.x+p.w-m-addW,p.y+m,0,0,"ADD ZIP",u)) texPick();
+  let y=p.y+m+Math.max(textH(hs),rowH)+3*u;
+  textFit("a .zip of pngs named the Mystic Mod way - packs may cost a little speed",
+          p.x+m,y,p.w-2*m,textH(u),"#222","left",1,u);
+  y+=textH(u)+4*u;
+  const listTop=y, listBot=p.y+p.h-m-btnH(u)-5*u;
+  const visible=Math.max(1,Math.floor((listBot-listTop)/(rowH+3*u)));
+  texScroll=wheelScroll(p.x+m,listTop,p.w-2*m,listBot-listTop,texScroll,rows.length,visible);
+  const sbW=Math.max(4,u*3);
+  const delW=Math.max(14,u*10);
+  rows.slice(texScroll,texScroll+visible).forEach(name=>{
+    const on=(name===(texLib.active||""));
+    const isDefault=!name, fixed=isDefault||texIsBuiltin(name);
+    const rowW=p.w-2*m-sbW-6*u-(fixed?0:delW+2*u);
+    if(uiBtn(p.x+m,y,rowW,rowH,"",1)){ texUse(name); consumeClick(); }
+    if(on){ X.strokeStyle=WHITE; X.lineWidth=Math.max(1,u);
+            X.strokeRect(p.x+m+u/2,y+u/2,rowW-u,rowH-u); }
+    textFit((on?"> ":"  ")+(isDefault?"Default   (no texture pack)"
+                          :texIsBuiltin(name)?(name+"   (built in)"):name),
+            p.x+m+4*u,y,rowW-8*u,rowH,on?WHITE:"#cfcfcf","left",1,u);
+    if(!fixed){
+      if(uiBtn(p.x+p.w-m-delW-sbW-2*u,y,delW,rowH,"",1)){ texRemove(name); consumeClick(); }
+      textFit("x",p.x+p.w-m-delW-sbW-2*u,y,delW,rowH,WHITE,"center",1,u);
+    }
+    y+=rowH+3*u;
+  });
+  scrollBar(p.x+p.w-m-sbW,listTop,sbW,listBot-listTop,texScroll,rows.length,visible);
+  if(uiBtn(p.x+m,p.y+p.h-m-btnH(u),0,0,"BACK",u)) closeModal();
+}
 function overlayVariant(){
   const m=8*U, rowH=btnH(U*2);
   const title="Which Cell Machine is this from?";
@@ -5019,6 +5586,7 @@ function loop(t){
   if(modal==="help") overlayHelp();
   if(modal==="settings") overlaySettings();
   if(modal==="fill") overlayFill();
+  if(modal==="textures") overlayTextures();
   if(modal==="fillrot") overlayFillRot();
   if(modal==="world") overlayWorld();
   if(modal==="schemhelp") overlaySchemHelp();
@@ -5043,6 +5611,8 @@ function loop(t){
   if(liftAt>=0&&--liftAt<0&&!tapRelease){ M.x=-9e9; M.y=-9e9; }
   requestAnimationFrame(loop);
 }
+// a pack saved last time comes back before the first frame is drawn
+try{ texRestore(); }catch(e){}
 requestAnimationFrame(loop);
 </script>
 </body>
