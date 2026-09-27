@@ -665,8 +665,18 @@ function importK3(code){
   const f=String(code).trim().split(";");
   if(f.length<5) throw new Error("not a K3 code: needs at least 5 ';' fields");
   const head=f[0].split(":");
-  // the dimensions use the same base74 digits as a V3 code, not decimal
-  const W=b74(f[1]), H=b74(f[2]);
+  /* Base 84, the same as the "(" escape for large cell ids -- not base 74 and
+     not decimal. Every size under 74 is a single digit and reads the same in
+     both bases, so only a two-digit one shows the difference: "1g" is 100 in
+     base 84 and 90 in base 74, and a 100x100 level came in as 90x90. */
+  const b84=t=>{ let n=0;
+    for(const ch of String(t)){
+      const v=B74.indexOf(ch);
+      if(v<0) throw new Error("bad K3 size digit '"+ch+"'");
+      n=n*84+v;
+    }
+    return n; };
+  const W=b84(f[1]), H=b84(f[2]);
   if(!(W>0&&H>0)) throw new Error("bad K3 dimensions");
   if((W+2)*(H+2)>=2**31) throw new Error("K3 level too big to index: "+W+"x"+H);
   let body;
