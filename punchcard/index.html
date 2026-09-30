@@ -1,0 +1,253 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>URL Keypunch</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+Condensed:wght@500;700&family=Pathway+Gothic+One&family=Doto:wght@700;900&display=swap">
+<style>
+/* Layout: a keypunch console — tab strip, input strip, then the work surface (deck or overlay stage) */
+:root{
+  --bg:#e7e9ec; --panel:#f7f8f9; --fg:#1d2430; --muted:#5c6675; --accent:#2f5d8a; --line:#c9ced6; --stage:#2a2f36;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  --sans:"IBM Plex Sans Condensed","Arial Narrow",system-ui,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15191f;--panel:#1e242c;--fg:#e4e8ee;--muted:#9aa4b2;--accent:#7fb0e0;--line:#323a45;--stage:#0d1014;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#15191f;--panel:#1e242c;--fg:#e4e8ee;--muted:#9aa4b2;--accent:#7fb0e0;--line:#323a45;--stage:#0d1014;color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);padding-block:32px;padding-inline:16px}
+.wrap{max-width:1040px;margin:0 auto;display:grid;gap:20px}
+h1{font-size:30px;margin:0;letter-spacing:.02em}
+.sub{color:var(--muted);font-size:15px;margin:6px 0 0;max-width:65ch;line-height:1.5}
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--line)}
+.tab{background:none;border:0;border-bottom:3px solid transparent;color:var(--muted);font:600 14px var(--sans);letter-spacing:.08em;text-transform:uppercase;padding:10px 16px;cursor:pointer}
+.tab[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--accent)}
+.console{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px;display:grid;gap:12px}
+label,.lbl{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+input[type=text]{flex:1 1 280px;min-width:0;font:15px var(--mono);padding:10px 12px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg)}
+input:focus-visible,button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+button.btn{font:600 14px var(--sans);letter-spacing:.06em;text-transform:uppercase;padding:10px 16px;border-radius:4px;border:1px solid var(--accent);background:var(--accent);color:var(--panel);cursor:pointer}
+button.ghost{background:transparent;color:var(--accent)}
+button.ghost[aria-pressed="true"]{background:var(--accent);color:var(--panel)}
+.check{display:flex;gap:6px;align-items:center;font-size:14px;color:var(--fg);text-transform:none;letter-spacing:0}
+select{font:14px var(--mono);padding:8px;border-radius:4px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+input[type=range]{width:160px}
+.meta{font:13px var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.deck img{width:100%;display:block}
+.hint{font-size:13px;color:var(--muted);margin:0}
+.stage{position:relative;background:var(--stage);border-radius:6px;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+.stage > img.photo{display:block;width:100%}
+.stage .placeholder{aspect-ratio:4/3;display:grid;place-items:center;color:#9aa4b2;font:14px var(--mono);text-align:center;padding:16px}
+#warp{position:absolute;left:0;top:0;transform-origin:0 0;pointer-events:none;width:1480px;height:652px;max-width:none}
+#warp.flick{animation:flick var(--rate,.5s) steps(1) infinite}
+@keyframes flick{50%{visibility:hidden}}
+.h{position:absolute;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;border:2px solid #fff;background:rgba(47,93,138,.55);box-shadow:0 0 0 1px #000a;cursor:grab;display:grid;place-items:center;color:#fff;font:600 11px var(--mono)}
+.h:active{cursor:grabbing}
+.hidden-file{position:absolute;width:1px;height:1px;opacity:0}
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>URL Keypunch</h1>
+    <p class="sub">Punch a URL onto 80-column IBM cards in EBCDIC Hollerith code, then lay the card over a photo and pin its corners to line it up.</p>
+  </header>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" id="t-punch" aria-selected="true" aria-controls="p-punch">Punch</button>
+    <button class="tab" role="tab" id="t-over" aria-selected="false" aria-controls="p-over">Overlay</button>
+  </div>
+
+  <section id="p-punch" role="tabpanel" aria-labelledby="t-punch" style="display:grid;gap:20px">
+    <form class="console" id="f">
+      <label for="url">URL to punch</label>
+      <div class="row">
+        <input type="text" id="url" value="https://en.wikipedia.org/wiki/IBM_029_Card_Punch" autocomplete="off" spellcheck="false">
+        <button class="btn" type="submit">Punch</button>
+        <button class="btn ghost" type="button" id="copy">Copy image</button>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="interp"> Print the text along the top edge</label>
+      </div>
+      <div class="meta" id="meta"></div>
+    </form>
+    <div class="deck"><img id="out" alt="Punched card image"></div>
+    <p class="hint">Top-edge printing is off by default, so the only way to read the URL is to decode the holes. To save, right-click the image (long-press on a phone) and choose Save Image.</p>
+  </section>
+
+  <section id="p-over" role="tabpanel" aria-labelledby="t-over" hidden style="display:grid;gap:16px">
+    <div class="console">
+      <div class="row">
+        <button class="btn" type="button" id="pick">Load photo</button>
+        <input type="file" id="file" accept="image/*" class="hidden-file">
+        <label class="lbl" for="which">Card</label>
+        <select id="which"></select>
+        <button class="btn ghost" type="button" id="reset">Reset corners</button>
+      </div>
+      <div class="row">
+        <label class="lbl" for="op">Opacity</label>
+        <input type="range" id="op" min="0" max="100" value="70">
+        <span class="meta" id="opv">70%</span>
+        <button class="btn ghost" type="button" id="flick" aria-pressed="false">Flicker</button>
+        <label class="lbl" for="rate">Rate</label>
+        <input type="range" id="rate" min="80" max="1500" value="500">
+        <span class="meta" id="ratev">500 ms</span>
+      </div>
+    </div>
+    <div class="stage" id="stage">
+      <div class="placeholder" id="ph">Load a photo of a card, then drag the four corner handles onto its corners.</div>
+      <img id="warp" alt="">
+    </div>
+    <p class="hint">Handles go clockwise from the clipped corner: 1 top-left, 2 top-right, 3 bottom-right, 4 bottom-left. Flicker toggles the overlay on and off so you can compare hole positions.</p>
+  </section>
+</div>
+
+<script>
+// ---------- Hollerith / EBCDIC codes. Rows: 12,11,0,1..9 ----------
+const R={12:0,11:1,0:2,1:3,2:4,3:5,4:6,5:7,6:8,7:9,8:10,9:11};
+const C={" ":[]};
+for(let d=0;d<=9;d++)C[d]=[d];
+"ABCDEFGHI".split("").forEach((c,i)=>C[c]=[12,i+1]);
+"JKLMNOPQR".split("").forEach((c,i)=>C[c]=[11,i+1]);
+"STUVWXYZ".split("").forEach((c,i)=>C[c]=[0,i+2]);
+"abcdefghi".split("").forEach((c,i)=>C[c]=[12,0,i+1]);
+"jklmnopqr".split("").forEach((c,i)=>C[c]=[12,11,i+1]);
+"stuvwxyz".split("").forEach((c,i)=>C[c]=[11,0,i+2]);
+Object.assign(C,{"&":[12],"-":[11],"/":[0,1],
+".":[12,8,3],"<":[12,8,4],"(":[12,8,5],"+":[12,8,6],"|":[12,8,7],
+"!":[11,8,2],"$":[11,8,3],"*":[11,8,4],")":[11,8,5],";":[11,8,6],
+",":[0,8,3],"%":[0,8,4],"_":[0,8,5],">":[0,8,6],"?":[0,8,7],
+":":[8,2],"#":[8,3],"@":[8,4],"'":[8,5],"=":[8,6],'"':[8,7],
+"[":[12,8,2],"]":[11,8,7],"\\":[0,8,2],"~":[11,0,1],"{":[12,0],"}":[11,0],"^":[11,8,7],"`":[8,1]});
+
+const W=1480,H=652,PPI=200,LEFT=0.251*PPI,PITCH=0.087*PPI,TOP=0.25*PPI,RP=0.25*PPI,HW=0.055*PPI,HH=0.125*PPI,GAP=40;
+const colX=c=>LEFT+c*PITCH+PITCH/2, rowY=r=>TOP+r*RP;
+let cards=[];
+
+function cardPath(g){
+  const cut=0.25*PPI,r=0.19*PPI;
+  g.beginPath();g.moveTo(cut,0);g.lineTo(W-r,0);g.arcTo(W,0,W,r,r);g.lineTo(W,H-r);g.arcTo(W,H,W-r,H,r);
+  g.lineTo(r,H);g.arcTo(0,H,0,H-r,r);g.lineTo(0,cut*1.732);g.closePath();
+}
+
+// 5x7 dot matrix, as printed by the IBM 029 keypunch
+const DOT={"0": [14, 17, 19, 21, 25, 17, 14], "1": [4, 12, 4, 4, 4, 4, 14], "2": [14, 17, 1, 2, 4, 8, 31], "3": [31, 2, 4, 2, 1, 17, 14], "4": [2, 6, 10, 18, 31, 2, 2], "5": [31, 16, 30, 1, 1, 17, 14], "6": [6, 8, 16, 30, 17, 17, 14], "7": [31, 1, 2, 4, 8, 8, 8], "8": [14, 17, 17, 14, 17, 17, 14], "9": [14, 17, 17, 15, 1, 2, 12], "A": [14, 17, 17, 17, 31, 17, 17], "B": [30, 17, 17, 30, 17, 17, 30], "C": [14, 17, 16, 16, 16, 17, 14], "D": [28, 18, 17, 17, 17, 18, 28], "E": [31, 16, 16, 30, 16, 16, 31], "F": [31, 16, 16, 30, 16, 16, 16], "G": [14, 17, 16, 23, 17, 17, 15], "H": [17, 17, 17, 31, 17, 17, 17], "I": [14, 4, 4, 4, 4, 4, 14], "J": [7, 2, 2, 2, 2, 18, 12], "K": [17, 18, 20, 24, 20, 18, 17], "L": [16, 16, 16, 16, 16, 16, 31], "M": [17, 27, 21, 21, 17, 17, 17], "N": [17, 17, 25, 21, 19, 17, 17], "O": [14, 17, 17, 17, 17, 17, 14], "P": [30, 17, 17, 30, 16, 16, 16], "Q": [14, 17, 17, 17, 21, 18, 13], "R": [30, 17, 17, 30, 20, 18, 17], "S": [15, 16, 16, 14, 1, 1, 30], "T": [31, 4, 4, 4, 4, 4, 4], "U": [17, 17, 17, 17, 17, 17, 14], "V": [17, 17, 17, 17, 17, 10, 4], "W": [17, 17, 17, 21, 21, 21, 10], "X": [17, 17, 10, 4, 10, 17, 17], "Y": [17, 17, 17, 10, 4, 4, 4], "Z": [31, 1, 2, 4, 8, 16, 31], ":": [0, 12, 12, 0, 12, 12, 0], "/": [0, 1, 2, 4, 8, 16, 0], ".": [0, 0, 0, 0, 0, 12, 12], "-": [0, 0, 0, 31, 0, 0, 0], "_": [0, 0, 0, 0, 0, 0, 31], "?": [14, 17, 1, 2, 4, 0, 4], "=": [0, 0, 31, 0, 31, 0, 0], "&": [12, 18, 20, 8, 21, 18, 13], "%": [24, 25, 2, 4, 8, 19, 3], "#": [10, 10, 31, 10, 31, 10, 10], "+": [0, 4, 4, 31, 4, 4, 0], ",": [0, 0, 0, 0, 12, 4, 8], "!": [4, 4, 4, 4, 0, 0, 4], "@": [14, 17, 1, 13, 21, 21, 14], "(": [2, 4, 8, 8, 8, 4, 2], ")": [8, 4, 2, 2, 2, 4, 8], "*": [0, 4, 21, 14, 21, 4, 0], "$": [4, 15, 20, 14, 5, 30, 4], ";": [0, 12, 12, 0, 12, 4, 8], "'": [12, 4, 8, 0, 0, 0, 0], "\"": [10, 10, 10, 0, 0, 0, 0], "<": [2, 4, 8, 16, 8, 4, 2], ">": [8, 4, 2, 1, 2, 4, 8], "~": [0, 0, 8, 21, 2, 0, 0], "[": [14, 8, 8, 8, 8, 8, 14], "]": [14, 2, 2, 2, 2, 2, 14]};
+function dotChar(g,ch,cx,top){const rows=DOT[ch.toUpperCase()];if(!rows)return;const p=2.9;g.fillStyle="#8a877d";
+  rows.forEach((bits,r)=>{for(let b=0;b<5;b++)if(bits&(16>>b)){g.beginPath();g.arc(cx+(b-2)*p,top+r*p,1.35,0,6.3);g.fill()}})}
+// Hand-drawn stroke digits modelled on the IBM 5081 printing: tall, narrow, light gothic
+function digit(g,d,cx,cy,h,lw,wr){
+  const w=h*(wr||.38),X=v=>cx+v*w,Y=v=>cy+v*h;
+  g.save();g.lineWidth=lw||h*.11;g.lineCap="round";g.lineJoin="round";g.beginPath();
+  const el=(x,y,rx,ry,a0=0,a1=Math.PI*2)=>{g.moveTo(X(x)+rx*w*Math.cos(a0),Y(y)+ry*h*Math.sin(a0));g.ellipse(X(x),Y(y),rx*w,ry*h,0,a0,a1)};
+  const L=(...p)=>{g.moveTo(X(p[0]),Y(p[1]));for(let i=2;i<p.length;i+=2)g.lineTo(X(p[i]),Y(p[i+1]))};
+  const P=Math.PI;
+  switch(d){
+    case 0: el(0,0,.5,.5);break;
+    case 1: L(-.3,-.3,.05,-.5,.05,.5);break;
+    case 2: el(0,-.24,.5,.26,P*1.05,P*2.15);L(.46,-.1,-.5,.5,.5,.5);break;
+    case 3: L(-.5,-.5,.45,-.5,-.05,-.06);el(0,.2,.5,.3,P*1.25,P*2.85);break;
+    case 4: L(.2,.5,.2,-.5,-.5,.22,.55,.22);break;
+    case 5: L(.45,-.5,-.4,-.5,-.48,-.04);el(0,.2,.5,.3,P*1.15,P*2.85);break;
+    case 6: el(0,.2,.5,.3);g.moveTo(X(-.5),Y(.2));g.quadraticCurveTo(X(-.5),Y(-.5),X(.4),Y(-.48));break;
+    case 7: L(-.5,-.5,.5,-.5,-.1,.5);break;
+    case 8: el(0,-.27,.42,.23);el(0,.22,.5,.28);break;
+    case 9: el(0,-.2,.5,.3);g.moveTo(X(.5),Y(-.2));g.quadraticCurveTo(X(.5),Y(.5),X(-.4),Y(.48));break;
+  }
+  g.stroke();g.restore();
+}
+function colNum(g,n,cx,cy){const h=8.5,ds=String(n).split(""),adv=5.6;
+  ds.forEach((d,i)=>digit(g,+d,cx+(i-(ds.length-1)/2)*adv,cy,h,1.1,.5));}
+function drawCard(g,text,n,total,interp){
+  cardPath(g);g.fillStyle="#f2ebd3";g.fill();g.save();g.clip();
+  g.fillStyle="#7a6a4c";g.textAlign="center";g.textBaseline="middle";
+  for(let c=0;c<80;c++){
+    g.font="15px 'Pathway Gothic One','Arial Narrow',sans-serif";
+    g.strokeStyle="#3d3a33";for(let d=0;d<=9;d++)digit(g,d,colX(c),rowY(R[d]),14);
+    g.font="8px 'Pathway Gothic One','Arial Narrow',sans-serif";
+    colNum(g,c+1,colX(c),rowY(2)+26);colNum(g,c+1,colX(c),rowY(11)+26);
+  }
+  g.textAlign="left";g.font="600 11px 'IBM Plex Mono',monospace";
+  g.strokeStyle="#7a6a4c";g.lineWidth=1;g.strokeRect(58,H-22,30,13);
+  g.font="700 9px 'IBM Plex Sans Condensed',sans-serif";g.fillText("IBM",62,H-15);
+  g.font="600 11px 'IBM Plex Mono',monospace";g.fillText("5081",94,H-15);
+  if(total>1)g.fillText(`${n}/${total}`,W-70,H-15);
+  if(interp){g.fillStyle="#3a3a3a";g.textAlign="center";g.font="900 17px 'Doto','IBM Plex Mono',monospace";}
+  [...text].forEach((ch,c)=>{
+    const code=C[ch]??[12,11,0,8,7];
+    if(interp)dotChar(g,ch,colX(c),6);
+    code.forEach(row=>{g.fillStyle="#222";g.fillRect(colX(c)-HW/2,rowY(R[row])-HH/2,HW,HH)});
+  });
+  g.restore();cardPath(g);g.strokeStyle="#c2b28a";g.lineWidth=2;g.stroke();
+}
+
+function punch(){
+  const s=document.getElementById("url").value.trim()||" ";
+  const interp=document.getElementById("interp").checked;
+  const chunks=s.match(/[\s\S]{1,80}/g);
+  cards=chunks.map((t,i)=>{const cv=document.createElement("canvas");cv.width=W;cv.height=H;drawCard(cv.getContext("2d"),t,i+1,chunks.length,interp);return cv});
+  const deck=document.createElement("canvas");
+  deck.width=W;deck.height=cards.length*H+(cards.length-1)*GAP;
+  const g=deck.getContext("2d");cards.forEach((cv,i)=>g.drawImage(cv,0,i*(H+GAP)));
+  document.getElementById("out").src=deck.toDataURL("image/png");window._cv=deck;
+  const unk=[...new Set([...s].filter(c=>!(c in C)))];
+  document.getElementById("meta").textContent=`${s.length} characters · ${cards.length} card${cards.length>1?"s":""}`+(unk.length?` · no code for ${unk.join(" ")} (punched as lace)`:"");
+  const sel=document.getElementById("which"),prev=+sel.value||0;
+  sel.innerHTML=cards.map((_,i)=>`<option value="${i}">${i+1} of ${cards.length}</option>`).join("");
+  sel.value=Math.min(prev,cards.length-1);setWarpImg();
+}
+document.getElementById("f").addEventListener("submit",e=>{e.preventDefault();punch()});
+document.getElementById("interp").addEventListener("change",punch);
+document.getElementById("copy").addEventListener("click",e=>{
+  const b=e.currentTarget;
+  window._cv.toBlob(bl=>{
+    navigator.clipboard.write([new ClipboardItem({"image/png":bl})])
+      .then(()=>b.textContent="Copied").catch(()=>b.textContent="Copy blocked, right-click instead")
+      .finally(()=>setTimeout(()=>b.textContent="Copy image",2000));
+  });
+});
+
+// ---------- Tabs ----------
+const tabs=[["t-punch","p-punch"],["t-over","p-over"]];
+function showTab(id){tabs.forEach(([t,p])=>{const on=t===id;document.getElementById(t).setAttribute("aria-selected",on);document.getElementById(p).hidden=!on});if(id==="t-over")layout();}
+tabs.forEach(([t])=>document.getElementById(t).addEventListener("click",()=>showTab(t)));
+
+// ---------- Overlay ----------
+const stage=document.getElementById("stage"),warp=document.getElementById("warp");
+let pts=null,photo=null; // points stored as fractions of stage size
+const handles=[1,2,3,4].map(n=>{const h=document.createElement("div");h.className="h";h.textContent=n;stage.appendChild(h);return h});
+function defaultPts(){const a=W/H;const w=.7,h=w/a*(stage.clientWidth/stage.clientHeight);const x=.15,y=(1-h)/2;return[[x,y],[x+w,y],[x+w,y+h],[x,y+h]]}
+function setWarpImg(){if(cards.length)warp.src=cards[+document.getElementById("which").value||0].toDataURL()}
+document.getElementById("which").addEventListener("change",setWarpImg);
+
+function solve(A,b){const n=b.length;for(let i=0;i<n;i++){let m=i;for(let k=i+1;k<n;k++)if(Math.abs(A[k][i])>Math.abs(A[m][i]))m=k;[A[i],A[m]]=[A[m],A[i]];[b[i],b[m]]=[b[m],b[i]];for(let k=i+1;k<n;k++){const f=A[k][i]/A[i][i];for(let j=i;j<n;j++)A[k][j]-=f*A[i][j];b[k]-=f*b[i]}}const x=Array(n);for(let i=n-1;i>=0;i--){let s=b[i];for(let j=i+1;j<n;j++)s-=A[i][j]*x[j];x[i]=s/A[i][i]}return x}
+function homography(src,dst){const A=[],b=[];for(let i=0;i<4;i++){const[x,y]=src[i],[u,v]=dst[i];A.push([x,y,1,0,0,0,-u*x,-u*y]);b.push(u);A.push([0,0,0,x,y,1,-v*x,-v*y]);b.push(v)}const h=solve(A,b);return[h[0],h[3],0,h[6],h[1],h[4],0,h[7],0,0,1,0,h[2],h[5],0,1]}
+function layout(){
+  const sw=stage.clientWidth,sh=stage.clientHeight;if(!sw)return;
+  if(!pts)pts=defaultPts();
+  const d=pts.map(([x,y])=>[x*sw,y*sh]);
+  handles.forEach((h,i)=>{h.style.left=d[i][0]+"px";h.style.top=d[i][1]+"px"});
+  warp.style.transform=`matrix3d(${homography([[0,0],[W,0],[W,H],[0,H]],d).join(",")})`;
+}
+handles.forEach((h,i)=>{
+  h.addEventListener("pointerdown",e=>{
+    h.setPointerCapture(e.pointerId);
+    const mv=ev=>{const r=stage.getBoundingClientRect();pts[i]=[Math.min(1,Math.max(0,(ev.clientX-r.left)/r.width)),Math.min(1,Math.max(0,(ev.clientY-r.top)/r.height))];layout()};
+    const up=()=>{h.removeEventListener("pointermove",mv);h.removeEventListener("pointerup",up)};
+    h.addEventListener("pointermove",mv);h.addEventListener("pointerup",up);
+  });
+});
+document.getElementById("pick").addEventListener("click",()=>document.getElementById("file").click());
+document.getElementById("file").addEventListener("change",e=>{
+  const f=e.target.files[0];if(!f)return;
+  const url=URL.createObjectURL(f);
+  if(!photo){photo=document.createElement("img");photo.className="photo";photo.alt="Your photo";stage.insertBefore(photo,warp);document.getElementById("ph").hidden=true}
+  photo.onload=()=>{pts=null;layout()};photo.src=url;
+});
+document.getElementById("reset").addEventListener("click",()=>{pts=null;layout()});
+const op=document.getElementById("op");
+op.addEventListener("input",()=>{warp.style.opacity=op.value/100;document.getElementById("opv").textContent=op.value+"%"});
+warp.style.opacity=.7;
+const fl=document.getElementById("flick"),rate=document.getElementById("rate");
+fl.addEventListener("click",()=>{const on=fl.getAttribute("aria-pressed")!=="true";fl.setAttribute("aria-pressed",on);warp.classList.toggle("flick",on)});
+rate.addEventListener("input",()=>{warp.style.setProperty("--rate",rate.value+"ms");document.getElementById("ratev").textContent=rate.value+" ms"});
+window.addEventListener("resize",layout);
+
+Promise.all(["15px 'Pathway Gothic One'","900 17px Doto"].map(f=>document.fonts?.load(f)).filter(Boolean)).catch(()=>{}).then(()=>{punch();layout()});
+</script>
+
+</body></html>

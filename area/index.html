@@ -1,0 +1,3191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Matrix Space</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:crosshair;user-select:none}
+  canvas#gl{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #hotbar{position:fixed;pointer-events:none}      /* placed in whole device pixels by layoutHotbar() */
+  .slot{position:absolute;display:block;image-rendering:pixelated;opacity:.55;transition:opacity .12s}
+  .slot.sel{opacity:1;filter:drop-shadow(0 0 3px rgba(255,255,255,.55))}
+  /* UI is intentionally neutral (no colour theme) */
+  #loader{position:fixed;inset:0;background:#000 center/cover no-repeat;image-rendering:pixelated;
+          transition:opacity .8s;z-index:10;display:flex;align-items:flex-end;justify-content:center}
+  #loader.gone{opacity:0;pointer-events:none}
+  #loader span{font:14px/1 monospace;color:#ddd;letter-spacing:.3em;margin-bottom:90px;
+               background:rgba(0,0,0,.55);padding:8px 14px}
+  #menu{position:fixed;inset:0;z-index:15;display:none;align-items:center;justify-content:center;
+        background:#000 center/cover no-repeat;image-rendering:pixelated;cursor:default;
+        font:13px/1.4 monospace;color:#ddd;letter-spacing:.06em}
+  #menu.on{display:flex}
+  #menu .panel{background:rgba(0,0,0,.82);border:1px solid #555;
+        padding:10px 20px 14px;width:min(420px,92vw);image-rendering:auto}
+  #menu .row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 0;
+        border-bottom:1px solid rgba(255,255,255,.12)}
+  #menu select{font:inherit;color:#eee;background:#111;border:1px solid #666;padding:4px 6px;max-width:60%}
+  #menu input[type=checkbox]{accent-color:#bbb;width:16px;height:16px}
+  #menu input[type=range]{accent-color:#bbb;width:150px}
+  #menu .sl{display:flex;align-items:center;gap:10px}
+  #menu .sl b{font-weight:normal;min-width:44px;text-align:right}
+  #menu .hint{padding-top:12px;text-align:center;opacity:.6}
+  #dbg{position:fixed;left:10px;top:10px;z-index:12;display:none;width:250px;padding:10px 12px;
+       background:rgba(0,0,0,.8);border:1px solid #555;font:12px/1.5 monospace;color:#ddd;cursor:default}
+  #dbg.on{display:block}
+  #dbg b{color:#fff;letter-spacing:.2em}
+  #dbg label{display:flex;align-items:center;gap:8px;margin:6px 0}
+  #dbg input[type=checkbox]{accent-color:#bbb}
+  #dbg input[type=range]{accent-color:#bbb;flex:1}
+  #dbg button{font:inherit;color:#eee;background:#111;border:1px solid #666;padding:2px 8px;cursor:pointer}
+  #dbg button:hover{background:#2a2a2a}
+  #dbg pre{margin:8px 0 0;white-space:pre-wrap;color:#aaa;font-size:11px}
+  #dbg .hint{opacity:.6;font-size:11px;margin-top:6px}
+  #busy{position:fixed;inset:0;z-index:20;display:none;flex-direction:column;align-items:center;justify-content:center;gap:22px;
+        background:#000 center/cover no-repeat;image-rendering:pixelated;cursor:default;
+        font:14px/1 monospace;color:#ddd;letter-spacing:.3em}
+  #busy.on{display:flex}
+  #busy span{background:rgba(0,0,0,.65);padding:8px 14px;text-align:center}
+  #busy button{font:inherit;letter-spacing:.3em;color:#000;background:#ddd;border:0;padding:11px 20px;cursor:pointer}
+  #busy button:hover{background:#fff}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="hotbar"></div>
+<div id="loader"><span id="ltext">LOADING</span></div>
+<div id="dbg">
+  <b>DEBUG</b>
+  <label><input type="checkbox" id="dfly"> Fly (no clip) — Space up, C down, Shift fast</label>
+  <label><input type="checkbox" id="dstam"> Infinite stamina</label>
+  <div>Teleport: <button data-area="matrix">Matrix</button> <button data-area="mausoleum">Mausoleum</button></div>
+  <label>Time <input type="range" id="dtime" min="-1" max="1" step="0.01" value="0"><span id="dtimev">1.00×</span></label>
+  <button id="dtime1">reset time</button>
+  <pre id="dinfo"></pre>
+  <div class="hint">type 1337dbg again to close · Esc frees the mouse</div>
+</div>
+<div id="menu"><div class="panel">
+  <label class="row"><span>3D</span>
+    <select id="m3d">
+      <option value="off">Disabled</option>
+      <option value="anaglyph">3D Anaglyph</option>
+      <option value="sbs">SideBySide 3D</option>
+      <option value="sbsFlat">SideBySide NoWarp</option>
+      <option value="sbsStereo">SideBySide Stereo</option>
+    </select></label>
+  <label class="row"><span>Invert 3D</span><input type="checkbox" id="minv"></label>
+  <div class="row"><span id="mdata">Data storage: OK</span></div>
+  <label class="row"><span>Mouse sensitivity</span>
+    <span class="sl"><input type="range" id="msens" min="10" max="300" step="5"><b id="msensv">100%</b></span></label>
+  <div class="hint">Press tab to close this menu</div>
+</div></div>
+<div id="busy"><span id="btext">ALREADY RUNNING IN ANOTHER TAB</span><button id="bgo">PLAY HERE</button></div>
+
+<script>
+(() => {
+"use strict";
+
+/* ================= single instance: only one tab at a time =================
+   Uses the Web Locks API (the browser frees the lock by itself if a tab
+   closes or crashes). A second tab shows "ALREADY RUNNING IN ANOTHER TAB"
+   and does nothing — no render, no audio, no saving. "PLAY HERE" moves the
+   game to that tab: the old tab saves, stops, hands its exact state over
+   (BroadcastChannel keeps float64 exact) and releases the lock. If the old
+   tab doesn't answer within 1.5 s, the lock is taken by force and the old
+   tab stops WITHOUT saving, so it can't overwrite the newer position.
+   Fallback without Web Locks: a BroadcastChannel ping/pong check. */
+const LOCK = "mx3d_instance", CLAIM_FLAG = "mx3d_claim";
+const bc = ("BroadcastChannel" in window) ? new BroadcastChannel(LOCK) : null;
+const hasLocks = !!(navigator.locks && navigator.locks.request);
+const busy = document.getElementById("busy"), busyText = document.getElementById("btext");
+let app = null, booted = false, releaseLock = null;
+let handoff = null, waitingHandoff = false, pinging = false, pongSeen = false;
+
+function showBusy(msg) {
+  document.getElementById("loader").classList.add("gone");
+  try { const th = localStorage.getItem("mx3d_thumb"); if (th) busy.style.backgroundImage = "url(" + th + ")"; } catch (e) {}
+  busyText.textContent = msg; busy.classList.add("on");
+}
+function run(extraState) {
+  busy.classList.remove("on");
+  booted = true;
+  app = boot(extraState) || null;
+}
+function stopHere(save, msg) {
+  let st = null;
+  if (app) { st = app.stop(save); app = null; }
+  if (releaseLock) { releaseLock(); releaseLock = null; }
+  showBusy(msg);
+  return st;
+}
+function holdLock(extraGetter) {
+  return new Promise(r => {
+    releaseLock = r;
+    run(extraGetter ? extraGetter() : null);
+  });
+}
+function lostLock() {            // our lock was taken by force
+  if (app) stopHere(false, "RUNNING IN ANOTHER TAB");
+}
+if (bc) bc.onmessage = e => {
+  const m = e.data || {};
+  if (m.t === "handoff" && app) {
+    const st = stopHere(true, "RUNNING IN ANOTHER TAB");
+    bc.postMessage({ t: "released", state: st });
+  } else if (m.t === "released" && waitingHandoff) {
+    handoff = m.state || null;
+  } else if (m.t === "ping" && app) {
+    bc.postMessage({ t: "pong" });
+  } else if (m.t === "pong" && pinging) {
+    pongSeen = true;
+  }
+};
+
+// take over from whichever tab is running now
+function claim() {
+  busyText.textContent = "SWITCHING...";
+  waitingHandoff = true; handoff = null;
+  if (bc) bc.postMessage({ t: "handoff" });
+  // give the old tab's state message a moment to arrive, then boot with it
+  const withHandoff = () => new Promise(r => {
+    const t0 = performance.now();
+    (function wait() {
+      if (handoff || performance.now() - t0 > 600) { waitingHandoff = false; r(handoff); }
+      else setTimeout(wait, 20);
+    })();
+  });
+  if (hasLocks) {
+    let got = false;
+    const take = lock => {
+      if (got) return;           // already got it another way; let go at once
+      got = true;
+      return withHandoff().then(st => holdLock(() => st));
+    };
+    navigator.locks.request(LOCK, take).catch(lostLock);
+    setTimeout(() => {
+      if (!got) navigator.locks.request(LOCK, { steal: true }, take).catch(lostLock);
+    }, 1500);
+  } else {
+    setTimeout(() => withHandoff().then(st => run(st)), 200);
+  }
+}
+document.getElementById("bgo").addEventListener("click", () => {
+  if (booted) {                  // this tab ran before: reload clean, then claim
+    try { sessionStorage.setItem(CLAIM_FLAG, "1"); } catch (e) {}
+    location.reload();
+  } else claim();
+});
+
+let claimOnLoad = false;
+try { claimOnLoad = sessionStorage.getItem(CLAIM_FLAG) === "1"; sessionStorage.removeItem(CLAIM_FLAG); } catch (e) {}
+if (claimOnLoad) {
+  showBusy("SWITCHING..."); claim();
+} else if (hasLocks) {
+  navigator.locks.request(LOCK, { ifAvailable: true }, lock => {
+    if (!lock) { showBusy("ALREADY RUNNING IN ANOTHER TAB"); return; }
+    return holdLock(null);
+  }).catch(lostLock);
+} else if (bc) {
+  pinging = true; bc.postMessage({ t: "ping" });
+  setTimeout(() => {
+    pinging = false;
+    if (pongSeen) showBusy("ALREADY RUNNING IN ANOTHER TAB"); else run(null);
+  }, 300);
+} else run(null);
+
+/* ================= the app (runs only in the tab that holds the lock) ================= */
+function boot(handoffState) {
+let dead = false;              // set by stop(): no more frames, audio or saves
+
+/* =====================================================================
+   NOTE — PRECISION RULE (read before adding anything 3D):
+   ALWAYS store 3D / world data as 64-bit floats (plain JS numbers or
+   Float64Array). Players may end up trillions of metres from spawn
+   (far teleporters, distance-based mechanics), and 32-bit floats only
+   keep ~7 digits — at 1e12 m they can't even tell metres apart.
+     - Positions, velocities, teleporter targets, distances, saved data:
+       JS number / Float64Array only. Never Float32Array, never
+       Math.fround, never rounding before saving.
+     - The GPU only has 32-bit floats, so never upload absolute world
+       positions. Subtract the camera position on the CPU first (in
+       64-bit), then send the small camera-relative result
+       ("camera-relative rendering" — see uCamFrac / uOff below).
+     - Integer cell indices are exact in a JS number up to 2^53
+       (~9e15); Math.floor(x / SP) is safe well past trillions of metres.
+     - Keep angles wrapped (yaw to -PI..PI) so they stay precise.
+     - JSON.stringify writes numbers with full 64-bit round-trip
+       precision, so save the raw values.
+   Rough float64 resolution: 1e9 m -> ~0.1 µm, 1e12 m -> ~0.1 mm,
+   1e15 m -> ~0.1 m (movement starts to get steppy past ~1e15).
+   ===================================================================== */
+
+/* ================= persistence ================= */
+const KEY = "mx3d";
+const LS_STATE = "mx3d_state", LS_THUMB = "mx3d_thumb", LS_SHOT = "mx3d_shot";   // shot: sharp last frame for a reload
+
+function readCookie() {
+  try {
+    const m = document.cookie.match(/(?:^|;\s*)mx3d=([^;]*)/);
+    return m ? JSON.parse(decodeURIComponent(m[1])) : null;
+  } catch (e) { return null; }
+}
+function writeCookie(obj) {
+  try {
+    document.cookie = KEY + "=" + encodeURIComponent(JSON.stringify(obj)) +
+      ";max-age=31536000;path=/;SameSite=Lax";
+  } catch (e) {}
+}
+function readLS(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function writeLS(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } }
+
+// show the low-res snapshot while loading
+const loader = document.getElementById("loader");
+// a reload (F5) shows the sharp last frame (saved on pagehide) so it looks like nothing changed
+const shot = readLS(LS_SHOT), thumb = shot || readLS(LS_THUMB);
+if (shot) { loader.style.imageRendering = "auto"; loader.style.transition = "opacity .2s"; }
+if (thumb) {
+  loader.style.backgroundImage = "url(" + thumb + ")";
+  document.getElementById("ltext").style.display = "none";   // just the snapshot, no text
+}
+
+// menu settings (per browser, localStorage)
+const LS_SET = "mx3d_settings";
+const settings = { stereo: "off", invert: false, sens: 1 };
+try { Object.assign(settings, JSON.parse(readLS(LS_SET) || "{}")); } catch (e) {}
+if (settings.stereo === "xr") settings.stereo = "off";   // a 3D-screen session needs a click to start
+function saveSettings() { writeLS(LS_SET, JSON.stringify(settings)); }
+
+// pick the freshest saved state (cookie vs localStorage backup)
+const AREAS = ["matrix", "mausoleum"];   // "mausoleum" = the world under the matrix floor
+const defaults = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, slot: 0, area: "matrix", ts: 0 };
+let saved = null;
+const fromCookie = readCookie();
+let fromLS = null; try { fromLS = JSON.parse(readLS(LS_STATE) || "null"); } catch (e) {}
+saved = [fromLS, fromCookie, handoffState].filter(Boolean).sort((a, b) => (b.ts || 0) - (a.ts || 0))[0] || null;   // ties: the full localStorage copy wins
+const S0 = Object.assign({}, defaults, saved || {});
+
+// world state — 64-bit floats only (see PRECISION RULE at the top)
+const player = {
+  x: +S0.x || 0, y: +S0.y || 0, z: +S0.z || 0,
+  yaw: +S0.yaw || 0, pitch: +S0.pitch || 0, vy: +S0.vy || 0, slot: S0.slot | 0,   // slot 0 = very left
+  // items: 9 hotbar slots (null = empty) + active item effects [{ id, t, ... }]; saved as-is
+  hotbar: Array.isArray(S0.hotbar) && S0.hotbar.length === 9 ? S0.hotbar : Array(9).fill(null),
+  effects: Array.isArray(S0.effects) ? S0.effects : [],
+  area: S0.area === "plane" ? "mausoleum" : AREAS.includes(S0.area) ? S0.area : "matrix"   // "plane" = old name
+};
+
+function snapshotState() {
+  // raw 64-bit values — no rounding, so far-away positions survive a save exactly
+  // everything needed so a reload (F5) continues exactly: position, look, velocity, the
+  // body's state (in the air / climbing / falling through / stamina), hotbar + item effects
+  const s = { x: player.x, y: player.y, z: player.z, yaw: player.yaw,
+           pitch: player.pitch, slot: player.slot, area: player.area, ts: Date.now(),
+           vy: player.vy, hotbar: player.hotbar, effects: player.effects };
+  if (typeof body !== "undefined") {
+    Object.assign(s, { vx: body.vx, vz: body.vz, air: body.air, baseY: body.baseY, climb: body.climb,
+      falling: body.falling, fallT: body.fallT, slowFall: body.slowFall, fov: body.fov, fly: body.fly,
+      coyote: body.coyote, stam: { v: stam.v, out: stam.out, rest: stam.rest, fx: stam.fx }, fade: fadeAmt });
+  }
+  return s;
+}
+
+/* ================= ambience: "Seashore" at A3 =================
+   Imitates the General MIDI "Seashore" patch (program 123) played on A3,
+   as it sounds on classic lo-fi GM synths: a noise wash that swells in like
+   a wave and slowly recedes, played 3 semitones under middle C, so it's a
+   bit darker and slower, with a grainy low-sample-rate edge.
+   Generated in code as a ~31 s stereo loop of 5 waves with different lengths
+   and strengths, so the pattern doesn't feel repetitive. The wave envelope
+   repeats exactly every loop and the ends are crossfaded, so it's seamless.
+   Stereo: each ear gets its own noise, the waves reach one ear ~0.7 s
+   before the other, and the whole wash drifts slowly left <-> right
+   (equal-power pan, at most ~60% to one side, periodic with the loop).
+   It only plays in the matrix area (it fades out in other areas).
+   Browsers only allow audio after a click/key, so it starts on the first
+   input and fades in.
+   (Audio samples are Float32 — fine; the 64-bit rule is for world data.) */
+const AMB_VOL = 0.10;        // overall ambience loudness (keep it quiet)
+let actx = null, ambGain = null, ambOn = false;
+function makeWindBuffer(ctx) {
+  const sr = 22050;          // generated at a lo-fi rate (also 2x faster to build); the browser resamples it
+  const waves = [5.6, 6.8, 5.1, 7.3, 6.2];      // seconds per wave
+  const peaks = [1.0, 0.78, 0.93, 0.72, 0.88];  // how big each wave is
+  const secs = waves.reduce((a, b) => a + b, 0);
+  const starts = []; { let acc = 0; for (const w of waves) { starts.push(acc); acc += w; } }
+  const FLOOR = 0.13, E3 = Math.exp(-3);
+  function env(t) {                              // 0..1, periodic in secs
+    t %= secs;
+    let k = waves.length - 1; while (k > 0 && t < starts[k]) k--;
+    const p = (t - starts[k]) / waves[k], rise = 0.36;
+    let sh;
+    if (p < rise) { const u = p / rise; sh = u * u * (3 - 2 * u); }        // wave rolls in
+    else { const u = (p - rise) / (1 - rise); sh = (Math.exp(-3 * u) - E3) / (1 - E3); } // wash recedes
+    return FLOOR + (peaks[k] - FLOOR) * sh;
+  }
+  const L = Math.floor(sr * secs), X = Math.floor(sr * 2), N = L + X;
+  const buf = ctx.createBuffer(2, L, sr);
+  // A3 = 3 semitones below the sample's root: ~22 kHz sample played slower,
+  // plus the grainy sample-and-hold / quantize of an old wavetable synth
+  const effRate = 11025 * Math.pow(2, -3 / 12);
+  const hold = Math.max(1, Math.round(sr / effRate)), levels = 64;
+  const k1 = f => 1 - Math.exp(-2 * Math.PI * f / sr);   // one-pole coefficient
+  const hpA = k1(110);
+  for (let ch = 0; ch < 2; ch++) {
+    const raw = new Float32Array(N);
+    let l1 = 0, l2 = 0, hp = 0, peak = 1e-9;
+    for (let i = 0; i < N; i++) {
+      const e = env(i / sr + secs - ch * 0.7);   // waves reach the left ear a moment earlier
+      const n = Math.random() * 2 - 1;
+      // darker in the troughs, bright hiss at the crest
+      const a = k1(450 + 2900 * Math.pow(e, 1.4));
+      l1 += a * (n - l1); l2 += a * (l1 - l2);
+      hp += hpA * (l2 - hp);                     // remove rumble below ~110 Hz
+      const body = (l2 - hp) * 2.4;
+      const foam = n * 0.05 * e * e * e;         // fizz of foam near the peak
+      // constant wind bed + waves on top: never drops out between waves
+      const v = (body + foam) * (0.62 + 0.38 * Math.pow(e, 1.25));
+      raw[i] = v; if (Math.abs(v) > peak) peak = Math.abs(v);
+    }
+    const out = buf.getChannelData(ch);
+    let held = 0;
+    for (let i = 0; i < L; i++) {
+      let v = raw[i];
+      if (i < X) { const t = i / X; v = raw[i] * t + raw[L + i] * (1 - t); } // seamless loop
+      // lo-fi; a little dither so quiet parts stay grainy instead of rounding to silence
+      if (i % hold === 0) held = Math.round((v / peak) * 0.9 * levels + (Math.random() - Math.random()) * 0.5) / levels;
+      // slow left/right drift (periodic in the loop so it stays seamless)
+      const w = 2 * Math.PI * (i / sr) / secs;
+      const pan = 0.45 * Math.sin(3 * w + 0.8) + 0.15 * Math.sin(7 * w + 2.1);   // -0.6..0.6
+      const ang = (pan + 1) * Math.PI / 4;
+      out[i] = held * Math.SQRT2 * (ch === 0 ? Math.cos(ang) : Math.sin(ang));
+    }
+  }
+  return buf;
+}
+function ambTarget() { return player.area === "matrix" ? AMB_VOL : 0; }
+// called when the area changes: fade the matrix wind in/out
+function updateAmbienceArea(sec) {
+  if (!ambOn || !actx) return;
+  const t = actx.currentTime;
+  ambGain.gain.cancelScheduledValues(t);
+  ambGain.gain.setValueAtTime(ambGain.gain.value, t);
+  ambGain.gain.linearRampToValueAtTime(ambTarget(), t + (sec || 1.5));
+}
+function fadeInAmbience() {
+  if (ambOn || !actx || actx.state !== "running") return;
+  ambOn = true;
+  const t = actx.currentTime;
+  ambGain.gain.setValueAtTime(0, t);
+  ambGain.gain.linearRampToValueAtTime(ambTarget(), t + 3);   // gentle 3 s fade-in
+  removeEventListener("pointerdown", startAmbience, true);
+  removeEventListener("keydown", startAmbience, true);
+}
+function startAmbience() {
+  if (dead) return;
+  if (!actx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try {
+      actx = new AC();
+      const src = actx.createBufferSource();
+      src.buffer = makeWindBuffer(actx); src.loop = true;
+      const filt = actx.createBiquadFilter();       // soften the aliasing a little
+      filt.type = "lowpass"; filt.frequency.value = 4200; filt.Q.value = 0.5;
+      ambGain = actx.createGain(); ambGain.gain.value = 0;
+      src.connect(filt); filt.connect(ambGain); ambGain.connect(actx.destination);
+      src.start();
+    } catch (e) { actx = null; return; }
+  }
+  if (actx.state === "running") fadeInAmbience();
+  else actx.resume().then(fadeInAmbience).catch(() => {});
+}
+addEventListener("pointerdown", startAmbience, true);
+addEventListener("keydown", startAmbience, true);
+startAmbience();   // starts right away if the browser already allows audio
+document.addEventListener("visibilitychange", () => {
+  if (!actx || !ambOn || dead) return;
+  if (document.hidden) actx.suspend().catch(() => {}); else actx.resume().catch(() => {});
+});
+
+/* ================= body sounds: footsteps, jump, landing =================
+   Tiny lo-fi samples made in code on first use (11025 Hz, ~5-bit), in the
+   same grainy style as the ambience: a soft low thump, a crunchy tick and a
+   short square "zap" from stepping on the glowing grid. 4 variations per
+   step, random pitch, alternating left/right. Played through the same
+   AudioContext as the ambience, so they only sound once audio is allowed. */
+const STEP_VOL = 0.26;       // footstep loudness
+let sfxBufs = null, sfxBus = null;
+function synthSfx(dur, fn) {
+  const sr = 11025, n = Math.floor(sr * dur), tmp = new Float32Array(n), st = { ph: 0, zp: 0, lp: 0, lp2: 0 };
+  let peak = 1e-9;
+  for (let i = 0; i < n; i++) { const v = fn(i / sr, st); tmp[i] = v; if (Math.abs(v) > peak) peak = Math.abs(v); }
+  const b = actx.createBuffer(1, n, sr), d = b.getChannelData(0), lv = 22, fade = Math.floor(sr * 0.006);
+  for (let i = 0; i < n; i++) {
+    const f = i > n - fade ? (n - i) / fade : 1;
+    d[i] = Math.round(tmp[i] / peak * 0.9 * f * lv) / lv;
+  }
+  return b;
+}
+function buildSfx() {
+  const TAU = 2 * Math.PI, sr = 11025, R = (a, b) => a + Math.random() * (b - a);
+  // A footfall = heel strike + toe contact ~55 ms later. The weight sits at
+  // 90-400 Hz (a low "knock") so it's heard even on laptop speakers, with a
+  // crunchy tick and a short square "zap" from the glowing grid on top.
+  const svf = (st, key, x, fc, q) => {            // resonant band-pass (state-variable)
+    const f = 2 * Math.sin(Math.PI * fc / sr), L = key + "L", B = key + "B";
+    st[L] = st[L] || 0; st[B] = st[B] || 0;
+    const hp = x - st[L] - q * st[B]; st[B] += f * hp; st[L] += f * st[B];
+    return st[B];
+  };
+  const foot = o => (t, st) => {
+    const n = Math.random() * 2 - 1;
+    // heel: pitched body thump + wooden knock + tick
+    st.ph += TAU * (o.body + o.body * 1.1 * Math.exp(-t / 0.018)) / sr;
+    let v = Math.sin(st.ph) * Math.exp(-t / o.bodyT) * o.bodyA;
+    v += svf(st, "k", n, o.knock, 0.35) * Math.exp(-t / o.knockT) * o.knockA;
+    st.lp += 0.35 * (n - st.lp);
+    v += (n - st.lp) * Math.exp(-t / 0.011) * o.tickA;
+    st.zp += TAU * (o.zap + o.zap * 0.6 * Math.exp(-t / 0.02)) / sr;
+    v += (Math.sin(st.zp) > 0 ? 1 : -1) * Math.exp(-t / 0.02) * o.zapA;
+    // toe: a softer, higher knock a moment later
+    const tt = t - o.toe;
+    if (tt > 0) {
+      v += svf(st, "t", n, o.knock * 1.4, 0.4) * Math.exp(-tt / 0.02) * o.knockA * 0.55;
+      v += (n - st.lp) * Math.exp(-tt / 0.008) * o.tickA * 0.5;
+    }
+    return v;
+  };
+  sfxBufs = { step: [], land: [], jump: [] };
+  for (let k = 0; k < 6; k++)
+    sfxBufs.step.push(synthSfx(0.24, foot({
+      body: R(85, 105), bodyT: R(0.045, 0.06), bodyA: 0.9,
+      knock: R(300, 420), knockT: R(0.025, 0.035), knockA: R(5, 6.5),
+      tickA: R(0.4, 0.55), zap: R(820, 1050), zapA: R(0.07, 0.11), toe: R(0.045, 0.065)
+    })));
+  for (let k = 0; k < 2; k++)
+    sfxBufs.land.push(synthSfx(0.36, foot({
+      body: R(62, 72), bodyT: 0.1, bodyA: 1.1,
+      knock: R(220, 260), knockT: 0.05, knockA: 7,
+      tickA: 0.7, zap: R(480, 560), zapA: 0.14, toe: R(0.03, 0.04)
+    })));
+  // mausoleum surfaces (shiny plastic, no grid "zap"): per material family a step, a
+  // landing and a hand "grab" (climbing) — see playSurf()
+  const SURF = {
+    floor: { body: [105, 120], bodyT: 0.035, bodyA: 0.7, knock: [520, 650], knockT: 0.02, knockA: 6, tickA: 0.6 },    // hard glossy tiles
+    hollow: { body: [165, 210], bodyT: 0.09, bodyA: 1.1, knock: [380, 450], knockT: 0.05, knockA: 5, tickA: 0.35 },   // hollow plastic blocks
+    cap: { body: [235, 280], bodyT: 0.05, bodyA: 0.8, knock: [760, 900], knockT: 0.03, knockA: 5.5, tickA: 0.5 },     // thick yellow caps / trims
+    slab: { body: [70, 85], bodyT: 0.07, bodyA: 1.2, knock: [260, 320], knockT: 0.03, knockA: 6, tickA: 0.3 },        // dense olive / red slabs
+    pit: { body: [85, 95], bodyT: 0.08, bodyA: 1.0, knock: [280, 320], knockT: 0.04, knockA: 4, tickA: 0.15 }         // down in a pit: dull
+  };
+  for (const s in SURF) {
+    const o = SURF[s], P = (m = 1) => ({ body: R(o.body[0], o.body[1]) * m, bodyT: o.bodyT, bodyA: o.bodyA,
+      knock: R(o.knock[0], o.knock[1]) * m, knockT: o.knockT, knockA: o.knockA, tickA: o.tickA, zap: 500, zapA: 0, toe: R(0.045, 0.065) });
+    sfxBufs["step_" + s] = []; sfxBufs["land_" + s] = []; sfxBufs["grab_" + s] = [];
+    for (let k = 0; k < 5; k++) sfxBufs["step_" + s].push(synthSfx(0.26, foot(P())));
+    for (let k = 0; k < 2; k++) sfxBufs["land_" + s].push(synthSfx(0.4, foot(Object.assign(P(0.8), { bodyT: o.bodyT * 1.6, bodyA: o.bodyA * 1.3, toe: R(0.03, 0.04) }))));
+    for (let k = 0; k < 3; k++) sfxBufs["grab_" + s].push(synthSfx(0.14, foot(Object.assign(P(1.3), { bodyA: o.bodyA * 0.4, tickA: o.tickA * 1.4, toe: 1 }))));
+  }
+  sfxBufs.jump.push(synthSfx(0.2, (t, st) => {     // soft push-off + rising blip
+    const n = Math.random() * 2 - 1; st.lp += 0.2 * (n - st.lp);
+    st.zp += TAU * (650 + 700 * (t / 0.2)) / sr;
+    return st.lp * 1.6 * (t / 0.02 < 1 ? t / 0.02 : Math.exp(-(t - 0.02) / 0.05)) +
+           (Math.sin(st.zp) > 0 ? 1 : -1) * 0.07 * Math.exp(-t / 0.05);
+  }));
+  sfxBus = actx.createGain(); sfxBus.gain.value = STEP_VOL;
+  const lp = actx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 6000;
+  sfxBus.connect(lp); lp.connect(actx.destination);
+}
+// surface-aware footsteps: in the mausoleum the material under the feet picks the sound
+// (0 floor, -1 pit, 1/5/6/15 hollow blocks & tower, 2/10 caps & trims, 3/4/8/9/13 slabs)
+function playSurf(kind, mat, vol, pan) {
+  if (player.area !== "mausoleum") { playSfx(kind === "grab" ? "step" : kind, kind === "grab" ? vol * 0.5 : vol, pan); return; }
+  const s = mat === -1 ? "pit" : mat === 0 ? "floor" : (mat === 2 || mat === 10) ? "cap"
+          : (mat === 1 || mat === 5 || mat === 6 || mat === 15 || mat === 16) ? "hollow" : "slab";
+  playSfx(kind + "_" + s, vol, pan);
+}
+function playSfx(kind, vol, pan) {
+  if (dead || !actx || actx.state !== "running") return;
+  try {
+    if (!sfxBufs) buildSfx();
+    const list = sfxBufs[kind], src = actx.createBufferSource();
+    src.buffer = list[(Math.random() * list.length) | 0];
+    src.playbackRate.value = 0.92 + Math.random() * 0.16;
+    const g = actx.createGain(); g.gain.value = vol;
+    src.connect(g);
+    if (actx.createStereoPanner) { const pn = actx.createStereoPanner(); pn.pan.value = pan; g.connect(pn); pn.connect(sfxBus); }
+    else g.connect(sfxBus);
+    src.start();
+  } catch (e) {}
+}
+
+/* ================= hotbar ================= */
+/* Each slot is a <canvas> drawn 1:1 in DEVICE pixels, so the browser never
+   rescales it. The 64x64 slot image is resampled to the exact pixel size in
+   JS with a bicubic filter (Mitchell-Netravali, B = C = 1/3 — sharp without
+   ringing), in linear light with premultiplied alpha. When shrinking, the
+   filter is widened by the shrink factor so every source pixel counts
+   (no shimmer / moire from the fine dot pattern). The hotbar and each slot
+   are positioned on whole device pixels; the selected slot gets its own
+   render at 108% instead of a CSS scale. Sizes: 52 CSS px (34 on narrow
+   screens), 4 px gaps (2), 14 px from the bottom, selected lifted 4 px. */
+const SLOT_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAABmZVhJZklJKgAIAAAAAQBphwQAAQAAABoAAAAAAAAAAwAAkAcABAAAADAyMzABoAMAAQAAAAEAAAAFoAQAAQAAAEQAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAAIvvHMbnUA7gAAAFBSURBVHhe7dFBjsMwDATBPH1/rr03YIimRjKHUN06dhJg+Ptd13Vd68YYf/yspTHGeNO7Hfs/XnjWbXDht72Kv8fehhd92zN8f7VluHD1luGi1XsbLly9t+Hi1XobLlytj+HiXzfxOVuGF3DvNC7s3mFc0L3TuKBby3DR6i3DRd1ahgtXbxkuWr1luGj1luGibi3Dhd06jYu6dRoXdO80LureYVywW4dxwW79iIt16zAu1q0fcbHu/YiLdeswLtatH3Gxbh3Gxdw7jQu6dRoXdGsZLurWMly4estwUbeW4cJuncZF3TuNi7p3GBd07zQu6N5hXLBbP+Ji3TqMi7l3GBdz7zAu5tZpXMy9Zbgwm/j86z6GF/i6j+His57h+6t9zOoF+H11l8WLzZr4fNZl8EKzfmv1+8fwQuxV6t+7uvgHfNQ6Y7cmjz8AAAAASUVORK5CYII=";
+const hotbar = document.getElementById("hotbar");
+const slots = [];
+for (let i = 0; i < 9; i++) { const c = document.createElement("canvas"); c.className = "slot"; hotbar.appendChild(c); slots.push(c); }
+let slotSrc = null;                       // { w, h, px: Float32Array linear premultiplied RGBA }
+const slotCache = new Map();              // device size -> ImageData
+const toLin = v => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+const toSrgb = v => { v = Math.max(0, Math.min(1, v)); return 255 * (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055); };
+function mitchell(x) {
+  const B = 1 / 3, C = 1 / 3; x = Math.abs(x);
+  if (x < 1) return ((12 - 9 * B - 6 * C) * x * x * x + (-18 + 12 * B + 6 * C) * x * x + (6 - 2 * B)) / 6;
+  if (x < 2) return ((-B - 6 * C) * x * x * x + (6 * B + 30 * C) * x * x + (-12 * B - 48 * C) * x + (8 * B + 24 * C)) / 6;
+  return 0;
+}
+// 1-D weights for resampling n source samples to m output samples
+function weights(n, m) {
+  const scale = n / m, sup = Math.max(1, scale), out = [];
+  for (let j = 0; j < m; j++) {
+    const c = (j + 0.5) * scale - 0.5;           // centre in source pixels
+    const lo = Math.floor(c - 2 * sup), hi = Math.ceil(c + 2 * sup);
+    const taps = []; let sum = 0;
+    for (let i = lo; i <= hi; i++) {
+      const w = mitchell((i - c) / sup);
+      if (w === 0) continue;
+      taps.push([Math.min(n - 1, Math.max(0, i)), w]); sum += w;
+    }
+    for (const t of taps) t[1] /= sum;
+    out.push(taps);
+  }
+  return out;
+}
+function renderSlot(size) {
+  if (slotCache.has(size)) return slotCache.get(size);
+  const { w, h, px } = slotSrc, wx = weights(w, size), wy = weights(h, size);
+  const tmp = new Float32Array(size * h * 4);      // horizontal pass
+  for (let y = 0; y < h; y++) for (let x = 0; x < size; x++) {
+    let r = 0, g = 0, b = 0, a = 0;
+    for (const [i, wt] of wx[x]) { const o = (y * w + i) * 4; r += px[o] * wt; g += px[o + 1] * wt; b += px[o + 2] * wt; a += px[o + 3] * wt; }
+    const o = (y * size + x) * 4; tmp[o] = r; tmp[o + 1] = g; tmp[o + 2] = b; tmp[o + 3] = a;
+  }
+  const img = new ImageData(size, size), d = img.data;   // vertical pass
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    let r = 0, g = 0, b = 0, a = 0;
+    for (const [i, wt] of wy[y]) { const o = (i * size + x) * 4; r += tmp[o] * wt; g += tmp[o + 1] * wt; b += tmp[o + 2] * wt; a += tmp[o + 3] * wt; }
+    a = Math.max(0, Math.min(1, a));
+    const o = (y * size + x) * 4;
+    if (a > 1e-5) { d[o] = toSrgb(r / a); d[o + 1] = toSrgb(g / a); d[o + 2] = toSrgb(b / a); }
+    d[o + 3] = Math.round(a * 255);
+  }
+  slotCache.set(size, img);
+  return img;
+}
+function layoutHotbar() {
+  if (!slotSrc) return;
+  const dpr = window.devicePixelRatio || 1, narrow = innerWidth <= 560;
+  const cell = Math.round((narrow ? 34 : 52) * dpr), gap = Math.round((narrow ? 2 : 4) * dpr);
+  const selSz = Math.round(cell * 1.08), lift = Math.round(4 * dpr), bottom = Math.round(14 * dpr);
+  const total = 9 * cell + 8 * gap;
+  const left = Math.round((Math.round(innerWidth * dpr) - total) / 2);
+  const top = Math.round(innerHeight * dpr) - bottom - cell;
+  hotbar.style.left = left / dpr + "px"; hotbar.style.top = top / dpr + "px";
+  slots.forEach((c, i) => {
+    const sel = i === player.slot, sz = sel ? selSz : cell;
+    const x = i * (cell + gap) - (sel ? Math.round((selSz - cell) / 2) : 0);
+    const y = sel ? -Math.round((selSz - cell) / 2) - lift : 0;
+    if (c.width !== sz) { c.width = sz; c.height = sz; }
+    c.getContext("2d").putImageData(renderSlot(sz), 0, 0);
+    c.style.width = sz / dpr + "px"; c.style.height = sz / dpr + "px";
+    c.style.left = x / dpr + "px"; c.style.top = y / dpr + "px";
+  });
+}
+(function loadSlotImage() {
+  const im = new Image();
+  im.onload = () => {
+    const c = document.createElement("canvas"); c.width = im.width; c.height = im.height;
+    const x = c.getContext("2d"); x.drawImage(im, 0, 0);
+    const d = x.getImageData(0, 0, im.width, im.height).data, px = new Float32Array(d.length);
+    for (let i = 0; i < d.length; i += 4) {               // linear light, premultiplied alpha
+      const a = d[i + 3] / 255;
+      px[i] = toLin(d[i]) * a; px[i + 1] = toLin(d[i + 1]) * a; px[i + 2] = toLin(d[i + 2]) * a; px[i + 3] = a;
+    }
+    slotSrc = { w: im.width, h: im.height, px };
+    layoutHotbar();
+  };
+  im.src = SLOT_PNG;
+})();
+addEventListener("resize", layoutHotbar);
+function setSlot(i) {
+  player.slot = ((i % 9) + 9) % 9;
+  slots.forEach((s, j) => s.classList.toggle("sel", j === player.slot));
+  layoutHotbar();
+}
+setSlot(player.slot);
+
+/* ================= webgl ================= */
+const canvas = document.getElementById("gl");
+// WebGL2 when available: the scene is rendered into our own multisampled
+// 16-bit float buffer (see "high-precision color" below), so the canvas
+// itself doesn't need antialiasing. WebGL1 fallback: antialiased 8-bit canvas.
+let gl = canvas.getContext("webgl2", { antialias: false, preserveDrawingBuffer: true, alpha: false });
+const isGL2 = !!gl;
+if (!gl) gl = canvas.getContext("webgl", { antialias: true, preserveDrawingBuffer: true, alpha: false });
+if (!gl) { document.getElementById("ltext").textContent = "WEBGL NOT AVAILABLE"; return; }
+
+function sh(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function prog(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {}, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const a = gl.getActiveUniform(p, i); u[a.name] = gl.getUniformLocation(p, a.name); }
+  return { p, u };
+}
+
+// shared: bend the world in the distance + camera transform
+const COMMON = `
+uniform vec3 uCamFrac;   // camera position relative to grid origin cell
+uniform float uYaw, uPitch, uRoll, uTime, uF, uAspect;
+uniform float uEyeShift;       // stereo: horizontal image shift so both eyes converge at CONVERGE m
+uniform vec2 uClip;            // near, far clip distance
+uniform float uXR;             // 1 = 3D screen / headset: use the device's own matrices
+uniform mat4 uXRProj, uXRView;
+vec3 bendRel(vec3 r){
+  float d = length(r.xz);
+  float d2 = d*d;
+  r.y -= d2*0.0035;                                  // world curves away
+  r.y += sin(r.x*0.045 + uTime*0.55) * d2*0.0011;    // wobble
+  r.x += sin(r.z*0.05  + uTime*0.40) * d2*0.0009;
+  r.z += cos(r.x*0.035 - uTime*0.30) * d2*0.0006;
+  return r;
+}
+vec4 project(vec3 r){
+  float cy=cos(uYaw), sy=sin(uYaw);
+  vec3 a = vec3(cy*r.x - sy*r.z, r.y, sy*r.x + cy*r.z);
+  if (uXR > 0.5) return uXRProj * uXRView * vec4(a, 1.0);  // head tracking does pitch/roll
+  float cp=cos(-uPitch), sp=sin(-uPitch);
+  vec3 b = vec3(a.x, cp*a.y - sp*a.z, sp*a.y + cp*a.z);
+  float cr=cos(uRoll), sr=sin(uRoll);                // head tilt (lean / step sway)
+  b.xy = vec2(cr*b.x - sr*b.y, sr*b.x + cr*b.y);
+  float n=uClip.x, f=uClip.y;                        // near/far planes
+  return vec4(b.x*uF/uAspect - uEyeShift*b.z, b.y*uF, (b.z*(f+n) + 2.0*f*n)/(n-f), -b.z);
+}
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+`;
+
+/* ---- grid lines ---- */
+const SP = 4.0;          // cell size
+const NH = 24, NV = 6;   // half extents in cells (horizontal / vertical)
+const gridVS = `
+precision highp float;
+attribute vec4 aP;       // xyz = local cell coords, w = axis (0=x,1=y,2=z)
+uniform vec3 uOff;       // cell offset (wrapped mod 997 for hashing)
+uniform float uSP;
+varying float vA;
+${COMMON}
+void main(){
+  vec3 rel = aP.xyz*uSP - uCamFrac;
+  float dist = length(rel);
+  vec3 cell = aP.xyz + uOff;
+  float axis = aP.w;
+  // matrix-style streaks travelling along each line
+  vec2 key; float along;
+  if (axis < 0.5)      { key = cell.yz; along = cell.x; }
+  else if (axis < 1.5) { key = cell.xz; along = -cell.y; }
+  else                 { key = cell.xy; along = cell.z; }
+  float h = hash(key);
+  float spd = (axis > 0.5 && axis < 1.5) ? 1.6 : 0.5;
+  float s = fract(along*0.07 + uTime*spd*(0.25+h*0.4) + h*7.0);
+  float streak = pow(s, 14.0) * 2.4 + pow(s, 3.0)*0.25;
+  float floorLine = (abs(cell.y) < 0.5 && axis != 1.0) ? 1.0 : 0.0;
+  float yf = 1.0 - smoothstep(0.0, float(${NV}), abs(aP.y));
+  float vert = (axis > 0.5 && axis < 1.5) ? 1.0 : 0.0;
+  float base = floorLine > 0.5 ? 0.7 : mix(0.035, 0.09, vert) * mix(0.4, 1.0, yf);
+  streak *= floorLine > 0.5 ? 0.8 : mix(0.25, 1.0, vert);
+  float fog = 1.0 - smoothstep(35.0, ${(NH * SP - 6).toFixed(1)}, dist);
+  float near = smoothstep(0.5, 5.0, dist);
+  vA = (base + streak*mix(0.35,1.0,yf)) * fog * near;
+  gl_Position = project(bendRel(rel));
+}`;
+const gridFS = `
+precision mediump float;
+varying float vA;
+void main(){
+  vec3 c = mix(vec3(0.0,0.55,0.18), vec3(0.75,1.0,0.8), clamp(vA-0.6,0.0,1.0));
+  gl_FragColor = vec4(c*vA, 1.0);
+}`;
+const gridP = prog(gridVS, gridFS);
+
+const verts = [];
+function pushLine(ax, a0, b0, c0, len) {
+  // ax axis; others fixed; subdivided per cell so it can bend
+  for (let t = -len; t < len; t++) {
+    let p = [0, 0, 0], q = [0, 0, 0];
+    p[ax] = t; q[ax] = t + 1;
+    const others = [0, 1, 2].filter(i => i !== ax);
+    p[others[0]] = q[others[0]] = a0; p[others[1]] = q[others[1]] = b0;
+    verts.push(p[0], p[1], p[2], ax, q[0], q[1], q[2], ax);
+  }
+}
+for (let y = -NV; y <= NV; y++) for (let z = -NH; z <= NH; z++) pushLine(0, y, z, 0, NH);   // along x
+for (let x = -NH; x <= NH; x++) for (let z = -NH; z <= NH; z++) pushLine(1, x, z, 0, NV);   // along y
+for (let x = -NH; x <= NH; x++) for (let y = -NV; y <= NV; y++) pushLine(2, x, y, 0, NH);   // along z
+const gridBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+const gridCount = verts.length / 4;
+
+/* ---- falling glyphs ---- */
+const glyphVS = `
+precision highp float;
+attribute vec4 aS;           // xyz seed in [0,1], w seed
+uniform vec3 uCam;           // eye world pos, wrapped to the box (x,z mod 90, y mod 36)
+uniform float uH;            // view height px
+varying float vG, vA;
+${COMMON}
+void main(){
+  vec3 box = vec3(90.0, 36.0, 90.0);
+  vec3 p = aS.xyz*box;
+  p.y -= uTime*(3.0 + aS.w*6.0);
+  vec3 rel = mod(p - uCam + box*0.5, box) - box*0.5;
+  rel.y += 4.0;
+  float d = length(rel);
+  vG = floor(mod(aS.w*97.0 + uTime*(2.0+aS.w*5.0), 16.0));
+  vA = (1.0 - smoothstep(20.0, 44.0, d)) * smoothstep(1.0, 4.0, d) * (0.35 + aS.w*0.65);
+  vec4 c = project(bendRel(rel));
+  gl_Position = c;
+  gl_PointSize = clamp(uH*0.9/max(c.w,0.1), 2.0, 64.0);
+}`;
+const glyphFS = `
+precision mediump float;
+uniform sampler2D uTex;
+varying float vG, vA;
+void main(){
+  vec2 cell = vec2(mod(vG,4.0), floor(vG/4.0));
+  vec2 uv = (cell + gl_PointCoord)/4.0;
+  float m = texture2D(uTex, uv).r;
+  gl_FragColor = vec4(vec3(0.25,1.0,0.45)*m*vA, 1.0);
+}`;
+const glyphP = prog(glyphVS, glyphFS);
+const NG = 1400, gs = new Float32Array(NG * 4);
+for (let i = 0; i < gs.length; i++) gs[i] = Math.random();
+const glyphBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, glyphBuf);
+gl.bufferData(gl.ARRAY_BUFFER, gs, gl.STATIC_DRAW);
+
+// glyph atlas
+const atlas = document.createElement("canvas"); atlas.width = atlas.height = 256;
+const ac = atlas.getContext("2d");
+ac.fillStyle = "#000"; ac.fillRect(0, 0, 256, 256);
+ac.fillStyle = "#fff"; ac.font = "bold 52px monospace"; ac.textAlign = "center"; ac.textBaseline = "middle";
+const chars = "ｱｲｳｴｵｶｷｸｹｺ01ﾊﾐﾋｰ";
+for (let i = 0; i < 16; i++) {
+  ac.save(); ac.translate((i % 4) * 64 + 32, Math.floor(i / 4) * 64 + 34); ac.scale(-1, 1);
+  ac.fillText(chars[i], 0, 0); ac.restore();
+}
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlas);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+/* ---- "mausoleum" area: the world under the matrix floor ----
+   An endless orange plain of shiny, bevelled "smooth plastic" architecture
+   under a purple-blue sky and a low sun: scattered blocks (some with yellow
+   caps), tall pillars with overhanging tops and yellow knobs, and huge red
+   walls with olive frame bands. Drawn per pixel by ray marching a distance
+   field of rounded boxes, with sun shadows, ambient occlusion, a plastic
+   highlight and a sky reflection.
+
+   Layout: three layers of cells (blocks 5 m, pillars 40 m, walls 200 m);
+   each cell reads 4 random bytes from MAUS_TAB, a 256x256 table made in JS
+   from a fixed seed. The GPU and the JS collision code read the SAME table,
+   so what you see is exactly what you bump into.
+
+   Precision rule: the GPU only ever gets the eye position relative to a
+   1000 m-aligned origin (plus each layer's table offset for that origin,
+   worked out exactly in 64-bit on the CPU), so it looks the same trillions
+   of metres out. Every pattern period divides 1000 m, so nothing jumps when
+   the origin moves. Objects stay a safe margin inside their cells, which
+   lets the distance field bound neighbouring cells without looking at them. */
+const MAUS_TAB = (() => {                       // 256x256 RGBA random bytes, fixed seed
+  let a = 0x9e3779b9 ^ 20260928;
+  const rnd = () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const t = new Uint8Array(256 * 256 * 4);
+  for (let i = 0; i < t.length; i++) t[i] = Math.floor(rnd() * 256);
+  return t;
+})();
+const MAUS = {                                  // cell size + table offset per layer
+  peg: { cell: 5, off: [0, 0] }, pillar: { cell: 40, off: [97, 31] },
+  wall: { cell: 200, off: [181, 211] }, floor: { cell: 2.5, off: [53, 149] },
+  blk: { cell: 2.5, off: [53 + 113, 149 + 29] }     // blocks: the floor grid, another table spot
+};
+/* ---- mausoleum renderer: real 3D geometry (rasterized), not ray marched ----
+   Every piece (blocks, caps, towers, trims, knobs, ring walls, wall bands,
+   colonnades...) is a bevelled box drawn with GPU instancing: one mesh, many
+   copies. Nearby boxes use a rounded-bevel mesh (smooth shiny edges), far
+   ones a plain box. The sun casts shadows through two shadow maps (sharp near
+   you, wider further out) with smooth filtering. Surface detail (studs,
+   panels, holes, rivets, pits, grid) is drawn per pixel.
+   Precision rule: box positions are stored relative to a rebuild origin R
+   (updated as you move) and shifted by (R - eye) each frame, both worked out
+   in 64-bit on the CPU; the floor pattern uses the eye's offset inside each
+   grid cell, like before. */
+const MAUS_COMMON_FS = `
+precision highp float;
+uniform float uEyeY;
+uniform vec4 uFeA, uFeB, uBaseA, uBaseB;
+uniform sampler2D uTab;
+uniform sampler2D uSh0, uSh1, uSh2;  // sun shadow maps (near, mid, far)
+uniform vec3 uCamToS0, uCamToS1, uCamToS2;   // eye -> each shadow map's centre
+uniform vec3 uLR, uLU, uLF;         // sun space: right, up, forward (direction the light travels)
+uniform vec3 uShP, uShD;             // half sizes, depth ranges of the three maps
+uniform float uShadowOn;
+const vec3 SUN = vec3(-0.4461, 0.6197, -0.6454);
+const vec3 SUNC = vec3(1.62, 1.42, 1.12);
+const vec3 FOGC = vec3(0.64, 0.63, 0.92);
+vec4 tab(vec2 c){ c = mod(c, 256.0); return texture2D(uTab, (c + 0.5) / 256.0); }
+float h21(vec2 v){ return fract(sin(dot(v, vec2(12.9898, 78.233))) * 43758.5453); }
+float hole(vec2 g, float r){ return 1.0 - smoothstep(r - 0.008, r + 0.008, max(abs(g.x), abs(g.y))); }
+vec2 faceUV(vec3 p, vec3 n){
+  vec3 a = abs(n);
+  return a.x > a.y && a.x > a.z ? p.zy : (a.y > a.z ? p.xz : p.xy);
+}
+vec3 skyCol(vec3 rd){
+  float y = max(rd.y, 0.0);
+  vec3 c = mix(FOGC, vec3(0.34, 0.45, 0.86), pow(y, 0.5));
+  float s = max(dot(rd, SUN), 0.0);
+  c += vec3(1.0, 0.86, 0.62) * (pow(s, 400.0) * 1.2 + pow(s, 10.0) * 0.12);
+  if (s > 0.99955) c = vec3(1.7, 1.6, 1.4);
+  return c;
+}
+// 3x3 bilinear-weighted PCF (16 taps): smooth shadow edges, no noise, no rings
+float pcf(sampler2D t, vec2 uv, float z){
+  vec2 ts = vec2(1.0 / 2048.0);
+  vec2 st = uv / ts - 0.5, f = fract(st);
+  vec2 base = (floor(st) + 0.5) * ts;
+  float sum = 0.0;
+  for (int y = -1; y <= 2; y++) for (int x = -1; x <= 2; x++) {
+    float wx = x == -1 ? 1.0 - f.x : (x == 2 ? f.x : 1.0);
+    float wy = y == -1 ? 1.0 - f.y : (y == 2 ? f.y : 1.0);
+    sum += wx * wy * step(z, texture2D(t, base + vec2(float(x), float(y)) * ts).r);
+  }
+  return sum / 9.0;
+}
+// one map: lit fraction, and how far out in the map the point is (0 centre .. 1 edge)
+float shadowMap(sampler2D t, vec3 rel, vec3 n, vec3 camToS, float H, float D, float noff, float bias, out float e){
+  vec3 q = rel + camToS;
+  e = max(abs(dot(q, uLR)), abs(dot(q, uLU))) / H;
+  if (e >= 1.0) return 1.0;
+  vec3 qo = q + n * noff;
+  vec3 lo = vec3(dot(qo, uLR), dot(qo, uLU), dot(qo, uLF));
+  return pcf(t, lo.xy / H * 0.5 + 0.5, lo.z / D * 0.5 + 0.5 - bias);
+}
+// cascades blend into each other over the outer part of each map (no seam lines), and
+// the last one fades to lit before its edge
+float shadowAt(vec3 rel, vec3 n){
+  if (uShadowOn < 0.5) return 1.0;
+  float e0, e1, e2;
+  float s0 = shadowMap(uSh0, rel, n, uCamToS0, uShP.x, uShD.x, 0.03, 0.0002, e0);
+  if (e0 < 0.8) return s0;
+  float s1 = shadowMap(uSh1, rel, n, uCamToS1, uShP.y, uShD.y, 0.2, 0.0006, e1);
+  float w0 = e0 < 1.0 ? 1.0 - smoothstep(0.8, 0.95, e0) : 0.0;
+  if (e1 < 0.8) return mix(s1, s0, w0);
+  float s2 = shadowMap(uSh2, rel, n, uCamToS2, uShP.z, uShD.z, 0.8, 0.0005, e2);
+  s2 = mix(s2, 1.0, smoothstep(0.8, 0.95, e2));
+  float w1 = e1 < 1.0 ? 1.0 - smoothstep(0.8, 0.95, e1) : 0.0;
+  return mix(mix(s2, s1, w1), s0, w0);
+}
+// materials: 0 floor, 1 block, 2 yellow, 3 red wall, 4 olive frame, 5 tower,
+//            6 grooved long block, 7 patterned column, 8 olive frieze (dentils),
+//            9 detailed orange (marks + grooves), 10 yellow-green trim,
+//            13 studded wall (seed 0 orange, 1 dark brown), 15 dark recess
+// fd = distance from the eye: fine patterns fade out before they get smaller than a
+// pixel (otherwise they shimmer / turn grainy in the distance)
+varying vec3 vRel, vN, vLocal, vHs;
+varying float vMat, vSeed;
+// block footprint per 2.5 m cell (same variants as mausBlock() in JS): half w, half d, offset
+vec4 blockRect(vec4 u){
+  float v = fract(u.b * 11.7);
+  bool ax = u.a > 0.5;
+  if (v < 0.12) { float L = (2.0 + floor(u.g * 1.999)) * 0.4 - 0.02; return ax ? vec4(L, 0.38, 0.0, 0.0) : vec4(0.38, L, 0.0, 0.0); }
+  if (v < 0.24) { float T = 0.04 + 0.02 * u.g, D = 0.35 + 0.15 * fract(u.g * 7.13);
+    return ax ? vec4(D, T, 0.0, 0.0) : vec4(T, D, 0.0, 0.0); }
+  if (v < 0.32) return ax ? vec4(0.82, 0.4, 0.0, 0.0) : vec4(0.4, 0.82, 0.0, 0.0);
+  if (v < 0.40) { float s = 0.25 + 0.05 * u.g; return vec4(s, s, 0.0, 0.0); }
+  float hw = 0.38 + 0.17 * u.g;
+  return vec4(hw, min(0.58, hw * (0.85 + 0.3 * fract(u.g * 7.13))), 0.0, 0.0);
+}
+// is a point (p frame) within reach of a tower (incl. its enclosure) or a wall, plus margin m?
+// (same rule as mausNearBig() in JS; each tower/wall stays inside its own cell)
+bool nearBig(vec2 c, vec2 m){
+  vec2 q = uFeA.zw + (c - uFeA.xy), qc = floor(q / 40.0);
+  vec4 t = tab(qc + uBaseA.zw);
+  if (t.r < 0.28) {                                   // tower (offset in its cell) or medium building (centred)
+    bool bld = fract(t.a * 7.7) < 0.35;
+    vec2 s = bld ? vec2(6.0 + 2.0 * t.g + 7.2) : vec2(2.6 + 1.4 * t.g, 2.6 + 1.4 * fract(t.g * 5.3)) + 2.4;
+    vec2 pp = (qc + 0.5) * 40.0 + (bld ? vec2(0.0) : (vec2(t.b, fract(t.b * 4.7)) - 0.5) * 12.0);
+    if (abs(q.x - pp.x) < s.x + m.x && abs(q.y - pp.y) < s.y + m.y) return true;
+  }
+  vec2 w = uFeB.xy + (c - uFeA.xy), wc = floor(w / 200.0);
+  t = tab(wc + uBaseB.xy);
+  if (t.r < 0.45) {
+    vec2 s = vec2(20.0 + 30.0 * t.g, 8.0 + 14.0 * t.b);
+    if (t.a > 0.5) s = s.yx;
+    vec2 wp = (wc + 0.5) * 200.0 + (vec2(fract(t.g * 3.3), fract(t.b * 6.1)) - 0.5) * 60.0;
+    if (abs(w.x - wp.x) < s.x + 6.0 + m.x && abs(w.y - wp.y) < s.y + 6.0 + m.y) return true;
+  }
+  return false;
+}
+// big square pits in some 5 m cells, kept clear of towers and walls
+// (same rule as mausHole() in JS). pc = cell index relative to the eye's cell.
+const float HOLE_D = 0.9;
+bool bigHole(vec2 pc, vec4 u, out vec2 hc, out vec2 hh){
+  hc = vec2(0.0); hh = vec2(0.0);
+  if (u.r < 0.965) return false;
+  hh = vec2(0.8 + 0.7 * u.g, 0.8 + 0.7 * fract(u.g * 7.13));
+  hc = (pc + 0.5) * 5.0;
+  return !nearBig(hc, hh + 0.8);                     // + the module rim around it
+}
+vec3 albedo(vec3 p, vec3 local, vec3 n, float id, float seed, float fd, out float ao){
+  ao = 1.0;
+  float fine = 1.0 - smoothstep(18.0, 55.0, fd);      // 0.625 m details
+  float mid = 1.0 - smoothstep(70.0, 180.0, fd);      // 2.5 m details
+  float big = 1.0 - smoothstep(250.0, 600.0, fd);     // 5 m panels
+  vec3 ORANGE = vec3(0.96, 0.44, 0.12), OLIVE = vec3(0.44, 0.42, 0.17), YEL = vec3(0.98, 0.88, 0.34);
+  if (id < 0.5) {                                                           // ---- floor
+    vec3 c = vec3(0.97, 0.33, 0.10);
+    vec2 f1 = abs(fract(p.xz / 0.625) - 0.5) * 0.625, f2 = abs(fract(p.xz / 2.5) - 0.5) * 2.5;
+    float sm = min(f2.x, f2.y);                                             // 2.5 m seams: groove + bright lip
+    c *= 1.0 + 0.05 * fine * (1.0 - smoothstep(0.004, 0.012, min(f1.x, f1.y)))
+             + 0.12 * mid * (1.0 - smoothstep(0.02, 0.035, sm))
+             - 0.25 * mid * (1.0 - smoothstep(0.004, 0.009, sm));
+    vec2 wf = uFeB.zw + (p.xz - uFeA.xy);
+    vec2 cl = floor(wf / 2.5), lp = wf - (cl + 0.5) * 2.5;
+    vec4 t = tab(cl + uBaseB.zw);
+    c *= mix(1.0, 0.95 + 0.08 * t.a, big);                                 // tiles differ a little
+    vec2 pc = floor(p.xz / 5.0), pl = p.xz - (pc + 0.5) * 5.0;
+    vec4 u = tab(pc + uBaseA.xy);
+    // faint lighter nested squares (the reference floor's fine "circuit" look)
+    vec2 g1 = abs(fract(p.xz / 1.25) - 0.5) * 1.25;                          // 0 at the centre of each 1.25 m square
+    float r1 = max(g1.x, g1.y);
+    float ln = (1.0 - smoothstep(0.012, 0.024, abs(r1 - 0.3))) * 0.6 + (1.0 - smoothstep(0.01, 0.02, abs(r1 - 0.16))) * 0.35;
+    float r2 = max(abs(lp.x), abs(lp.y));
+    ln = max(ln, (1.0 - smoothstep(0.012, 0.026, abs(r2 - 1.0))) * step(0.5, t.a));
+    c += vec3(0.16, 0.05, 0.06) * ln * fine + vec3(0.02, 0.006, 0.008) * (1.0 - fine) * mid;
+    vec2 hc, hh;
+    bool pitCell = bigHole(pc, u, hc, hh);
+    // blocks (2.5 m cells) stand in a floor gap (dark pit) with a lit rim and soft contact shade
+    vec4 tb = tab(cl + uBaseB.zw + vec2(113.0, 29.0));
+    bool blk = tb.r < 0.30 && !pitCell && !nearBig(p.xz - lp, vec2(1.6));
+    // a small yellow dot in the middle of each 1.25 m square
+    { vec2 sc = floor(wf / 1.25), dg = wf - (sc + 0.5) * 1.25;
+      c = mix(c, vec3(0.95, 0.80, 0.30), 0.8 * fine * (1.0 - smoothstep(0.022, 0.032, length(dg)))); }
+    // small square holes on the 1.25 m lattice (the reference), 70%; the lattice points at
+    // cell centres (block spots) only when there's no block
+    { vec2 li = floor(wf / 1.25 + 0.5), dl = wf - li * 1.25;
+      bool centre = mod(li.x, 2.0) > 0.5 && mod(li.y, 2.0) > 0.5;
+      vec4 s = tab(li + uBaseB.zw * 2.0 + vec2(29.0, 83.0));
+      if (s.r < 0.7 && !pitCell && !(centre && blk)) {
+        float m = max(abs(dl.x), abs(dl.y));
+        c *= mix(mix(0.10, 0.85, 1.0 - mid), 1.0, smoothstep(0.1, 0.12, m));
+        c += vec3(0.25, 0.08, 0.02) * fine * (smoothstep(0.075, 0.1, m) - smoothstep(0.1, 0.12, m));
+      }
+    }
+    if (!blk) {
+      if (false) {
+      } else if (false) {                                            // (yellow rivets: replaced by the hole lattice)
+        float d = length(lp);
+        c = mix(c, vec3(0.95, 0.82, 0.30), fine * (1.0 - smoothstep(0.05, 0.065, d)));
+        c *= mix(mix(0.25, 1.0, 1.0 - fine), 1.0, smoothstep(0.018, 0.03, d));
+      }
+    } else {
+      vec4 b = blockRect(tb);
+      vec2 e = abs(lp - b.zw) - b.xy;
+      float pit = max(e.x, e.y);
+      float vis = 1.0 - smoothstep(290.0, 375.0, fd);                       // blocks fade away 290-375 m
+      c *= mix(1.0, mix(0.14, 1.0, smoothstep(0.1, 0.13, pit)), vis);
+      c += vec3(0.16, 0.05, 0.01) * fine * (smoothstep(0.11, 0.13, pit) - smoothstep(0.13, 0.17, pit));
+      ao *= mix(1.0, mix(0.55, 1.0, smoothstep(0.1, 0.45, pit)), vis);
+    }
+    if (pitCell) {                                                          // big pits: a dark border lip
+      vec2 e = abs(p.xz - hc) - hh;
+      float m = max(e.x, e.y);
+      c *= mix(0.35, 1.0, smoothstep(0.05, 0.08, m));
+      c *= 1.0 + 0.2 * mid * (smoothstep(0.08, 0.1, m) - smoothstep(0.1, 0.14, m));
+    }
+    return c;
+  }
+  // soft darkening low down and underneath (stand-in for ambient occlusion)
+  ao = mix(0.6, 1.0, smoothstep(0.0, 1.3, p.y)) * (n.y < -0.5 ? 0.55 : 1.0);
+  bool side = abs(n.y) < 0.5;
+  float across = abs(n.x) > 0.5 ? local.z : local.x;                         // horizontal coord on a side face
+  float acrossH = abs(n.x) > 0.5 ? vHs.z : vHs.x;
+  if (id < 1.5) {                                                           // ---- block
+    if (vHs.y < 0.05) return ORANGE * 0.4;                                  // groove on the seam under the cap
+    // one possible hole per 0.6 m cell, jittered inside it, ~12% of cells
+    // the seed arrives interpolated (not bit-exact across the face), so round it:
+    // a sin-hash turns tiny differences into per-pixel noise
+    float sd = floor(seed + 0.5);
+    float kind = floor(sd / 1024.0); sd = mod(sd, 1024.0);
+    vec2 uv = faceUV(local, n);
+    vec2 cell = floor(uv / 0.6), g = (fract(uv / 0.6) - 0.5) * 0.6;
+    vec2 key = cell + vec2(mod(sd, 16.0), floor(sd / 16.0)) * 7.0;
+    vec2 jit = (vec2(h21(key + 3.1), h21(key + 7.7)) - 0.5) * 0.3;
+    float on = step(h21(key), 0.12) * step(kind, 1.5);
+    float c = 1.0 - 0.75 * on * mid * hole(g - jit, 0.07);
+    if (side && fine > 0.0) {                                               // tiny holes on the sides
+      float dy = vHs.y - local.y;
+      vec2 hg;
+      float ok;
+      if (kind > 1.5 && acrossH < 0.2) {                                    // slab end: a column of them
+        hg = vec2(across, (fract(local.y / 0.16) - 0.5) * 0.16);
+        ok = step(0.12, dy) * step(local.y, vHs.y - 0.12) * step(-vHs.y + 0.15, local.y);
+      } else {                                                              // a row under the top edge
+        hg = vec2((fract(across / 0.13 + 0.5) - 0.5) * 0.13, dy - 0.14);
+        ok = step(abs(across), acrossH - 0.07) * step(mod(sd, 3.0), 0.5);
+      }
+      c *= 1.0 - 0.7 * fine * ok * (1.0 - smoothstep(0.017, 0.025, max(abs(hg.x), abs(hg.y))));
+      // grooves along the faces: a ring around the body (most blocks), a vertical one on some
+      float ring = step(mod(sd, 4.0), 0.5) * (1.0 - smoothstep(0.012, 0.022, abs(local.y - (vHs.y - 0.36))));
+      float vert = step(mod(sd, 5.0), 1.5) * step(0.3, acrossH) * (1.0 - smoothstep(0.012, 0.022, abs(across)));
+      c *= 1.0 - 0.5 * mid * max(ring, vert * step(local.y, vHs.y - 0.36));
+    }
+    return ORANGE * c;
+  }
+  if (id < 2.5) return YEL;                                                 // ---- yellow
+  vec3 YG = vec3(0.80, 0.86, 0.32);
+  if (id < 3.5) {                                                           // ---- red wall panels
+    vec2 uv = faceUV(p, n);
+    vec3 c = vec3(0.84, 0.22, 0.21);
+    vec2 pg = abs(fract(uv / vec2(5.0, 3.5)) - 0.5) * vec2(5.0, 3.5);
+    float frame = (1.0 - smoothstep(0.16, 0.2, min(pg.x, pg.y))) * big;
+    c = mix(mix(c * 0.78, c, smoothstep(0.2, 0.6, min(pg.x, pg.y))), c * 0.9, 1.0 - big);
+    c = mix(c, vec3(0.44, 0.40, 0.17), frame);
+    vec2 g = fract(uv / 0.625) - 0.5;
+    c *= 1.0 - 0.55 * fine * hole(g * 0.625, 0.06) * (1.0 - frame);
+    c *= 1.0 - 0.12 * (1.0 - fine) * mid;                                   // studs far away: slightly darker average
+    return c;
+  }
+  if (id < 4.5) return OLIVE;                                               // ---- olive frame
+  if (id < 5.5) {                                                           // ---- tower: sparse small square holes
+    vec2 uv = faceUV(p, n);
+    vec2 cl = floor(uv / 1.25), g = (fract(uv / 1.25) - 0.5) * 1.25;
+    // p is relative to the eye's 5 m cell, so add that cell (4 squares per cell) to get a
+    // world-fixed pattern; without it the holes re-shuffled whenever you crossed a 5 m line
+    vec2 cb = abs(n.x) > 0.5 ? vec2(uBaseA.y * 4.0, 0.0) : (abs(n.z) > 0.5 ? vec2(uBaseA.x * 4.0, 0.0) : uBaseA.xy * 4.0);
+    vec4 r = tab(cl + cb + vec2(59.0, 211.0) + (abs(n.x) > 0.5 ? vec2(17.0, 0.0) : vec2(0.0)));
+    vec2 e = abs(g) - 0.075;                                              // holes on a regular 1.25 m grid, a few missing
+    float on = step(r.r, 0.7) * float(side);
+    return ORANGE * (1.0 - 0.75 * on * mid * (1.0 - smoothstep(0.0, 0.012, max(e.x, e.y))))
+                  * (1.0 - 0.03 * (1.0 - mid));
+  }
+  if (id < 6.5) {                                                           // ---- long block: grooves across
+    bool lx = vHs.x > vHs.z;
+    float a = lx ? local.x : local.z, L = lx ? vHs.x : vHs.z;
+    float along = lx ? abs(n.x) : abs(n.z);
+    float c = 1.0;
+    if (along < 0.5) {
+      float s = (fract(a / 0.26 + 0.5) - 0.5) * 0.26;                       // every 0.26 m, centred
+      float inRange = step(abs(a), L - 0.1);
+      float gr = (1.0 - smoothstep(0.016, 0.028, abs(s))) * inRange;
+      float lip = (smoothstep(0.028, 0.034, s) - smoothstep(0.034, 0.05, s)) * inRange;
+      c = 1.0 - 0.62 * gr * mid + 0.2 * lip * mid - 0.1 * (1.0 - mid) * inRange;
+    }
+    return ORANGE * c;
+  }
+  if (id < 7.5) {                                                           // ---- patterned column
+    vec3 c = OLIVE;
+    float yl = fract(p.y / 1.6) * 1.6;                                      // 0..1.6 per segment
+    if (side) {
+      float band = 1.0 - smoothstep(0.1, 0.13, min(yl, 1.6 - yl));        // yellow band every 1.6 m
+      c = mix(c, YEL * 0.95, band * mid);
+      float gv = (1.0 - smoothstep(0.03, 0.05, abs(across))) * step(0.2, acrossH);   // groove down the middle
+      c *= 1.0 - 0.45 * gv * mid * (1.0 - band);
+      vec2 hg = vec2(abs(abs(across) - acrossH * 0.5), abs(yl - 0.8) - 0.32);         // tiny holes in pairs
+      c *= 1.0 - 0.7 * fine * (1.0 - band) * (1.0 - smoothstep(0.022, 0.032, length(hg)));
+      c *= 1.0 - 0.05 * (1.0 - mid);
+    }
+    return c;
+  }
+  if (id > 15.5) return vec3(0.84, 0.22, 0.21);                            // ---- plain red (cube modules)
+  if (id > 14.5) return vec3(0.16, 0.13, 0.07);                            // ---- dark recess under towers
+  if (id > 12.5) {                                                          // ---- studded wall: yellow dot grid
+    vec3 base = seed > 0.5 ? vec3(0.30, 0.17, 0.09) : ORANGE * 0.95;
+    vec2 uv = faceUV(p, n);
+    vec2 g = (fract(uv / 0.625) - 0.5) * 0.625;
+    float dotm = (1.0 - smoothstep(0.05, 0.065, length(g))) * fine;
+    return mix(base * (1.0 + 0.25 * (1.0 - fine) * mid * step(0.5, seed)), YEL * 0.9, dotm);
+  }
+  if (id > 9.5) return YG;                                                  // ---- yellow-green trim
+  if (id > 8.5) {                                                           // ---- detailed orange: marks + grooves
+    vec3 c = ORANGE * 0.93;
+    if (side) {
+      vec2 uv = vec2(across, p.y);
+      vec2 cl = floor(uv / 0.5), g = (fract(uv / 0.5) - 0.5) * 0.5;
+      vec4 r = tab(cl + vec2(71.0, 13.0) + floor(seed + 0.5));
+      vec2 sz = mix(vec2(0.04), vec2(0.13, 0.07), r.ba);                    // small dark square/rect marks
+      vec2 e = abs(g - (r.rg - 0.5) * 0.2) - sz;
+      c *= 1.0 - 0.65 * fine * step(r.r, 0.35) * (1.0 - smoothstep(0.0, 0.008, max(e.x, e.y)));
+      float gy = abs(fract(p.y / 1.25 + 0.5) - 0.5) * 1.25;                // grooves every 1.25 m + centre line
+      float gl = max(1.0 - smoothstep(0.015, 0.03, gy), step(0.4, acrossH) * (1.0 - smoothstep(0.015, 0.03, abs(across))));
+      c *= 1.0 - 0.45 * mid * gl;
+      c *= 1.0 - 0.08 * (1.0 - fine);
+    }
+    return c;
+  }
+  vec3 c = OLIVE;                                                           // ---- frieze: dentils + tiny holes
+  vec2 uv = faceUV(p, n);
+  if (side) {
+    float k = mod(floor(uv.x / 0.5), 2.0);
+    c *= mix(1.0, mix(0.82, 1.1, k), mid);
+    float q = (fract(uv.x / 0.5) - 0.5) * 0.5;
+    float sq = step(abs(q), 0.07) * step(abs(local.y), min(0.07, vHs.y - 0.06));
+    c = mix(c, YEL, sq * fine * k);
+    c *= 1.0 - 0.7 * fine * (1.0 - k) * (1.0 - smoothstep(0.02, 0.03, length(vec2(q, local.y))));
+    c *= 1.0 - 0.5 * mid * (1.0 - smoothstep(0.015, 0.03, abs(abs(local.y) - (vHs.y - 0.05))));  // edge grooves
+  } else if (n.y < -0.5) {                                                  // underside: coffers
+    vec2 g = abs(fract(uv / 1.25) - 0.5) * 1.25;
+    c *= mix(1.0, mix(0.6, 1.0, smoothstep(0.08, 0.12, min(g.x, g.y))), mid);
+  }
+  return c;
+}
+// a floor pixel inside a big pit: follow the view ray down into it (a real-looking
+// hole without geometry). Returns the offset to the hit point, its normal, how much
+// sun gets in through the opening, and occlusion.
+bool pitTrace(vec3 p, vec3 rd, out vec3 dp, out vec3 pn, out float vis, out float pao, out float wall){
+  dp = vec3(0.0); pn = vec3(0.0, 1.0, 0.0); vis = 1.0; pao = 1.0; wall = 0.0;
+  vec2 pc = floor(p.xz / 5.0);
+  vec4 u = tab(pc + uBaseA.xy);
+  vec2 hc, hh;
+  if (!bigHole(pc, u, hc, hh)) return false;
+  vec2 l = p.xz - hc;
+  if (abs(l.x) >= hh.x || abs(l.y) >= hh.y) return false;
+  float tx = abs(rd.x) > 1e-5 ? (sign(rd.x) * hh.x - l.x) / rd.x : 1e9;
+  float tz = abs(rd.z) > 1e-5 ? (sign(rd.z) * hh.y - l.y) / rd.z : 1e9;
+  float ty = -HOLE_D / min(rd.y, -1e-5);
+  float t = min(ty, min(tx, tz));
+  dp = rd * t;
+  vec3 h = vec3(l.x, 0.0, l.y) + dp;
+  if (t == ty) pn = vec3(0.0, 1.0, 0.0);
+  else if (t == tx) { pn = vec3(-sign(rd.x), 0.0, 0.0); wall = 1.0; }
+  else { pn = vec3(0.0, 0.0, -sign(rd.z)); wall = 1.0; }
+  // sun through the opening
+  vec2 e = h.xz + SUN.xz * (-h.y / SUN.y);
+  vis = clamp(min(hh.x - abs(e.x), hh.y - abs(e.y)) / 0.05 + 0.5, 0.0, 1.0);
+  // darker deeper down and in the corners
+  float dd = min(hh.x - abs(h.x), hh.y - abs(h.z));
+  pao = mix(0.35, 0.8, clamp(1.0 + h.y / HOLE_D, 0.0, 1.0)) * mix(0.65, 1.0, smoothstep(0.0, 0.5, dd + wall * 0.5));
+  return true;
+}
+// lighting shared by everything (and by bgCol below)
+vec3 shade(vec3 alb, vec3 n, vec3 rd, float sh, float ao){
+  float dif = max(dot(n, SUN), 0.0);
+  vec3 hv = normalize(SUN - rd);
+  float spe = pow(max(dot(n, hv), 0.0), 80.0) * dif;
+  float fre = 0.04 + 0.96 * pow(1.0 - max(dot(n, -rd), 0.0), 5.0);
+  vec3 amb = vec3(0.34, 0.35, 0.56) * (0.55 + 0.45 * n.y);
+  vec3 bounce = vec3(0.30, 0.11, 0.04) * clamp(0.5 - 0.5 * n.y, 0.0, 1.0);
+  vec3 col = alb * (SUNC * dif * sh + (amb + bounce) * ao);
+  col += SUNC * spe * sh * 0.75;                                           // shiny plastic highlight
+  return mix(col, skyCol(reflect(rd, n)) * ao, fre * 0.3);                 // sky reflection
+}
+vec3 haze(vec3 col, float d){ return mix(col, FOGC, 1.0 - exp(-d * 0.0017)); }
+// what would be seen behind an object along this ray: the far floor (plain, lit,
+// hazed) below the horizon, the sky above. Objects fade into this near the end of
+// their draw range, so nothing pops in or out at the edge.
+vec3 bgCol(vec3 rd){
+  if (rd.y < -1e-4) return haze(shade(vec3(0.97, 0.33, 0.10), vec3(0.0, 1.0, 0.0), rd, 1.0, 1.0), uEyeY / -rd.y);
+  return skyCol(rd);
+}
+void main(){
+  vec3 n = normalize(vN);
+  vec3 rd = normalize(vRel), rel = vRel;
+  // pattern coordinates relative to the eye's 5 m cell corner (small, exact)
+  vec3 p = vec3(uFeA.x + vRel.x, vRel.y + uEyeY, uFeA.y + vRel.z);
+  // the seed carries the object class: +0 blocks, +10000 towers, +20000 walls
+  float cls = floor((vSeed + 0.5) / 10000.0), seed = vSeed - cls * 10000.0;
+  float ao, vis = 1.0;
+  vec3 alb;
+  vec3 dp, pn; float pao, wall;
+  if (vMat < 0.5 && pitTrace(p, rd, dp, pn, vis, pao, wall)) {
+    rel += dp; n = pn;
+    vec3 h = p + dp;
+    alb = vec3(0.97, 0.33, 0.10) * 0.55;
+    if (wall > 0.5) {                                                       // grooves along the pit walls + lit lip
+      float y = -h.y;
+      alb *= 1.0 - 0.45 * (1.0 - smoothstep(0.015, 0.03, abs(y - 0.55)));
+      alb += vec3(0.22, 0.08, 0.02) * (1.0 - smoothstep(0.03, 0.06, y));
+    }
+    ao = pao;
+  } else alb = albedo(p, vLocal, n, vMat, seed, length(vRel), ao);
+  float sh = dot(n, SUN) > 0.0 ? shadowAt(rel, n) * vis : 0.0;
+  vec3 col = haze(shade(alb, n, rd, sh, ao), length(rel));
+  if (vMat > 0.5) {                                                         // fade out near the draw range end
+    float d = length(vRel);
+    float f = cls < 0.5 ? smoothstep(290.0, 375.0, d) : (cls < 1.5 ? smoothstep(380.0, 575.0, d) : smoothstep(600.0, 775.0, d));
+    if (f > 0.0) col = mix(col, bgCol(rd), f);
+  }
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+// instanced box: mesh gives corner signs (aS) + bevel normal (aN); instance gives
+// centre (relative to R) + bevel radius, half size + material, and a seed
+const mausBoxVS = `
+attribute vec3 aS, aN;
+attribute vec4 aI0, aI1;
+attribute float aI2;
+uniform vec3 uROff;                 // R - eye (64-bit on the CPU)
+uniform float uPix;                 // one screen pixel as an angle (rad)
+varying vec3 vRel, vN, vLocal, vHs;
+varying float vMat, vSeed;
+${COMMON}
+void main(){
+  vec3 hs = aI1.xyz;
+  float r = min(aI0.w, min(hs.x, min(hs.y, hs.z)));
+  vec3 n = aN;
+  vec3 local = aS * (hs - r) + aN * r;
+  // size LOD: parts shrink smoothly to nothing as they go from 1.5 px to 0.5 px on screen
+  float ang = 2.0 * max(hs.x, max(hs.y, hs.z)) / max(length(aI0.xyz + uROff), 0.1);
+  local *= smoothstep(0.5 * uPix, 1.5 * uPix, ang);
+  vRel = aI0.xyz + uROff + local;
+  vN = n; vLocal = local; vHs = hs; vMat = aI1.w; vSeed = aI2;
+  gl_Position = project(vRel);
+}`;
+const mausFloorVS = `
+attribute vec2 aV;
+uniform float uEyeY;
+varying vec3 vRel, vN, vLocal, vHs;
+varying float vMat, vSeed;
+${COMMON}
+void main(){
+  vRel = vec3(aV.x * 2000.0, -uEyeY, aV.y * 2000.0);   // big floor quad around the eye
+  vN = vec3(0.0, 1.0, 0.0); vLocal = vec3(0.0); vHs = vec3(0.0); vMat = 0.0; vSeed = 0.0;
+  gl_Position = project(vRel);
+}`;
+// sky: full-screen, per-pixel view direction (same inverse camera as before)
+const mausSkyVS = `
+attribute vec2 aV;
+void main(){ gl_Position = vec4(aV, 0.0, 1.0); }`;
+const mausSkyFS = `
+precision highp float;
+uniform vec4 uVP;
+uniform float uYaw, uPitch, uRoll, uF, uAspect, uEyeShift;
+uniform float uXR; uniform mat4 uXRRot; uniform vec4 uXRP;
+const vec3 SUN = vec3(-0.4461, 0.6197, -0.6454);
+const vec3 FOGC = vec3(0.64, 0.63, 0.92);
+void main(){
+  vec2 ndc = (gl_FragCoord.xy - uVP.xy) / uVP.zw * 2.0 - 1.0;
+  vec3 d;
+  if (uXR > 0.5) {
+    vec3 v = vec3((ndc.x + uXRP.z) / uXRP.x, (ndc.y + uXRP.w) / uXRP.y, -1.0);
+    d = (uXRRot * vec4(v, 0.0)).xyz;
+  } else {
+    vec3 v = vec3((ndc.x - uEyeShift) * uAspect / uF, ndc.y / uF, -1.0);
+    float cr = cos(uRoll), sr = sin(uRoll);
+    v.xy = vec2(cr*v.x + sr*v.y, -sr*v.x + cr*v.y);
+    float cp = cos(-uPitch), sp = sin(-uPitch);
+    d = vec3(v.x, cp*v.y + sp*v.z, -sp*v.y + cp*v.z);
+  }
+  float cy = cos(uYaw), sy = sin(uYaw);
+  vec3 rd = normalize(vec3(cy*d.x + sy*d.z, d.y, -sy*d.x + cy*d.z));
+  float y = max(rd.y, 0.0);
+  vec3 c = mix(FOGC, vec3(0.34, 0.45, 0.86), pow(y, 0.5));
+  float s = max(dot(rd, SUN), 0.0);
+  c += vec3(1.0, 0.86, 0.62) * (pow(s, 400.0) * 1.2 + pow(s, 10.0) * 0.12);
+  if (s > 0.99955) c = vec3(1.7, 1.6, 1.4);
+  gl_FragColor = vec4(c, 1.0);
+}`;
+// shadow maps: the same boxes, seen from the sun (orthographic)
+const mausShadowVS = `
+attribute vec3 aS, aN;
+attribute vec4 aI0, aI1;
+attribute float aI2;
+uniform vec3 uROffS;                // R - shadow-map centre
+uniform vec3 uLR, uLU, uLF;
+uniform vec3 uHalfDepth;            // half size, depth range, texel size
+void main(){
+  vec3 hs = aI1.xyz;
+  float r = min(aI0.w, min(hs.x, min(hs.y, hs.z)));
+  // shadow LOD: parts smaller than a shadow texel shrink away (no speckle / aliasing)
+  float f = smoothstep(0.5 * uHalfDepth.z, 1.25 * uHalfDepth.z, 2.0 * max(hs.x, max(hs.y, hs.z)));
+  vec3 q = aI0.xyz + uROffS + (aS * (hs - r) + aN * r) * f;
+  // blocks fading out (290-375 m from R) also lose their shadows: flatten them toward the floor
+  if (aI2 < 9999.5) {
+    float fl = smoothstep(290.0, 375.0, length(aI0.xz));
+    q.y = (q.y - uROffS.y) * (1.0 - fl) - 0.1 * fl + uROffS.y;   // world y = q.y - uROffS.y (R.y = 0)
+  }
+  gl_Position = vec4(dot(q, uLR) / uHalfDepth.x, dot(q, uLU) / uHalfDepth.x, dot(q, uLF) / uHalfDepth.y, 1.0);
+}`;
+const mausShadowFS = `
+precision mediump float;
+void main(){ gl_FragColor = vec4(1.0); }`;
+const mausBoxP = prog(mausBoxVS, MAUS_COMMON_FS);
+const mausFloorP = prog(mausFloorVS, MAUS_COMMON_FS);
+const mausSkyP = prog(mausSkyVS, mausSkyFS);
+const mausShadowP = prog(mausShadowVS, mausShadowFS);
+const mausTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, mausTex);
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, MAUS_TAB);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+/* ---- mausoleum geometry & shadows (JS side) ---- */
+const instExt = isGL2 ? null : gl.getExtension("ANGLE_instanced_arrays");
+const canInstance = isGL2 || !!instExt;
+const attrDiv = (loc, d) => isGL2 ? gl.vertexAttribDivisor(loc, d) : instExt.vertexAttribDivisorANGLE(loc, d);
+const drawInst = (count, n) => isGL2 ? gl.drawArraysInstanced(gl.TRIANGLES, 0, count, n)
+                                     : instExt.drawArraysInstancedANGLE(gl.TRIANGLES, 0, count, n);
+// unit box mesh: per vertex corner signs (s) + bevel normal (n). S odd >= 3 gives
+// rounded bevels (the shader places each vertex at s*(half - r) + n*r); S = 1 is a plain box.
+function boxMesh(S) {
+  const v = [];
+  for (let a = 0; a < 3; a++) for (const sa of [-1, 1]) {
+    const b = (a + 1) % 3, c = (a + 2) % 3;
+    const P = (i, j) => { const q = [0, 0, 0]; q[a] = 0.5 * sa; q[b] = -0.5 + i / S; q[c] = -0.5 + j / S; return q; };
+    const V = q => {
+      const sg = q.map(Math.sign);
+      let n;
+      if (S === 1) { n = [0, 0, 0]; n[a] = sa; }
+      else { const h = 0.5 / S; n = q.map(x => x - Math.sign(x) * h); const l = Math.hypot(n[0], n[1], n[2]); n = n.map(x => x / l); }
+      return sg.concat(n);
+    };
+    for (let i = 0; i < S; i++) for (let j = 0; j < S; j++) {
+      const q0 = P(i, j), q1 = P(i + 1, j), q2 = P(i + 1, j + 1), q3 = P(i, j + 1);
+      for (const q of [q0, q1, q2, q0, q2, q3]) v.push(...V(q));
+    }
+  }
+  return new Float32Array(v);
+}
+const meshRound = boxMesh(3), meshPlain = boxMesh(1);
+const meshRoundBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, meshRoundBuf); gl.bufferData(gl.ARRAY_BUFFER, meshRound, gl.STATIC_DRAW);
+const meshPlainBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, meshPlainBuf); gl.bufferData(gl.ARRAY_BUFFER, meshPlain, gl.STATIC_DRAW);
+const floorQuadBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, floorQuadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]), gl.STATIC_DRAW);
+const instBufs = [0, 1, 2, 3].map(() => gl.createBuffer()), instN = [0, 0, 0, 0];   // near rounded / near plain / mid / far
+let mausR = null;                                       // rebuild origin (64-bit)
+const MAUS_NEAR = 80, MAUS_MID = 400;                   // rounded bevels within 80 m; shadow casters within 400 m
+const MAUS_REBUILD = 25;                                // rebuild when the eye is this far from R
+const wallLedge = H => H * 0.55;                        // height of a wall's ledge (lower section top)
+const BLOCK_GAP = 0.09;                                 // dark inset base under blocks (the floor gap)
+const TOWER_PLAT = 0.75;                                // top of the platform a tower stands on (jumpable with its rim)
+
+/* Build every visible piece as boxes from the part emitters (blockParts / towerParts /
+   wallParts, the same ones collision uses). 9 floats each: centre (relative to R),
+   bevel radius, half size, material, seed. The same parts at every distance: only the
+   mesh changes (rounded bevels near, plain boxes further) and which shadow maps they
+   are drawn into. Blocks sink into the floor between 200 and 250 m instead of popping. */
+// parts per structure / per 40 m chunk of blocks, cached as 64-bit records of 12 numbers:
+// centre, half size, bevel, material, seed, sink height, group x, group z
+const mausPartCache = new Map();
+const mausScratch = {                                  // reused build arrays (grow as needed)
+  f: [0, 1, 2, 3].map(() => new Float32Array(9 * 4096)), tid: [0, 1, 2, 3].map(() => new Int32Array(4096)),
+  out: [0, 1, 2, 3].map(() => new Float32Array(9 * 4096)), n: [0, 0, 0, 0],
+  cnt: [0, 1, 2, 3].map(() => new Int32Array(1600)), bb: [0, 1, 2, 3].map(() => new Float32Array(1600 * 6)),
+  start: new Int32Array(1600)
+};
+function cachedParts(key, make) {
+  let a = mausPartCache.get(key);
+  if (!a) {
+    const v = [];
+    make((x, y, z, hx, hy, hz, r, mat, seed, sk = 0, gx = x, gz = z) => v.push(x, y, z, hx, hy, hz, r, mat, seed || 0, sk, gx, gz));
+    a = new Float64Array(v);
+    if (mausPartCache.size > 3000) mausPartCache.delete(mausPartCache.keys().next().value);
+    mausPartCache.set(key, a);
+  }
+  return a;
+}
+// LOD, part 1 (build): a part whose largest side would stay under ~0.4 px (on a 4K screen)
+// from everywhere within MAUS_REBUILD of R is dropped here; the vertex shader shrinks
+// parts smoothly to nothing between 1.5 px and 0.5 px of the real screen, so dropping
+// them is never visible (no popping).
+const LOD_DROP = 0.00028;                               // rad: 0.4 px at 3840x2160, 75 deg
+// part 2 (culling): instances are sorted into 64 m tiles; per frame, tiles outside the
+// view cone (camera) or outside a shadow map's square (sun) aren't drawn at all.
+const TILE = 64, TILES = 40;                            // 40 x 40 tiles around R (+-1280 m)
+let mausTiles = [[], [], [], []], mausBuildId = 0;       // per bucket: [{ o, n, x, y, z, r }] (x/z relative to R)
+function mausBuild(ex, ez) {
+  const N2 = MAUS_NEAR * MAUS_NEAR, M2 = MAUS_MID * MAUS_MID, NT = TILES * TILES;
+  const sc = mausScratch;
+  for (let k = 0; k < 4; k++) { sc.n[k] = 0; sc.bb[k].fill(0); sc.cnt[k].fill(0); }
+  const put = (a, isBlocks) => {
+    for (let i = 0; i < a.length; i += 12) {
+      let y = a[i + 1];
+      if (isBlocks) {                                   // blocks: near detail / far box / gone
+        const gx = a[i + 10] - ex, gz = a[i + 11] - ez, d2 = gx * gx + gz * gz, sk = a[i + 9];
+        if (d2 > 160000) continue;                      // gone past 400 m (faded out by then)
+        if (sk === 1 ? d2 < 62500 : sk === 2 ? d2 >= 62500 : false) continue;   // near detail / far single box
+      }
+      const dx = a[i] - ex, dz = a[i + 2] - ez, hx = a[i + 3], hy = a[i + 4], hz = a[i + 5];   // 64-bit, then small
+      const mh = hx > hy ? (hx > hz ? hx : hz) : (hy > hz ? hy : hz);
+      const dmin = Math.sqrt(dx * dx + dz * dz) - MAUS_REBUILD - mh;
+      if (dmin > 0 && 2 * mh < LOD_DROP * dmin) continue;   // always sub-pixel from here: drop
+      const qx = Math.max(0, Math.abs(dx) - hx), qz = Math.max(0, Math.abs(dz) - hz), dd2 = qx * qx + qz * qz;
+      const k = dd2 >= M2 ? 3 : dd2 >= N2 ? 2 : a[i + 6] >= 0.02 ? 0 : 1;
+      let n = sc.n[k];
+      if (n * 9 + 9 > sc.f[k].length) {
+        const g = new Float32Array(sc.f[k].length * 2); g.set(sc.f[k]); sc.f[k] = g;
+        const t = new Int32Array(sc.tid[k].length * 2); t.set(sc.tid[k]); sc.tid[k] = t;
+      }
+      const f = sc.f[k], o = n * 9;
+      f[o] = dx; f[o + 1] = y; f[o + 2] = dz; f[o + 3] = k === 0 ? a[i + 6] : 0; f[o + 4] = hx; f[o + 5] = hy;
+      f[o + 6] = hz; f[o + 7] = a[i + 7]; f[o + 8] = a[i + 8];
+      const tx = Math.min(TILES - 1, Math.max(0, Math.floor(dx / TILE) + TILES / 2));
+      const tz = Math.min(TILES - 1, Math.max(0, Math.floor(dz / TILE) + TILES / 2)), t = tx * TILES + tz;
+      sc.tid[k][n] = t; sc.n[k] = n + 1;
+      const bb = sc.bb[k], b6 = t * 6;                  // tile bounds (grown by every part in it)
+      if (sc.cnt[k][t]++ === 0) { bb[b6] = dx - hx; bb[b6 + 1] = dx + hx; bb[b6 + 2] = y - hy; bb[b6 + 3] = y + hy; bb[b6 + 4] = dz - hz; bb[b6 + 5] = dz + hz; }
+      else {
+        if (dx - hx < bb[b6]) bb[b6] = dx - hx; if (dx + hx > bb[b6 + 1]) bb[b6 + 1] = dx + hx;
+        if (y - hy < bb[b6 + 2]) bb[b6 + 2] = y - hy; if (y + hy > bb[b6 + 3]) bb[b6 + 3] = y + hy;
+        if (dz - hz < bb[b6 + 4]) bb[b6 + 4] = dz - hz; if (dz + hz > bb[b6 + 5]) bb[b6 + 5] = dz + hz;
+      }
+    }
+  };
+  { const C = 40, R = 400;                              // blocks + pit rims, in 40 m chunks of 2.5 m cells
+    for (let kx = Math.floor((ex - R) / C); kx <= Math.floor((ex + R) / C); kx++)
+      for (let kz = Math.floor((ez - R) / C); kz <= Math.floor((ez + R) / C); kz++) {
+        if (Math.hypot(Math.max(0, Math.abs((kx + 0.5) * C - ex) - C / 2), Math.max(0, Math.abs((kz + 0.5) * C - ez) - C / 2)) > R) continue;
+        put(cachedParts("b" + kx + "," + kz, e => {
+          for (let cx = kx * 16; cx < kx * 16 + 16; cx++) for (let cz = kz * 16; cz < kz * 16 + 16; cz++) {
+            const b = mausBlockAt(cx, cz);
+            if (!b) continue;
+            // full detail within 250 m (flag 2); beyond, one box per block (flag 1): the dropped
+            // pieces (cap groove, tabs, base) are well under a pixel that far away
+            blockParts(b, (x, y, z, hx, hy, hz, r, mat, seed) => e(x, y, z, hx, hy, hz, r, mat, seed, 2, b.X, b.Z));
+            e(b.X, b.top * 0.5, b.Z, b.hw, b.top * 0.5, b.hd, 0, 1, b.seed, 1, b.X, b.Z);
+          }
+          for (let pcx = kx * 8; pcx < kx * 8 + 8; pcx++) for (let pcz = kz * 8; pcz < kz * 8 + 8; pcz++) {   // pit rims
+            const P = mausHole(pcx, pcz);
+            if (P) pitParts(P, (x, y, z, hx, hy, hz, r, mat, seed) => e(x, y, z, hx, hy, hz, r, mat, seed, 0, (pcx + 0.5) * 5, (pcz + 0.5) * 5));
+          }
+        }), true);
+      } }
+  { const c = MAUS.pillar.cell, R = 600;                // towers + buildings (40 m cells)
+    for (let cx = Math.floor((ex - R) / c); cx <= Math.floor((ex + R) / c); cx++)
+      for (let cz = Math.floor((ez - R) / c); cz <= Math.floor((ez + R) / c); cz++) {
+        const T = mausTower(cx, cz);
+        if (T && Math.hypot(T.px - ex, T.pz - ez) <= R) put(cachedParts("t" + cx + "," + cz, e => towerParts(T, cx, cz, (x, y, z, hx, hy, hz, r, m, s) => e(x, y, z, hx, hy, hz, r, m, (s || 0) + 10000))), false);
+      } }
+  { const c = MAUS.wall.cell, R = 800;                  // walls (200 m cells)
+    for (let cx = Math.floor((ex - R) / c); cx <= Math.floor((ex + R) / c); cx++)
+      for (let cz = Math.floor((ez - R) / c); cz <= Math.floor((ez + R) / c); cz++) {
+        const W = mausWall(cx, cz);
+        if (!W) continue;
+        const d = Math.hypot(Math.max(0, Math.abs(W.wx - ex) - W.hx), Math.max(0, Math.abs(W.wz - ez) - W.hz));
+        if (d <= R) put(cachedParts("w" + cx + "," + cz, e => wallParts(W, (x, y, z, hx, hy, hz, r, m, s) => e(x, y, z, hx, hy, hz, r, m, (s || 0) + 20000))), false);
+      } }
+  for (let k = 0; k < 4; k++) {                          // counting sort by tile -> contiguous ranges
+    const n = sc.n[k], cnt = sc.cnt[k], start = sc.start, bb = sc.bb[k], tiles = [];
+    if (sc.out[k].length < n * 9) sc.out[k] = new Float32Array(Math.max(n * 9, sc.out[k].length * 2));
+    let o = 0;
+    for (let t = 0; t < NT; t++) {
+      start[t] = o;
+      if (cnt[t]) {
+        const b6 = t * 6, x = (bb[b6] + bb[b6 + 1]) / 2, y = (bb[b6 + 2] + bb[b6 + 3]) / 2, z = (bb[b6 + 4] + bb[b6 + 5]) / 2;
+        tiles.push({ o, n: cnt[t], x, y, z, r: Math.hypot(bb[b6 + 1] - x, bb[b6 + 3] - y, bb[b6 + 5] - z) });
+      }
+      o += cnt[t];
+    }
+    const src = sc.f[k], dst = sc.out[k], tid = sc.tid[k];
+    for (let i = 0; i < n; i++) { const p = start[tid[i]]++ * 9, s = i * 9; for (let q = 0; q < 9; q++) dst[p + q] = src[s + q]; }
+    gl.bindBuffer(gl.ARRAY_BUFFER, instBufs[k]); gl.bufferData(gl.ARRAY_BUFFER, dst.subarray(0, n * 9), gl.DYNAMIC_DRAW);
+    instN[k] = n; mausTiles[k] = tiles;
+  }
+  mausBuildId++;
+  mausR = { x: ex, z: ez };
+}
+// draw a list of instanced boxes with program P
+// visible parts of bucket k: merged [offset, count, ...] of the tiles that pass `test`
+function tileRanges(k, test) {
+  const out = [];
+  for (const t of mausTiles[k]) {
+    if (!test(t)) continue;
+    const L = out.length;
+    if (L && out[L - 2] + out[L - 1] === t.o) out[L - 1] += t.n; else out.push(t.o, t.n);
+  }
+  return out;
+}
+function drawBoxes(P, meshBuf, meshVerts, instBuf, n, ranges) {
+  if (!n || !canInstance || (ranges && !ranges.length)) return;
+  const aS = gl.getAttribLocation(P.p, "aS"), aN = gl.getAttribLocation(P.p, "aN");
+  const a0 = gl.getAttribLocation(P.p, "aI0"), a1 = gl.getAttribLocation(P.p, "aI1"), a2 = gl.getAttribLocation(P.p, "aI2");
+  gl.bindBuffer(gl.ARRAY_BUFFER, meshBuf);
+  gl.enableVertexAttribArray(aS); gl.vertexAttribPointer(aS, 3, gl.FLOAT, false, 24, 0);
+  gl.enableVertexAttribArray(aN); gl.vertexAttribPointer(aN, 3, gl.FLOAT, false, 24, 12);
+  gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+  const inst = [[a0, 4, 0], [a1, 4, 16], [a2, 1, 32]].filter(x => x[0] >= 0);
+  for (const [l] of inst) { gl.enableVertexAttribArray(l); attrDiv(l, 1); }
+  const R = ranges || [0, n];
+  for (let i = 0; i < R.length; i += 2) {              // one draw per run of visible tiles
+    for (const [l, sz, off] of inst) gl.vertexAttribPointer(l, sz, gl.FLOAT, false, 36, off + R[i] * 36);
+    drawInst(meshVerts, R[i + 1]);
+  }
+  for (const [l] of inst) { attrDiv(l, 0); gl.disableVertexAttribArray(l); }
+  gl.disableVertexAttribArray(aS); gl.disableVertexAttribArray(aN);
+}
+// sun shadow maps (WebGL2): near 65 m wide, far 520 m wide; the far texel is
+// exactly 8 near texels, so snapping the centre to the far grid keeps both steady
+// three cascades: 65 m, 520 m and 2080 m wide. Each map is re-rendered only when its
+// centre moves by one snap step (whole texels, so the shadows never swim) or after a
+// rebuild; at most one of the two big maps per frame (a stale map is still correct: its
+// own centre is kept and handed to the shader).
+const SH_RES = 2048, SH_HALF = [32.5, 260, 1040], SH_DEPTH = [600, 600, 1500], SH_STEP = [4, 16, 32];   // step in texels
+const SH_NOFF = [0.03, 0.2, 0.8], SH_BIAS = [0.0002, 0.0006, 0.0005];
+const LF = [0.4461, -0.6197, 0.6454];                 // light travel direction (= -SUN)
+const LR = (() => { const r = [LF[2], 0, -LF[0]]; const l = Math.hypot(r[0], r[2]); return [r[0] / l, 0, r[2] / l]; })();
+const LU = [LR[1] * LF[2] - LR[2] * LF[1], LR[2] * LF[0] - LR[0] * LF[2], LR[0] * LF[1] - LR[1] * LF[0]];
+const shTex = [], shFB = [];
+let shadowOK = false, shS = [null, null, null];       // shS[k] = { x, y, z, key, build }: map k's centre (64-bit)
+if (isGL2 && canInstance) {
+  shadowOK = true;
+  for (let k = 0; k < 3; k++) {
+    const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, SH_RES, SH_RES, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, t, 0);
+    gl.drawBuffers([gl.NONE]); gl.readBuffer(gl.NONE);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) shadowOK = false;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    shTex.push(t); shFB.push(f);
+  }
+}
+// once per frame in the mausoleum: rebuild the box lists when you've moved, then render the shadow maps
+function mausPrepare(cx, cy, cz) {
+  if (!mausR || Math.hypot(cx - mausR.x, cz - mausR.z) > MAUS_REBUILD) mausBuild(cx, cz);
+  if (!shadowOK) return;
+  const dot = (a, b0, b1, b2) => a[0] * b0 + a[1] * b1 + a[2] * b2;
+  let bigDone = false;
+  for (let k = 0; k < 3; k++) {
+    // snapped centre in light space (64-bit): across in steps of whole texels, along the
+    // light in 50 m steps
+    const texel = 2 * SH_HALF[k] / SH_RES, step = texel * SH_STEP[k];
+    const a = Math.floor(dot(LR, cx, cy, cz) / step + 0.5) * step, b = Math.floor(dot(LU, cx, cy, cz) / step + 0.5) * step;
+    const c = Math.floor(dot(LF, cx, cy, cz) / 50 + 0.5) * 50, key = a + "," + b + "," + c;
+    const old = shS[k];
+    if (old && old.key === key && old.build === mausBuildId) continue;   // still valid
+    if (k > 0 && old && bigDone) continue;                              // one big map per frame
+    if (k > 0) bigDone = true;
+    const S = { x: LR[0] * a + LU[0] * b + LF[0] * c, y: LR[1] * a + LU[1] * b + LF[1] * c,
+                z: LR[2] * a + LU[2] * b + LF[2] * c, key, build: mausBuildId };
+    renderShadow(k, S);
+    shS[k] = S;
+  }
+  gl.disable(gl.DEPTH_TEST);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+function renderShadow(k, S) {
+  gl.disable(gl.BLEND); gl.disable(gl.SCISSOR_TEST);
+  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LESS); gl.depthMask(true);
+  gl.useProgram(mausShadowP.p);
+  const u = mausShadowP.u, rx = mausR.x - S.x, ry = -S.y, rz = mausR.z - S.z, H = SH_HALF[k];   // R - S (64-bit)
+  gl.uniform3f(u.uROffS, rx, ry, rz);
+  gl.uniform3f(u.uLR, LR[0], LR[1], LR[2]); gl.uniform3f(u.uLU, LU[0], LU[1], LU[2]); gl.uniform3f(u.uLF, LF[0], LF[1], LF[2]);
+  gl.uniform3f(u.uHalfDepth, H, SH_DEPTH[k], 2 * H / SH_RES);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, shFB[k]);
+  gl.viewport(0, 0, SH_RES, SH_RES);
+  gl.clearDepth(1); gl.clear(gl.DEPTH_BUFFER_BIT);
+  // only tiles whose sphere touches the map's square (seen along the light)
+  const test = t => {
+    const px = t.x + rx, py = t.y + ry, pz = t.z + rz;
+    return Math.abs(LR[0] * px + LR[1] * py + LR[2] * pz) < H + t.r && Math.abs(LU[0] * px + LU[1] * py + LU[2] * pz) < H + t.r;
+  };
+  drawBoxes(mausShadowP, meshRoundBuf, meshRound.length / 6, instBufs[0], instN[0], tileRanges(0, test));
+  for (let b = 1; b < 4; b++) drawBoxes(mausShadowP, meshPlainBuf, meshPlain.length / 6, instBufs[b], instN[b], tileRanges(b, test));
+}
+
+/* ================= high-precision color → 8-bit screen (post pass) =================
+   Goal: better color quality, NOT a visible dither effect.
+   - The scene is rendered into a 16-bit float buffer (RGBA16F: 10-bit
+     mantissa), multisampled for antialiasing, so all the faint additive
+     glows, fog and edge gradients keep ~10 bits per channel instead of
+     being rounded to 8 bits at every step.
+   - The post pass adds the screen effects (dark edges, scanlines, blue
+     tired vignette) in full float precision.
+   - Then each channel is rounded to 10-bit precision (quarter steps of an
+     8-bit value) and written to the 8-bit screen with ordered dithering:
+     a fixed 2x2 Bayer pattern decides which pixels of the 4 get +1.
+     Every pixel is either the 8-bit value just below or just above the
+     true color (only ever one step up), so the 2x2 average equals the
+     10-bit color. No random noise; smooth gradients lose their banding.
+   Fallbacks: WebGL2 without float buffers → 8-bit MSAA buffer; WebGL1 →
+   the antialiased canvas is copied as-is (8-bit input, dither changes nothing). */
+const postVS = `
+attribute vec2 aV;
+void main(){ gl_Position = vec4(aV, 0.0, 1.0); }`;
+const postFS = `
+precision highp float;
+uniform sampler2D uScene, uScene2;
+uniform vec2 uRes;       // drawing buffer size in px
+uniform float uDpr, uTired, uFade;   // uFade: 0 normal .. 1 black (area transition)
+uniform float uWorldFX;               // 1 = dark edges + scanlines (matrix), 0 = off (mausoleum)
+uniform float uMode;     // 0 normal, 1 anaglyph, 2 SBS warped, 3 SBS no-warp, 4 SBS stereo (rounded)
+uniform vec4 uRectL, uRectR;   // eye areas in px (x, y, w, h)
+void main(){
+  vec2 px = gl_FragCoord.xy;
+  vec2 uv = px / uRes;
+  vec3 c = texture2D(uScene, uv).rgb;
+  if (uMode > 0.5 && uMode < 1.5) {              // red/cyan anaglyph (half-colour):
+    vec3 r = texture2D(uScene2, uv).rgb;         // left eye as grey in red, right eye in green+blue
+    c = vec3(dot(c, vec3(0.299, 0.587, 0.114)), r.g, r.b);
+  }
+  // which eye area this pixel is in, and the position inside it
+  vec4 R = (uMode > 1.5 && px.x >= uRes.x * 0.5) ? uRectR : uRectL;
+  vec2 lp = (px - R.xy) / R.zw;
+  float inside = 1.0;
+  if (uMode > 3.5) {                             // rounded squares with black around them
+    vec2 h = R.zw * 0.5;
+    float rad = 0.12 * min(R.z, R.w);
+    vec2 e = abs(px - (R.xy + h)) - (h - rad);
+    float sd = length(max(e, 0.0)) + min(max(e.x, e.y), 0.0) - rad;
+    inside = clamp(0.5 - sd, 0.0, 1.0);
+  }
+  // ---- screen effects (per eye area) ----
+  vec2 q = (lp - 0.5) * 2.0;
+  float d = length(q) * 0.70710678;              // ellipse through the corners = 1
+  c *= 1.0 - 0.75 * smoothstep(0.35, 1.05, d) * uWorldFX;       // dark edges (smooth: no visible ring)
+  if (uWorldFX > 0.5 && mod(floor(px.y / uDpr), 3.0) < 1.0) c *= 0.82;   // scanlines
+  // blue tired vignette — smooth curves only (the old straight-line colour stops left a visible ring)
+  float ta = 0.8 * smoothstep(0.28, 1.08, d);
+  vec3 tc = mix(vec3(10.0, 40.0, 190.0), vec3(20.0, 70.0, 255.0), smoothstep(0.5, 1.05, d)) / 255.0;
+  vec4 t = vec4(tc * ta, ta) * uTired;
+  c = clamp(c * (1.0 - t.a) + t.rgb, 0.0, 1.0) * inside * (1.0 - uFade);
+  // ---- 10-bit → 8-bit, ordered (2x2 Bayer), at most +1 per channel ----
+  vec3 v = floor(c * 1020.0 + 0.5);              // 10-bit value: quarter steps of 0..255
+  vec3 base = floor(v / 4.0);                    // 8-bit value just below
+  vec3 frac4 = v - base * 4.0;                   // 0..3 quarters above it
+  vec2 p2 = mod(floor(px), 2.0);
+  float th = p2.x * 2.0 + p2.y * 3.0 - 4.0 * p2.x * p2.y; // Bayer 2x2: 0 2 / 3 1
+  vec3 outv = min(base + step(th + 0.5, frac4), 255.0);
+  gl_FragColor = vec4(outv / 255.0, 1.0);
+}`;
+const postP = prog(postVS, postFS);
+const postBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, postBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+function newSceneTex() {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+const sceneTex = [newSceneTex(), newSceneTex()];   // [0] = main / left eye, [1] = right eye (anaglyph)
+const resFB = [null, null];
+let sceneW = 0, sceneH = 0;
+// WebGL2 targets: multisampled render buffer → resolved textures
+const hiPrec = isGL2 && !!gl.getExtension("EXT_color_buffer_float");
+let msFB = null, msRB = null, msDepth = null, colorMode = "8-bit (WebGL1)";
+function attachTex(i, fmt, type, w, h) {
+  gl.bindTexture(gl.TEXTURE_2D, sceneTex[i]);
+  gl.texImage2D(gl.TEXTURE_2D, 0, fmt, w, h, 0, gl.RGBA, type, null);
+  if (!resFB[i]) resFB[i] = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, resFB[i]);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneTex[i], 0);
+  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return ok;
+}
+function makeTargets(w, h) {
+  if (!isGL2) {
+    for (const t of sceneTex) { gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, w, h, 0, gl.RGB, gl.UNSIGNED_BYTE, null); }
+    return;
+  }
+  const tries = hiPrec ? [[gl.RGBA16F, gl.HALF_FLOAT, "16-bit float"], [gl.RGBA8, gl.UNSIGNED_BYTE, "8-bit"]]
+                       : [[gl.RGBA8, gl.UNSIGNED_BYTE, "8-bit"]];
+  const maxS = Math.min(4, gl.getParameter(gl.MAX_SAMPLES) || 0);
+  for (const [fmt, type, name] of tries) for (const samples of [maxS, 0]) {
+    const okRes = attachTex(0, fmt, type, w, h) && attachTex(1, fmt, type, w, h);
+    if (!msRB) { msRB = gl.createRenderbuffer(); msFB = gl.createFramebuffer(); }
+    gl.bindRenderbuffer(gl.RENDERBUFFER, msRB);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, fmt, w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, msFB);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, msRB);
+    if (!msDepth) msDepth = gl.createRenderbuffer();                 // depth, for the mausoleum's 3D geometry
+    gl.bindRenderbuffer(gl.RENDERBUFFER, msDepth);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.DEPTH_COMPONENT24, w, h);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, msDepth);
+    const okMs = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (okRes && okMs) { colorMode = name + (samples ? " MSAA x" + samples : ""); return; }
+  }
+  msFB = null;                               // nothing worked: draw straight to the canvas
+  colorMode = "8-bit (canvas)";
+  for (const t of sceneTex) { gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null); }
+}
+// where the scene gets drawn (our float buffer, or the canvas as fallback)
+function bindSceneTarget() { gl.bindFramebuffer(gl.FRAMEBUFFER, isGL2 && msFB ? msFB : null); }
+function beginScene() {
+  const w = canvas.width, h = canvas.height;
+  if (w !== sceneW || h !== sceneH) { sceneW = w; sceneH = h; makeTargets(w, h); }
+  bindSceneTarget();
+}
+function clearScene() {
+  gl.disable(gl.SCISSOR_TEST);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0, 0.008, 0.004, 1); gl.clearDepth(1);
+  gl.depthMask(true); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+}
+// copy what was drawn so far into scene texture i
+function captureScene(i) {
+  const w = canvas.width, h = canvas.height;
+  gl.disable(gl.SCISSOR_TEST);
+  if (isGL2 && msFB) {                       // resolve MSAA into the texture
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, msFB);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, resFB[i]);
+    gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  } else {                                   // copy the finished canvas image
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneTex[i]);
+    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
+  }
+}
+// effects + dither to the canvas; mode/rects describe the 3D layout
+function postPass(mode, rectL, rectR) {
+  const w = canvas.width, h = canvas.height;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, w, h);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.disable(gl.BLEND);
+  gl.useProgram(postP.p);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, sceneTex[1]);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sceneTex[0]);
+  gl.uniform1i(postP.u.uScene, 0);
+  gl.uniform1i(postP.u.uScene2, 1);
+  gl.uniform2f(postP.u.uRes, w, h);
+  gl.uniform1f(postP.u.uDpr, w / Math.max(1, innerWidth));
+  gl.uniform1f(postP.u.uTired, tiredAmt);
+  gl.uniform1f(postP.u.uFade, fadeAmt);
+  gl.uniform1f(postP.u.uWorldFX, player.area === "matrix" ? 1 : 0);
+  gl.uniform1f(postP.u.uMode, mode);
+  gl.uniform4f(postP.u.uRectL, rectL[0], rectL[1], rectL[2], rectL[3]);
+  gl.uniform4f(postP.u.uRectR, rectR[0], rectR[1], rectR[2], rectR[3]);
+  gl.bindBuffer(gl.ARRAY_BUFFER, postBuf);
+  const loc = gl.getAttribLocation(postP.p, "aV");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.disableVertexAttribArray(loc);
+}
+
+/* ================= input ================= */
+const keys = {};
+let spaceHit = false;                      // a fresh Space press (not held / repeat), used for climbing
+addEventListener("keydown", e => {
+  if (e.code === "F11") {                  // real fullscreen of the page (Fullscreen API)
+    e.preventDefault();
+    if (!e.repeat) toggleFullscreen();
+    return;
+  }
+  if (e.code === "Tab") {                  // Tab opens / closes the menu
+    e.preventDefault();
+    if (!e.repeat) (menuOpen ? closeMenu() : tryOpenMenu());
+    return;
+  }
+  if (menuOpen) return;                    // game is frozen while the menu is open
+  typed(e.key);                            // secret words (1337dbg)
+  if (e.code === "KeyW" && !e.repeat) tryFallThrough(); else if (!e.repeat) body.downT = 0;
+  keys[e.code] = true;
+  if (e.code === "Space" && !e.repeat) spaceHit = true;
+  if (e.code.startsWith("Digit") && e.code !== "Digit0") setSlot(+e.code.slice(5) - 1);
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) e.preventDefault();
+});
+addEventListener("keyup", e => { keys[e.code] = false; });
+addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
+addEventListener("wheel", e => { if (!menuOpen) setSlot(player.slot + (e.deltaY > 0 ? 1 : -1)); }, { passive: true });
+
+const SENS = 0.0023;            // base mouse sensitivity; the menu slider scales it (settings.sens)
+const PITCH_MAX = Math.PI / 2;   // look straight up / straight down (90°)
+function look(dx, dy) {
+  if (menuOpen) return;
+  const k = SENS * settings.sens;
+  player.yaw -= dx * k;
+  player.pitch = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, player.pitch - dy * k));
+}
+let dragging = false, lx = 0, ly = 0;
+canvas.addEventListener("pointerdown", e => {
+  if (canvas.requestPointerLock && e.pointerType === "mouse") { try { canvas.requestPointerLock(); } catch (_) {} }
+  dragging = true; lx = e.clientX; ly = e.clientY;
+});
+addEventListener("pointerup", () => dragging = false);
+let lastMove = 0;                           // size of the last normal mouse move (px)
+addEventListener("pointermove", e => {
+  if (document.pointerLockElement === canvas) {
+    // browsers sometimes report one huge bogus jump in pointer lock (the camera "flicks"):
+    // a move far bigger than the ones just before it is dropped
+    const m = Math.max(Math.abs(e.movementX), Math.abs(e.movementY));
+    if (m > 200 && m > lastMove * 5 + 40) return;
+    lastMove = m;
+    look(e.movementX, e.movementY);
+  }
+  else if (dragging) { look(e.clientX - lx, e.clientY - ly); lx = e.clientX; ly = e.clientY; }
+});
+addEventListener("contextmenu", e => e.preventDefault());
+
+/* ================= menu (Tab) =================
+   Opening it freezes the game: the current frame is saved as the small
+   compressed snapshot (same as the save thumbnail) and shown pixelated as
+   the background, and nothing moves or renders until it's closed. */
+const menuEl = document.getElementById("menu");
+const m3d = document.getElementById("m3d"), minv = document.getElementById("minv");
+const msens = document.getElementById("msens"), msensv = document.getElementById("msensv");
+const mdata = document.getElementById("mdata");
+let menuOpen = false;
+function storageStatus() {
+  const k = "mx3d_test", v = String(Math.random());
+  if (writeLS(k, v) && readLS(k) === v) { try { localStorage.removeItem(k); } catch (e) {} return "OK"; }
+  if (navigator.cookieEnabled && location.protocol !== "file:") return "cookies only";
+  return "UNAVAILABLE";
+}
+function openMenu() {
+  menuOpen = true;
+  for (const k in keys) keys[k] = false;
+  dragging = false;
+  if (document.pointerLockElement && document.exitPointerLock) document.exitPointerLock();
+  const th = makeThumb();                  // compressed, frozen background
+  if (th) { menuEl.style.backgroundImage = "url(" + th + ")"; writeLS(LS_THUMB, th); }
+  mdata.textContent = "Data storage: " + storageStatus();
+  menuEl.classList.add("on");
+}
+/* pause spam guard: opening the menu 3 times within 4 s of GAME time
+   (time actually played — it doesn't pass while paused) locks it until
+   you've played 2 more seconds. Closing is always allowed. */
+const PAUSE_GUARD = { window: 4, maxOpens: 3, cooldown: 2 };
+let pauseOpens = [], pauseLockUntil = 0;
+function tryOpenMenu() {
+  if (gameTime < pauseLockUntil) return;
+  pauseOpens = pauseOpens.filter(t => gameTime - t < PAUSE_GUARD.window);
+  pauseOpens.push(gameTime);
+  if (pauseOpens.length >= PAUSE_GUARD.maxOpens) { pauseLockUntil = gameTime + PAUSE_GUARD.cooldown; pauseOpens = []; }
+  openMenu();
+}
+// F11: make the page itself fullscreen (hides browser UI, keeps pointer lock working)
+function toggleFullscreen() {
+  const d = document, el = d.documentElement;
+  try {
+    let r;
+    if (d.fullscreenElement || d.webkitFullscreenElement) r = (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+    else r = (el.requestFullscreen || el.webkitRequestFullscreen).call(el, { navigationUI: "hide" });
+    if (r && r.catch) r.catch(() => {});
+  } catch (e) {}
+}
+document.addEventListener("fullscreenchange", () => resize());
+function closeMenu() {
+  menuOpen = false;
+  menuEl.classList.remove("on");
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+}
+// controls ← settings
+m3d.value = settings.stereo;
+document.body.dataset.stereo = settings.stereo;
+if (m3d.value !== settings.stereo) { settings.stereo = "off"; m3d.value = "off"; }
+minv.checked = !!settings.invert;
+function showSens() { msens.value = Math.round(settings.sens * 100); msensv.textContent = msens.value + "%"; }
+showSens();
+m3d.addEventListener("change", () => {
+  settings.stereo = m3d.value; saveSettings();
+  document.body.dataset.stereo = settings.stereo;
+  if (settings.stereo === "xr") { closeMenu(); startXR(); }
+});
+minv.addEventListener("change", () => { settings.invert = minv.checked; saveSettings(); });
+msens.addEventListener("input", () => {
+  settings.sens = Math.max(0.1, Math.min(3, +msens.value / 100)); showSens(); saveSettings();
+});
+// keep arrow keys / space inside the menu from reaching the page
+menuEl.addEventListener("keydown", e => { if (e.code !== "Tab") e.stopPropagation(); });
+
+/* ---- "3D Screen": WebXR immersive display (headset or 3D monitor) ----
+   The option only appears if the browser reports one is available. */
+let xrSession = null, xrRef = null;
+if (navigator.xr && navigator.xr.isSessionSupported) {
+  navigator.xr.isSessionSupported("immersive-vr").then(ok => {
+    if (!ok || dead) return;
+    const o = document.createElement("option"); o.value = "xr"; o.textContent = "3D Screen";
+    m3d.appendChild(o);
+  }).catch(() => {});
+}
+function xrFallback() {
+  settings.stereo = "off"; m3d.value = "off"; saveSettings();
+  document.body.dataset.stereo = "off";
+}
+async function startXR() {
+  if (xrSession || !navigator.xr) return;
+  try {
+    if (gl.makeXRCompatible) await gl.makeXRCompatible();
+    const session = await navigator.xr.requestSession("immersive-vr");
+    xrSession = session;
+    session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+    xrRef = await session.requestReferenceSpace("local");
+    session.addEventListener("end", () => {
+      xrSession = null; xrRef = null;
+      if (settings.stereo === "xr") xrFallback();
+      if (!dead) { last = performance.now(); requestAnimationFrame(frame); }
+    });
+    session.requestAnimationFrame(frame);
+  } catch (e) {
+    xrSession = null; xrFallback();
+  }
+}
+
+/* ================= debug menu (type 1337dbg) =================
+   Not frozen like the Tab menu: the game keeps running. Press Esc to free
+   the mouse if you need to click it. */
+const dbgEl = document.getElementById("dbg");
+const dfly = document.getElementById("dfly"), dstam = document.getElementById("dstam");
+const dtime = document.getElementById("dtime"), dtimev = document.getElementById("dtimev");
+const dinfo = document.getElementById("dinfo");
+let dbgTime = 1, dbgInfStam = false, typedBuf = "", dbgInfoAt = 0;
+function typed(key) {
+  if (!key || key.length !== 1) return;
+  typedBuf = (typedBuf + key.toLowerCase()).slice(-7);
+  if (typedBuf === "1337dbg") { typedBuf = ""; dbgEl.classList.toggle("on"); }
+}
+dfly.addEventListener("change", () => {
+  body.fly = dfly.checked;
+  if (!body.fly) player.vy = 0;              // gravity takes over again
+  dfly.blur();
+});
+dstam.addEventListener("change", () => { dbgInfStam = dstam.checked; dstam.blur(); });
+function showTime() { dtimev.textContent = dbgTime.toFixed(2) + "×"; }
+dtime.addEventListener("input", () => { dbgTime = Math.pow(10, +dtime.value); showTime(); });   // 0.1× .. 10×
+dtime.addEventListener("change", () => dtime.blur());
+document.getElementById("dtime1").addEventListener("click", e => { dtime.value = 0; dbgTime = 1; showTime(); e.target.blur(); });
+dbgEl.querySelectorAll("button[data-area]").forEach(b => b.addEventListener("click", () => {
+  setArea(b.dataset.area, "teleport"); b.blur();
+}));
+function dbgInfo(now) {
+  if (now - dbgInfoAt < 200) return;
+  dbgInfoAt = now;
+  dinfo.textContent =
+    "area   " + player.area + (body.falling ? "  (falling)" : "") + "\n" +
+    "x      " + player.x + "\n" +
+    "y      " + player.y.toFixed(3) + "\n" +
+    "z      " + player.z + "\n" +
+    "dist   " + Math.hypot(player.x, player.z).toExponential(3) + " m\n" +
+    "look   yaw " + (player.yaw * 180 / Math.PI).toFixed(1) + "°  pitch " + (player.pitch * 180 / Math.PI).toFixed(1) + "°\n" +
+    "speed  " + Math.hypot(body.vx, body.vz).toFixed(2) + " m/s\n" +
+    "stam   " + stam.v.toFixed(2) + (stam.out ? " (out)" : "") + "\n" +
+    "down   " + body.downT.toFixed(1) + " s\n" +
+    "fps    " + fpsAvg.toFixed(0) + "   " + colorMode;
+}
+
+/* ================= loop ================= */
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  canvas.width = Math.floor(innerWidth * dpr); canvas.height = Math.floor(innerHeight * dpr);
+}
+addEventListener("resize", resize); resize();
+
+const EYE = 1.7;
+let last = performance.now();
+let gameTime = 0;           // seconds of game time (debug time multiplier speeds it up / slows it down)
+// body feel — velocities are 64-bit like positions; bob/lean are render-only (never saved)
+const body = {
+  vx: 0, vz: 0,              // horizontal velocity (eased)
+  turnV: 0, pitchV: 0,       // arrow-key look speed (eased)
+  stepPhase: 0, stepIdx: 0,  // counts footsteps; bob is lowest at each whole number
+  bobAmt: 0,                 // 0 standing .. 1 full stride
+  landOff: 0, landVel: 0,    // spring for the camera dip after landing
+  air: false, fov: 75, roll: 0,
+  breathPh: 0,               // breathing phase (accumulated, see below)
+  bobY: 0, bobSide: 0, breath: 0,
+  downT: 0,                  // seconds spent looking straight down (secret fall)
+  falling: false, fallT: 0,  // falling through the matrix floor
+  slowFall: false,           // fall at walking speed (fall-through + drop into the new place)
+  fly: false,                // debug no-clip flying
+  baseY: 0,                  // height of the ground last stood on (climb heights count from here)
+  climb: null,               // climbing onto a ledge: { T, lx, lz, m, sp, x0, z0, t, i, segs }
+  climbPitch: 0,             // render-only view tilt while climbing
+  stepOff: 0,                // render-only: camera lag when stepping up (height only, no tilt)
+  coyote: 0, jumpBuf: 0      // jump grace after walking off an edge / a Space press just before landing
+};
+const WALK = 4.6, SPRINT = 8.5;   // m/s (was 7 / 16 — felt too fast)
+// footstep cadence measured in real life: 133 steps/min walking, 217 running.
+// Stride length is solved from that, so it stays right even if WALK/SPRINT change.
+const STEP_BPM_WALK = 133, STEP_BPM_RUN = 217;
+const STRIDE_W = WALK / (STEP_BPM_WALK / 60), STRIDE_R = SPRINT / (STEP_BPM_RUN / 60);
+const strideAt = sp => STRIDE_W + (STRIDE_R - STRIDE_W) * (sp - WALK) / (SPRINT - WALK);
+/* hidden stamina: no bar, you only feel it. Sprinting drains it, jumping
+   costs a bit, it refills after a short rest (faster when standing still).
+   Low stamina smoothly fades in a blue vignette (no pulsing);
+   at zero you can't sprint until it's back to 35%, and jumps are weaker. */
+const STAM = { drain: 1 / 7, jump: 0.07, regenDelay: 0.9, regenWalk: 1 / 8, regenIdle: 1 / 4.5, recover: 0.35 };
+const stam = { v: 1, rest: 0, out: false, fx: 0 };
+let tiredAmt = 0;           // blue low-stamina vignette strength, drawn in the post pass
+let fadeAmt = 0;            // screen fade to black (area transitions)
+const ease = (k, dt) => 1 - Math.exp(-k * dt);   // frame-rate independent smoothing
+
+/* ---- secret: fall through the matrix floor ----
+   In the matrix area, look straight down (within 4° of vertical) while
+   standing still on the floor, wait more than 1 s without touching any
+   other key, then press W on its own: the floor lets you through. You fall
+   for a few seconds, the screen fades, and you land in a new place
+   (the mausoleum). */
+const FALL = { lookTol: 4 * Math.PI / 180, wait: 1, fadeAt: 2.6, switchAt: 3.4, dropHeight: 10,
+               accel: 7, maxSpeed: 26 };
+// falling through (and dropping into the new place): you start at walking speed
+// and gently speed up (accel m/s², up to maxSpeed) — softer than normal gravity
+function tryFallThrough() {
+  if (player.area !== "matrix" || body.falling || body.fly || body.air) return;
+  if (body.downT <= FALL.wait) return;
+  for (const k in keys) if (keys[k] && k !== "KeyW") { body.downT = 0; return; }   // W only
+  body.falling = true; body.fallT = 0; body.air = true; body.slowFall = true;
+  player.vy = -WALK; body.vx = 0; body.vz = 0;
+  body.downT = 0;
+}
+/* ---- mausoleum collision: the same boxes the shader draws (64-bit here) ---- */
+const PLAYER_R = 0.245;                  // 30% narrower than the first 0.35
+function mausTab(cx, cz, off) {
+  const x = (((cx + off[0]) % 256) + 256) % 256, z = (((cz + off[1]) % 256) + 256) % 256;
+  const i = (z * 256 + x) * 4;
+  return [MAUS_TAB[i] / 255, MAUS_TAB[i + 1] / 255, MAUS_TAB[i + 2] / 255, MAUS_TAB[i + 3] / 255];
+}
+const fract = v => v - Math.floor(v);
+// towers / buildings (40 m cells): 28% of cells hold one. 35% of those are medium
+// buildings (square, centred in the cell), the rest towers (offset in the cell).
+// Returns { bld, hx, hz, H, px, pz, reach } or null. reach = footprint + everything around
+// it at ground level (= nearBig() in the shader).
+function mausTower(cx, cz) {
+  const P = MAUS.pillar, t = mausTab(cx, cz, P.off);
+  if (t[0] >= 0.28) return null;
+  const c0x = (cx + 0.5) * P.cell, c0z = (cz + 0.5) * P.cell;
+  if (fract(t[3] * 7.7) < 0.35) {                       // medium building
+    const h = 6 + 2 * t[1];
+    return { t, bld: true, hx: h, hz: h, H: 8 + 2 * t[3], px: c0x, pz: c0z, reach: h + 7.2 };
+  }
+  const hx = 2.6 + 1.4 * t[1], hz = 2.6 + 1.4 * fract(t[1] * 5.3);
+  return { t, bld: false, hx, hz, H: 2 * Math.max(hx, hz) * (1.1 + 0.4 * t[3]),
+    px: c0x + (t[2] - 0.5) * 12, pz: c0z + (fract(t[2] * 4.7) - 0.5) * 12, reach: 2.4 };
+}
+// walls (200 m cells), or null
+function mausWall(cx, cz) {
+  const W = MAUS.wall, t = mausTab(cx, cz, W.off);
+  if (t[0] >= 0.45) return null;
+  let hx = 20 + 30 * t[1], hz = 8 + 14 * t[2];
+  if (t[3] > 0.5) { const s = hx; hx = hz; hz = s; }
+  const H = 40 + 50 * fract(t[3] * 2.9);
+  return { t, hx, hz, H, H1: wallLedge(H),
+    wx: (cx + 0.5) * W.cell + (fract(t[1] * 3.3) - 0.5) * 60, wz: (cz + 0.5) * W.cell + (fract(t[2] * 6.1) - 0.5) * 60 };
+}
+// within reach of a tower / building or a wall, plus margins? (= nearBig() in the shader)
+function mausNearBig(x, z, mx, mz) {
+  const T = mausTower(Math.floor(x / MAUS.pillar.cell), Math.floor(z / MAUS.pillar.cell));
+  if (T) {
+    const rx = T.bld ? T.reach : T.hx + T.reach, rz = T.bld ? T.reach : T.hz + T.reach;
+    if (Math.abs(x - T.px) < rx + mx && Math.abs(z - T.pz) < rz + mz) return true;
+  }
+  const W = mausWall(Math.floor(x / MAUS.wall.cell), Math.floor(z / MAUS.wall.cell));
+  if (W && Math.abs(x - W.wx) < W.hx + 6 + mx && Math.abs(z - W.wz) < W.hz + 6 + mz) return true;
+  return false;
+}
+// small blocks on a REGULAR 2.5 m lattice (cell centres, no jitter), 30% of cells (the
+// geometry reference). Footprint must match blockRect() in the shader. Kinds:
+// 0 cube (~1 m, flat cap with side tabs), 1 row of 2-3 cube modules, 2 thin standing
+// plate, 3 narrow block, 4 double cube (two side by side)
+function mausBlock(t) {
+  const v = fract(t[2] * 11.7), ax = t[3] > 0.5;
+  let hw, hd, h, kind = 0, n = 1, cap = t[3] < 0.85;
+  if (v < 0.12) {                                        // module row
+    n = 2 + Math.floor(t[1] * 1.999); kind = 1; h = 0.85 + 0.15 * t[2];
+    const L = n * 0.4 - 0.02;
+    if (ax) { hw = L; hd = 0.38; } else { hw = 0.38; hd = L; }
+  } else if (v < 0.24) {                                 // thin plate
+    const T = 0.04 + 0.02 * t[1], Dp = 0.35 + 0.15 * fract(t[1] * 7.13);
+    h = 0.8 + 0.3 * t[2]; kind = 2; cap = false;
+    if (ax) { hw = Dp; hd = T; } else { hw = T; hd = Dp; }
+  } else if (v < 0.32) {                                 // double cube
+    kind = 4; h = 0.8 + 0.3 * t[2];
+    if (ax) { hw = 0.82; hd = 0.4; } else { hw = 0.4; hd = 0.82; }
+  } else if (v < 0.40) {                                 // narrow block
+    kind = 3; hw = hd = 0.25 + 0.05 * t[1]; h = 1.1 + 0.3 * t[2];
+  } else {                                               // cube
+    hw = 0.38 + 0.17 * t[1]; hd = Math.min(0.58, hw * (0.85 + 0.3 * fract(t[1] * 7.13))); h = 0.8 + 0.45 * t[2];
+  }
+  const capI = cap ? { k: 0.78 + 0.07 * fract(t[1] * 2.9), th: 0.1 + 0.03 * fract(t[1] * 6.1), tabs: fract(t[1] * 8.3) < 0.5 } : null;
+  const top = h + (capI ? capI.th : 0);
+  return { hw, hd, h, ox: 0, oz: 0, kind, n, ax, cap: capI, step: null, top };
+}
+// the block in 2.5 m cell (cx, cz), placed, or null (none in big-pit cells or near big things)
+function mausBlockAt(cx, cz) {
+  const B = MAUS.blk, t = mausTab(cx, cz, B.off);
+  if (t[0] >= 0.30) return null;
+  if (mausHole(Math.floor(cx / 2), Math.floor(cz / 2))) return null;
+  const x = (cx + 0.5) * B.cell, z = (cz + 0.5) * B.cell;
+  if (mausNearBig(x, z, 1.6, 1.6)) return null;
+  const b = mausBlock(t);
+  b.X = x; b.Z = z;
+  b.seed = Math.floor(t[1] * 251) + 256 * Math.floor(t[2] * 3) + 1024 * (b.kind === 2 ? 2 : b.kind === 1 ? 1 : 0);   // whole number (see shader)
+  return b;
+}
+// big square pit in a 5 m cell, with a rim of cube modules around it (never near big
+// things): { x0, x1, z0, z1 } of the HOLE, or null (same rule as bigHole() in the shader)
+const HOLE_D = 0.9, PIT_RIM = 0.8;
+function mausHole(cx, cz) {
+  const t = mausTab(cx, cz, MAUS.peg.off);
+  if (t[0] < 0.965) return null;
+  const hx = 0.8 + 0.7 * t[1], hz = 0.8 + 0.7 * fract(t[1] * 7.13);
+  const x = (cx + 0.5) * 5, z = (cz + 0.5) * 5;
+  if (mausNearBig(x, z, hx + PIT_RIM, hz + PIT_RIM)) return null;
+  return { x0: x - hx, x1: x + hx, z0: z - hz, z1: z + hz };
+}
+/* ---- mausoleum parts: every structure is a list of boxes, emitted by these functions.
+   Drawing (mausBuild) and collision (mausSolids) use the SAME parts, at every distance
+   (no simpler far versions, so nothing changes shape as you walk closer).
+   e(x, y, z, hx, hy, hz, bevel, material, seed): centre (64-bit world), half sizes. */
+// a row of cube modules with pillow caps (the reference's recurring edge motif), from a0 to
+// a1 along x (alongX) or z, centred on `fix` across, `th` thick, `h` tall, standing at y0
+function modRow(e, alongX, a0, a1, fix, y0, th, h, pitch, mat = 16, capMat = 2) {
+  const L = a1 - a0, n = Math.max(1, Math.round(L / pitch)), sg = L / n, hb = h - 0.12;
+  for (let k = 0; k < n; k++) {
+    const a = a0 + sg * (k + 0.5);
+    const B = [sg / 2 - 0.025, hb / 2, th / 2], C = [sg / 2 - 0.07, 0.07, th / 2 - 0.06];
+    if (alongX) { e(a, y0 + hb / 2, fix, B[0], B[1], B[2], 0.05, mat); e(a, y0 + hb + 0.06, fix, C[0], C[1], C[2], 0.06, capMat); }
+    else { e(fix, y0 + hb / 2, a, B[2], B[1], B[0], 0.05, mat); e(fix, y0 + hb + 0.06, a, C[2], C[1], C[0], 0.06, capMat); }
+  }
+}
+// a closed square ring of modules: outer half size (rx, rz)
+function modRing(e, cx, cz, rx, rz, y0, th, h, pitch, mat, capMat) {
+  for (const s of [-1, 1]) {
+    modRow(e, true, cx - rx, cx + rx, cz + s * (rz - th / 2), y0, th, h, pitch, mat, capMat);
+    modRow(e, false, cz - rz + th, cz + rz - th, cx + s * (rx - th / 2), y0, th, h, pitch, mat, capMat);
+  }
+}
+// framed square knob on a face with outward normal (nx, nz): a back plate + a square frame
+function frameKnob(e, x, y, z, nx, nz, s, mat = 5) {
+  const P = (o, a, hy, ha, ho, r, m) => nx ? e(x + nx * o, y + hy, z + a, ho, ha[1], ha[0], r, m) : e(x + a, y + hy, z + nz * o, ha[0], ha[1], ho, r, m);
+  P(0.16, 0, 0, [s - 0.06, s - 0.06], 0.16, 0.04, mat);                      // back plate
+  P(0.3, 0, s - 0.07, [s, 0.07], 0.3, 0.03, mat); P(0.3, 0, -(s - 0.07), [s, 0.07], 0.3, 0.03, mat);   // frame top / bottom
+  P(0.3, s - 0.07, 0, [0.07, s - 0.14], 0.3, 0.03, mat); P(0.3, -(s - 0.07), 0, [0.07, s - 0.14], 0.3, 0.03, mat);   // sides
+}
+// a small L of thin plates sticking out of a face (the reference's "chevrons")
+function lPlate(e, x, y, z, nx, nz, s, flip) {
+  const f = flip ? -1 : 1;
+  if (nx) { e(x + nx * s, y, z, s, 0.025, s * 0.9, 0, 5); e(x + nx * s, y + s * 0.8, z + f * s * 0.9, s, s * 0.8, 0.025, 0, 5); }
+  else { e(x, y, z + nz * s, s * 0.9, 0.025, s, 0, 5); e(x + f * s * 0.9, y + s * 0.8, z + nz * s, 0.025, s * 0.8, s, 0, 5); }
+}
+function blockParts(b, e, sink = 0) {
+  const X = b.X, Z = b.Z, G = BLOCK_GAP, sd = b.seed, y0 = -sink;
+  if (b.kind === 2) { e(X, y0 + b.h * 0.5, Z, b.hw, b.h * 0.5, b.hd, 0.03, 1, sd); return; }   // thin plate
+  e(X, y0 + G * 0.5, Z, Math.max(0.04, b.hw - 0.07), G * 0.5, Math.max(0.04, b.hd - 0.07), 0, 1, sd);   // dark inset base
+  const unit = (x, z, hw, hd) => {                        // one cube: body, groove, cap (+ side tabs)
+    const top = b.cap ? b.h - 0.05 : b.h;
+    e(x, y0 + (G + top) * 0.5, z, hw, (top - G) * 0.5, hd, b.kind === 3 ? 0.04 : 0.07, 1, sd);
+    if (!b.cap) return;
+    const cp = b.cap;
+    e(x, y0 + b.h - 0.025, z, Math.max(0.04, hw * cp.k - 0.04), 0.025, Math.max(0.04, hd * cp.k - 0.04), 0, 1, sd);   // groove under the cap
+    e(x, y0 + b.h + cp.th * 0.5, z, hw * cp.k, cp.th * 0.5, hd * cp.k, 0.05, 2);        // pillow cap
+    if (cp.tabs) for (const s of [-1, 1]) {
+      if (b.ax) e(x, y0 + b.h + cp.th * 0.3, z + s * hd * cp.k, 0.07, cp.th * 0.6, 0.025, 0, 1, sd);
+      else e(x + s * hw * cp.k, y0 + b.h + cp.th * 0.3, z, 0.025, cp.th * 0.6, 0.07, 0, 1, sd);
+    }
+  };
+  if (b.kind === 1 || b.kind === 4) {                     // several cube units side by side
+    const n = b.kind === 4 ? 2 : b.n, L = b.ax ? b.hw : b.hd, sg = 2 * L / n;
+    for (let k = 0; k < n; k++) {
+      const a = -L + sg * (k + 0.5), hu = sg / 2 - 0.02;
+      if (b.ax) unit(X + a, Z, hu, b.hd); else unit(X, Z + a, b.hw, hu);
+    }
+  } else unit(X, Z, b.hw, b.hd);
+}
+// rim of cube modules around a big pit
+function pitParts(P, e) {
+  const cx = (P.x0 + P.x1) / 2, cz = (P.z0 + P.z1) / 2, rx = (P.x1 - P.x0) / 2 + PIT_RIM, rz = (P.z1 - P.z0) / 2 + PIT_RIM;
+  modRing(e, cx, cz, rx, rz, 0, PIT_RIM, 0.95, 0.85, 16, 2);
+}
+// seeded random stream for a structure (same numbers every time)
+function mausRng(cx, cz, salt) {
+  let sd = (Math.imul(cx, 73856093) ^ Math.imul(cz, 19349663) ^ salt) >>> 0;
+  return () => { sd = (sd + 0x6D2B79F5) >>> 0; let q = Math.imul(sd ^ sd >>> 15, 1 | sd);
+    q = q + Math.imul(q ^ q >>> 7, 61 | q) ^ q; return ((q ^ q >>> 14) >>> 0) / 4294967296; };
+}
+// knobs + L plates for one face of a box: face centre (fx, fz) + outward normal, half
+// length along the face, bottom / top of the usable band, rows of knobs at given heights
+function faceDetail(e, rnd, fx, fz, nx, nz, len, ys, sym, yLo, yHi) {
+  const P = (a) => nx ? [fx, fz + a] : [fx + a, fz];
+  for (const y of ys) {                                  // framed knobs, symmetric
+    for (const a of sym) { const [x, z] = P(a * len); frameKnob(e, x, y, z, nx, nz, 0.42); }
+  }
+  const nL = 1 + Math.floor(rnd() * 2);                  // one or two L plates
+  for (let k = 0; k < nL; k++) {
+    const [x, z] = P((rnd() * 1.6 - 0.8) * len);
+    lPlate(e, x, yLo + rnd() * (yHi - yLo), z, nx, nz, 0.35, rnd() < 0.5);
+  }
+}
+// towers (from the geometry reference): stands on a thin slab edged with small modules,
+// inside a sunken dark moat ringed by a continuous wall of cube modules; plain faces with a
+// hole grid, framed knobs at the corners-ish and face centres (1-2 rows), L plates; on top
+// an overhang (with a frieze under it and knobs at its corners) carrying a parapet of
+// modules around a recessed roof
+function towerParts(T, cx, cz, e) {
+  if (T.bld) return buildingParts(T, cx, cz, e);
+  const { hx, hz, H, px, pz } = T, rnd = mausRng(cx, cz, 0x51ed);
+  const g = 1.4, rx = hx + g + 0.8, rz = hz + g + 0.8;
+  e(px, 0.02, pz, rx - 0.8, 0.02, rz - 0.8, 0, 15);                          // sunken dark moat floor
+  modRing(e, px, pz, rx, rz, 0, 0.8, 0.95, 0.85, 16, 2);                      // ring wall around it
+  e(px, 0.15, pz, hx + 0.55, 0.15, hz + 0.55, 0.04, 4);                      // base slab
+  modRing(e, px, pz, hx + 0.55, hz + 0.55, 0.3, 0.35, 0.35, 0.6, 16, 2);      // small modules on its edge
+  e(px, (0.3 + H) * 0.5, pz, hx, (H - 0.3) * 0.5, hz, 0.12, 5);              // body
+  const rows = H > 9 ? [0.45 * H, 0.75 * H] : [0.5 * H];
+  for (const [nx, nz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const len = nx ? hz : hx, out = nx ? hx : hz;
+    faceDetail(e, rnd, px + nx * out, pz + nz * out, nx, nz, len, rows, [0], 1.5, H - 1.5);   // knob at the face centre
+  }
+  for (const sx of [-1, 1]) for (const sz of [-1, 1])                        // corner knobs, same rows
+    for (const y of rows) { e(px + sx * hx, y, pz + sz * hz, 0.5, 0.5, 0.5, 0.05, 5); e(px + sx * (hx + 0.3), y, pz + sz * (hz + 0.3), 0.3, 0.3, 0.3, 0.04, 5); }
+  e(px, H - 0.2, pz, hx + 0.25, 0.2, hz + 0.25, 0.04, 8);                    // frieze under the overhang
+  const ox = hx + 0.8, oz = hz + 0.8;                                        // overhang as a frame -> recessed roof
+  for (const s of [-1, 1]) {
+    e(px, H + 0.15, pz + s * (oz - 0.6), ox, 0.15, 0.6, 0.06, 4);
+    e(px + s * (ox - 0.6), H + 0.15, pz, 0.6, 0.15, oz - 1.2, 0.06, 4);
+  }
+  e(px, H + 0.02, pz, hx - 0.4, 0.02, hz - 0.4, 0, 15);                      // roof, a bit darker
+  modRing(e, px, pz, ox, oz, H + 0.3, 0.6, 0.75, 0.8, 16, 2);                 // parapet
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) e(px + sx * (ox + 0.1), H + 0.15, pz + sz * (oz + 0.1), 0.45, 0.4, 0.45, 0.05, 5);   // corner knobs
+}
+// medium buildings: 3 panels per side between stepped pilasters with capital blocks at
+// mid height, hole grid, on a platform over a dark gap; cornice + parapet around a
+// courtyard roof split in 4 by a cross of modules; cross-shaped troughs run out from the
+// middle of each side (channels with module rims and a dark sunken floor)
+function buildingParts(T, cx, cz, e) {
+  const { hx, hz, H, px, pz } = T, rnd = mausRng(cx, cz, 0xb1d);
+  e(px, 0.15, pz, hx + 0.6, 0.15, hz + 0.6, 0.04, 15);                       // dark gap
+  e(px, 0.45, pz, hx + 1.0, 0.15, hz + 1.0, 0.05, 4);                        // platform (walkable: 0.6 m step)
+  e(px, (0.6 + H) * 0.5, pz, hx, (H - 0.6) * 0.5, hz, 0.12, 5);              // body
+  const PANEL = 3;
+  for (const [nx, nz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const len = nx ? hz : hx, out = nx ? hx : hz, fx = px + nx * out, fz = pz + nz * out;
+    for (let k = 1; k < PANEL; k++) {                                        // inner pilasters (stepped) + capitals
+      const a = -len + 2 * len * k / PANEL;
+      const B = (o, y, ha, hy, ho, r, m) => nx ? e(fx + nx * o, y, fz + a, ho, hy, ha, r, m) : e(fx + a, y, fz + nz * o, ha, hy, ho, r, m);
+      B(0.3, (0.6 + H) * 0.5, 0.55, (H - 0.6) * 0.5, 0.3, 0.05, 5);           // pilaster
+      B(0.45, 1.1, 0.75, 0.5, 0.45, 0.05, 5);                                 // base block
+      B(0.55, 0.5 * H, 0.8, 0.45, 0.55, 0.05, 5);                             // capital
+      B(0.95, 0.5 * H, 0.35, 0.3, 0.2, 0.04, 5);                              // its knob
+    }
+    for (let k = 0; k < PANEL; k++) {                                        // L plate in each panel
+      const a = -len + 2 * len * (k + 0.5) / PANEL + (rnd() - 0.5) * 1.2;
+      const [x, z] = nx ? [fx, fz + a] : [fx + a, fz];
+      lPlate(e, x, (0.6 + rnd() * 0.2) * H, z, nx, nz, 0.35, rnd() < 0.5);
+    }
+  }
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {                      // corner pilasters
+    e(px + sx * hx, (0.6 + H) * 0.5, pz + sz * hz, 0.7, (H - 0.6) * 0.5, 0.7, 0.06, 5);
+    e(px + sx * hx, 0.5 * H, pz + sz * hz, 0.9, 0.45, 0.9, 0.05, 5);
+  }
+  e(px, H - 0.2, pz, hx + 0.3, 0.2, hz + 0.3, 0.04, 8);                      // frieze
+  const ox = hx + 0.9, oz = hz + 0.9;
+  e(px, H + 0.2, pz, ox, 0.2, oz, 0.08, 4);                                  // cornice / roof slab
+  modRing(e, px, pz, ox, oz, H + 0.4, 0.6, 0.8, 0.9, 16, 2);                  // parapet
+  modRow(e, true, px - ox + 0.6, px + ox - 0.6, pz, H + 0.4, 0.5, 0.6, 0.9, 16, 2);   // roof cross
+  modRow(e, false, pz - oz + 0.6, pz - 0.25, px, H + 0.4, 0.5, 0.6, 0.9, 16, 2);
+  modRow(e, false, pz + 0.25, pz + oz - 0.6, px, H + 0.4, 0.5, 0.6, 0.9, 16, 2);
+  for (const [nx, nz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {                // cross troughs
+    const out = (nx ? hx : hz) + 1.0, L = 6.0, w = 0.8;                      // channel half width
+    const a0 = out, a1 = out + L;
+    if (nx) {
+      const x0 = px + nx * a0, x1 = px + nx * a1, xl = Math.min(x0, x1), xh = Math.max(x0, x1);
+      e((xl + xh) / 2, 0.02, pz, (xh - xl) / 2, 0.02, w, 0, 15);
+      for (const s of [-1, 1]) modRow(e, true, xl, xh, pz + s * (w + 0.25), 0, 0.5, 0.55, 0.8, 16, 2);
+      modRow(e, false, pz - w - 0.5, pz + w + 0.5, px + nx * (a1 + 0.25), 0, 0.5, 0.55, 0.8, 16, 2);
+    } else {
+      const z0 = pz + nz * a0, z1 = pz + nz * a1, zl = Math.min(z0, z1), zh = Math.max(z0, z1);
+      e(px, 0.02, (zl + zh) / 2, w, 0.02, (zh - zl) / 2, 0, 15);
+      for (const s of [-1, 1]) modRow(e, false, zl, zh, px + s * (w + 0.25), 0, 0.5, 0.55, 0.8, 16, 2);
+      modRow(e, true, px - w - 0.5, px + w + 0.5, pz + nz * (a1 + 0.25), 0, 0.5, 0.55, 0.8, 16, 2);
+    }
+  }
+}
+// huge walls (remade from the geometry reference): a two-tier podium of framed panels with a
+// dark recessed band between the tiers, runs around the foot; above it the lower section,
+// a ledge edged with cube modules, and the set-back upper section. Faces: hole grid /
+// studs, olive bands, stepped pilasters, framed knobs and thin fins. Every vertical corner
+// carries a column of stacked cube modules; the top edge a row of large modules.
+function wallParts(W, e) {
+  const { t, hx, hz, H, H1, wx, wz } = W, ux = hx - 3, uz = hz - 3;
+  const wv = fract(t[1] * 13.1), wm = wv < 0.35 ? 13 : 3, ws = wv < 0.2 ? 1 : 0;   // red / dark-brown studded / orange studded
+  e(wx, H1 * 0.5, wz, hx, H1 * 0.5, hz, 0.3, wm, ws);                       // lower section
+  e(wx, (H1 + 1 + H) * 0.5, wz, ux, (H - H1 - 1) * 0.5, uz, 0.3, wm, ws);   // upper section
+  e(wx, H1 + 0.5, wz, hx + 2.0, 0.5, hz + 2.0, 0.15, 8);                    // ledge
+  modRing(e, wx, wz, hx + 2.0, hz + 2.0, H1 + 1, 0.8, 0.85, 2.0, 16, 2);    // ledge edge modules
+  e(wx, H + 0.8, wz, ux + 1.5, 0.8, uz + 1.5, 0.2, 4);                      // cornice
+  modRing(e, wx, wz, ux + 1.5, uz + 1.5, H + 1.6, 1.2, 1.2, 2.0, 16, 2);    // large modules along the top edge
+  // podium: tier 1 (framed panels, climbable top), dark band, tier 2 (+ module row)
+  const panels = (y0, y1, out, depth, L0) => {                             // one tier of framed panels round the section
+    const hy = (y1 - y0) / 2, yc = (y0 + y1) / 2;
+    const side = (alongX, a0, a1, fix, s) => {                             // fix = face line, s = outward sign
+      const L = a1 - a0, n = Math.max(1, Math.round(L / L0)), sg = L / n, c = fix + s * (out - depth / 2);
+      for (let k = 0; k < n; k++) {
+        const a = a0 + sg * (k + 0.5), m = (k & 1) ? 16 : 5;
+        if (alongX) e(a, yc, c, sg / 2 - 0.05, hy, depth / 2, 0.08, m); else e(c, yc, a, depth / 2, hy, sg / 2 - 0.05, 0.08, m);
+        // outer-face detail by symmetric index along the side: knob / fin with end cubes / none
+        const u = Math.abs(2 * k - (n - 1)) % 4, of = fix + s * out, nx = alongX ? 0 : s, nz = alongX ? s : 0;
+        const px = alongX ? a : of, pz = alongX ? of : a;
+        if (u === 0 || u === 1) frameKnob(e, px, yc, pz, nx, nz, Math.min(0.9, hy * 0.45));
+        else if (u === 2) {
+          if (alongX) { e(a, yc, of + s * 0.2, sg * 0.35, 0.05, 0.2, 0, 5); for (const q of [-1, 1]) e(a + q * sg * 0.35, yc, of + s * 0.25, 0.25, 0.25, 0.25, 0.05, 5); }
+          else { e(of + s * 0.2, yc, a, 0.2, 0.05, sg * 0.35, 0, 5); for (const q of [-1, 1]) e(of + s * 0.25, yc, a + q * sg * 0.35, 0.25, 0.25, 0.25, 0.05, 5); }
+        }
+      }
+      for (let k = 0; k <= n; k++) {                                        // olive posts between the panels
+        const a = a0 + sg * k;
+        if (alongX) e(a, yc, c + s * 0.15, 0.22, hy + 0.05, depth / 2 + 0.15, 0.04, 8); else e(c + s * 0.15, yc, a, depth / 2 + 0.15, hy + 0.05, 0.22, 0.04, 8);
+      }
+    };
+    for (const s of [-1, 1]) {
+      side(true, wx - hx - out, wx + hx + out, wz + s * hz, s);
+      side(false, wz - hz - out + depth, wz + hz + out - depth, wx + s * hx, s);
+    }
+  };
+  panels(0, 4.6, 5.0, 5.0, 4.5);                                            // tier 1
+  e(wx, 5.6, wz, hx + 3.2, 1.0, hz + 3.2, 0.05, 15);                        // dark recessed band (2 m: room to stand on tier 1)
+  panels(6.6, 9.2, 4.2, 4.2, 4.5);                                          // tier 2
+  modRing(e, wx, wz, hx + 4.2, hz + 4.2, 9.2, 0.9, 0.9, 2.0, 16, 2);        // module row on tier 2
+  // corner columns of stacked cube modules
+  const column = (x, z, y0, y1, s) => {
+    const n = Math.max(1, Math.round((y1 - y0) / (2 * s + 0.15))), sg = (y1 - y0) / n;
+    for (let k = 0; k < n; k++) { const b = k % 4 === 0 ? 1.25 : 1; e(x, y0 + sg * (k + 0.5), z, s * b, sg / 2 - 0.05, s * b, 0.12, k % 4 === 0 ? 5 : 16); }   // every 4th module bigger
+  };
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    column(wx + sx * hx, wz + sz * hz, 10.1, H1, 0.8);
+    column(wx + sx * ux, wz + sz * uz, H1 + 1, H, 0.7);
+  }
+  // olive bands + stepped pilasters on both sections
+  for (let yc = 16; yc + 0.7 <= H1 - 1.0; yc += 14) e(wx, yc, wz, hx + 0.8, 0.7, hz + 0.8, 0.15, 8);
+  for (let yc = H1 + 8; yc + 0.7 <= H - 1.0; yc += 14) e(wx, yc, wz, ux + 0.8, 0.7, uz + 0.8, 0.15, 8);
+  [[10.1, H1, hx, hz], [H1 + 1, H, ux, uz]].forEach(([lo, hi, ex2, ez2]) => {
+    const hh = (hi - lo) * 0.5, yc = (lo + hi) * 0.5;
+    for (const ax of [0, 1]) {                                              // ax 0: faces at +-z (run along x)
+      const len = ax ? ez2 : ex2, out = ax ? ex2 : ez2, m = Math.floor((len - 3.0) / 9);
+      const at = (A, O, sa, so, r, mat) => ax ? e(wx + O, yc, wz + A, so, hh, sa, r, mat) : e(wx + A, yc, wz + O, sa, hh, so, r, mat);
+      for (let k = -m; k <= m; k++) for (const sd of [-1, 1]) {
+        const a = 9 * k;
+        at(a, sd * (out + 0.3), 1.4, 0.3, 0.06, 8);                          // stepped: wide, middle, narrow
+        at(a, sd * (out + 0.55), 0.95, 0.55, 0.05, 9);
+        at(a, sd * (out + 0.75), 0.4, 0.75, 0.04, 8);
+      }
+    }
+  });
+  // facade motifs: every panel between the pilasters and the olive bands gets a motif. The
+  // motif is not random: it follows the panel's symmetric column index (distance from the
+  // face centre), its row and the face, so each face is mirror-symmetric and the rhythm
+  // shifts row by row and face by face (like the reference's generated ornament).
+  //   A carpet  - framed knob in the middle, 4 small cubes at the panel's quarter corners
+  //   B cross   - horizontal + vertical thin fins through the middle, cubes at their ends
+  //   C ladder  - framed knob with cubes above and below it
+  //   D quiet   - one small cube
+  const MOTIF = "ACBDA";
+  const motif = (type, nx, nz, fx, fz, a, yc, w, hg) => {   // (fx, fz) = face line point, a = along, yc = height
+    const at = (da, dy, sa, sy, so, r, m) => nx ? e(fx + nx * so, yc + dy, fz + a + da, so, sy, sa, r, m) : e(fx + a + da, yc + dy, fz + nz * so, sa, sy, so, r, m);
+    const px = nx ? fx : fx + a, pz = nx ? fz + a : fz;
+    const q = Math.min(1.2, Math.min(w, hg) * 0.28);
+    if (type === "A") {
+      frameKnob(e, px, yc, pz, nx, nz, q);
+      for (const sa of [-1, 1]) for (const sy of [-1, 1]) at(sa * w * 0.55, sy * hg * 0.55, q / 3, q / 3, q / 3, 0.06, 5);
+    } else if (type === "B") {
+      at(0, 0, w * 0.8, 0.05, 0.3, 0, 5); at(0, 0, 0.05, hg * 0.8, 0.3, 0, 5);
+      for (const s of [-1, 1]) { at(s * w * 0.8, 0, 0.3, 0.3, 0.3, 0.05, 5); at(0, s * hg * 0.8, 0.3, 0.3, 0.3, 0.05, 5); }
+    } else if (type === "C") {
+      frameKnob(e, px, yc, pz, nx, nz, q);
+      for (const s of [-1, 1]) at(0, s * hg * 0.5, q * 0.5, q * 0.5, q * 0.5, 0.06, 5);
+    } else at(0, 0, 0.35, 0.35, 0.35, 0.05, 5);
+  };
+  const bandsLo = [], bandsUp = [];
+  for (let yc = 16; yc + 0.7 <= H1 - 1.0; yc += 14) bandsLo.push(yc);
+  for (let yc = H1 + 8; yc + 0.7 <= H - 1.0; yc += 14) bandsUp.push(yc);
+  [[10.1, H1, hx, hz, bandsLo], [H1 + 1, H, ux, uz, bandsUp]].forEach(([lo, hi, ex2, ez2, bands]) => {
+    const edges = [lo]; for (const b of bands) edges.push(b - 0.7, b + 0.7); edges.push(hi);
+    for (const [nx, nz, face] of [[1, 0, 0], [-1, 0, 0], [0, 1, 1], [0, -1, 1]]) {
+      const len = nx ? ez2 : ex2, out = nx ? ex2 : ez2, m = Math.floor((len - 3.0) / 9);
+      const fx = nx ? wx + nx * out : wx, fz = nx ? wz : wz + nz * out;
+      const cols = [];                                                      // [centre, half width, symmetric index]
+      for (let k = -m; k < m; k++) cols.push([9 * k + 4.5, 3.1, Math.abs(2 * k + 1)]);
+      const ow = (len - 0.9 - (9 * m + 1.4)) / 2;                           // outer panels up to the corner columns
+      if (ow > 1.2) for (const s of [-1, 1]) cols.push([s * (9 * m + 1.4 + ow), ow, 2 * m + 1]);
+      for (let r = 0; r + 1 < edges.length; r += 2) {                       // rows between band edges
+        const y0 = edges[r], y1 = edges[r + 1], hg = (y1 - y0) / 2;
+        if (hg < 1.5) continue;
+        for (const [a, w, s] of cols) motif(MOTIF[(s + 2 * (r / 2) + face) % 5], nx, nz, fx, fz, a, (y0 + y1) / 2, w, hg);
+      }
+    }
+  });
+}
+// ---- collision solids near (x, z): 3D boxes { x0, x1, y0, y1, z0, z1 } from the same parts.
+// Towers and walls never reach outside their own cell, so only the cell under (x, z) matters.
+const mausSolidCache = new Map();
+function mausStructSolids(key, make) {
+  let s = mausSolidCache.get(key);
+  if (!s) {
+    s = [];
+    make((x, y, z, hx, hy, hz, r, m) => s.push({ x0: x - hx, x1: x + hx, y0: y - hy, y1: y + hy, z0: z - hz, z1: z + hz, m }));
+    if (mausSolidCache.size > 24) mausSolidCache.delete(mausSolidCache.keys().next().value);
+    mausSolidCache.set(key, s);
+  }
+  return s;
+}
+function mausSolids(x, z, reach = 1.5) {
+  const out = [];
+  const keep = s => { if (x > s.x0 - reach && x < s.x1 + reach && z > s.z0 - reach && z < s.z1 + reach) out.push(s); };
+  const B = MAUS.blk, bx = Math.floor(x / B.cell), bz = Math.floor(z / B.cell);
+  for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+    const b = mausBlockAt(bx + i, bz + j);
+    if (b) blockParts(b, (px, py, pz, hx, hy, hz, r, m) => keep({ x0: px - hx, x1: px + hx, y0: py - hy, y1: py + hy, z0: pz - hz, z1: pz + hz, m }));
+  }
+  const pcx = Math.floor(x / 5), pcz = Math.floor(z / 5);                // pit rims
+  for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+    const P = mausHole(pcx + i, pcz + j);
+    if (P) pitParts(P, (px, py, pz, hx, hy, hz, r, m) => keep({ x0: px - hx, x1: px + hx, y0: py - hy, y1: py + hy, z0: pz - hz, z1: pz + hz, m }));
+  }
+  const tcx = Math.floor(x / MAUS.pillar.cell), tcz = Math.floor(z / MAUS.pillar.cell), T = mausTower(tcx, tcz);
+  if (T) mausStructSolids("t" + tcx + "," + tcz, e => towerParts(T, tcx, tcz, e)).forEach(keep);
+  const wcx = Math.floor(x / MAUS.wall.cell), wcz = Math.floor(z / MAUS.wall.cell), W = mausWall(wcx, wcz);
+  if (W && Math.abs(x - W.wx) < W.hx + 10 && Math.abs(z - W.wz) < W.hz + 10)
+    mausStructSolids("w" + wcx + "," + wcz, e => wallParts(W, e)).forEach(keep);
+  return out;
+}
+// push the player out of every box overlapping their body (above step height), stand on
+// the highest box top under the feet (small ledges up to STEP_UP are stepped onto), and
+// note the lowest box bottom above the head (mausCeil, applied after moving up)
+const PLAYER_H = 1.8, STEP_UP = 0.62;
+const CLIMB = { fast: 3.2, med: 1.5, slow: 0.75, maxH: 4.8 };   // average climb speeds (m/s up) + highest ledge
+// the moves of one climb from height y0 to a ledge at T: [{ type, t0, t1, y0, y1 }].
+// The body holds on to the EDGE and pulls itself up (no invisible ladder):
+//   crouch + leap  - only if the edge is out of reach: a jump that peaks with the hands on the edge
+//   catch          - grip: the body drops a little into the arms and swings, then settles
+//   pull           - pull-up: from hanging (feet 2.1 m below the edge) until the chest is at the edge
+//   mantle         - press down on the edge: push the body up over it while leaning forward
+//   stand          - knee / foot onto the top, stand up
+// The speed class (fast / medium / slow) sets how long the hang, pull and mantle take.
+const HANG_DROP = 2.1, CHEST_DROP = 1.0;           // feet below the edge: hanging / chest at the edge
+function climbPlan(y0, T, sp, onGround) {
+  const segs = [];
+  let t = 0, y = y0;
+  const add = (type, dur, y1) => { segs.push({ type, t0: t, t1: t + dur, y0: y, y1 }); t += dur; y = y1; };
+  const cls = sp >= CLIMB.fast ? 0 : sp >= CLIMB.med ? 1 : 2;
+  const D = [{ cat: 0.06, pull: 0.22, man: 0.2, st: 0.12 }, { cat: 0.2, pull: 0.55, man: 0.42, st: 0.22 },
+             { cat: 0.38, pull: 1.0, man: 0.75, st: 0.35 }][cls];
+  const hangY = T - HANG_DROP, chestY = T - CHEST_DROP;
+  if (y < hangY - 0.05) {                          // edge out of reach: jump up to it
+    if (onGround) add("crouch", 0.12, y);
+    add("leap", Math.max(0.15, Math.sqrt(2 * (hangY - y) / 18)), hangY);
+    add("catch", D.cat + 0.1, hangY);
+  } else add("catch", D.cat, y);                  // edge in reach: just grip it
+  if (y < chestY) add("pull", Math.max(0.15, D.pull * (chestY - y) / (HANG_DROP - CHEST_DROP)), chestY);
+  add("mantle", Math.max(0.12, D.man * (T - y) / CHEST_DROP), T);
+  add("stand", D.st, T);
+  return segs;
+}      // auto step up to a long low block's height
+let mausCeil = Infinity, mausSurf = 0;        // mausSurf: material under the feet (0 floor, -1 pit)
+function mausCollide(prevY) {
+  const bs = mausSolids(player.x, player.z), r = PLAYER_R;
+  const step = body.air ? 0.03 : STEP_UP;            // auto step only when walking (in the air: climb with Space)
+  for (let it = 0; it < 3; it++) for (const b of bs) {
+    if (b.y1 <= prevY + step || b.y0 >= prevY + PLAYER_H) continue;   // under the feet / above the head
+    const nx = Math.min(b.x1, Math.max(b.x0, player.x)), nz = Math.min(b.z1, Math.max(b.z0, player.z));
+    const dx = player.x - nx, dz = player.z - nz, d2 = dx * dx + dz * dz;
+    if (d2 >= r * r) continue;
+    if (d2 > 1e-12) {
+      const d = Math.sqrt(d2), push = r - d;
+      player.x += dx / d * push; player.z += dz / d * push;
+      const vn = (body.vx * dx + body.vz * dz) / d;   // stop moving into the wall, keep sliding along it
+      if (vn < 0) { body.vx -= vn * dx / d; body.vz -= vn * dz / d; }
+    } else {                                        // centre inside: leave by the nearest side
+      const m = Math.min(player.x - b.x0, b.x1 - player.x, player.z - b.z0, b.z1 - player.z);
+      if (m === player.x - b.x0) player.x = b.x0 - r; else if (m === b.x1 - player.x) player.x = b.x1 + r;
+      else if (m === player.z - b.z0) player.z = b.z0 - r; else player.z = b.z1 + r;
+    }
+  }
+  // big pits: down inside one, its walls hold you in (jump to climb out)
+  const pit = mausHole(Math.floor(player.x / MAUS.peg.cell), Math.floor(player.z / MAUS.peg.cell));
+  if (pit && prevY < -0.02) {
+    const cx = Math.min(pit.x1 - r, Math.max(pit.x0 + r, player.x)), cz = Math.min(pit.z1 - r, Math.max(pit.z0 + r, player.z));
+    if (cx !== player.x) body.vx = 0;
+    if (cz !== player.z) body.vz = 0;
+    player.x = cx; player.z = cz;
+  }
+  const s = r * 0.7;
+  let g = pit && player.x > pit.x0 + s && player.x < pit.x1 - s && player.z > pit.z0 + s && player.z < pit.z1 - s ? -HOLE_D : 0;
+  let ceil = Infinity, gm = g < 0 ? -1 : 0;
+  for (const b of bs) {
+    const nx = Math.min(b.x1, Math.max(b.x0, player.x)), nz = Math.min(b.z1, Math.max(b.z0, player.z));
+    const d2 = (player.x - nx) ** 2 + (player.z - nz) ** 2;
+    if (b.y1 <= prevY + step + 1e-9) { if (d2 < s * s && b.y1 > g) { g = b.y1; gm = b.m; } }
+    else if (b.y0 >= prevY + PLAYER_H - 1e-9 && d2 < r * r) ceil = Math.min(ceil, b.y0);
+  }
+  mausCeil = ceil; mausSurf = gm;
+  return g;
+}
+// a ledge to climb in direction (dx, dz): the top of the obstacle right in front (boxes
+// stacked on it count as part of it), with room to stand up there.
+// Returns { T: top height, lx, lz: where to stand, m: its material } or null.
+function mausLedge(dx, dz) {
+  const r = PLAYER_R, fy = player.y;
+  for (const reach of [r + 0.25, r + 0.5]) {
+    const px = player.x + dx * reach, pz = player.z + dz * reach;
+    const col = mausSolids(px, pz, 0.8).filter(b => px >= b.x0 && px <= b.x1 && pz >= b.z0 && pz <= b.z1);
+    let top = null;
+    for (const b of col) if (b.y0 < fy + PLAYER_H && b.y1 > fy + STEP_UP && (!top || b.y1 > top.y1)) top = b;
+    if (!top) continue;
+    for (let grow = true; grow;) {                  // climb the stack: boxes sitting on / overlapping above it
+      grow = false;
+      for (const b of col) if (b.y1 > top.y1 && b.y0 <= top.y1 + 0.05) { top = b; grow = true; }
+    }
+    const T = top.y1;
+    // stand a little way onto it, but inside its top (narrow posts: on the centre)
+    const mx = Math.min(r * 0.7, (top.x1 - top.x0) / 2), mz = Math.min(r * 0.7, (top.z1 - top.z0) / 2);
+    const lx = Math.min(top.x1 - mx, Math.max(top.x0 + mx, px + dx * 0.25)), lz = Math.min(top.z1 - mz, Math.max(top.z0 + mz, pz + dz * 0.25));
+    const room = mausSolids(lx, lz, r).every(b => {                     // nothing where the body would be
+      if (b.y1 <= T + 0.01 || b.y0 >= T + PLAYER_H) return true;
+      const nx = Math.min(b.x1, Math.max(b.x0, lx)), nz = Math.min(b.z1, Math.max(b.z0, lz));
+      return (lx - nx) ** 2 + (lz - nz) ** 2 >= r * r * 0.9;
+    });
+    // the body's path must be free too: straight up where you stand, then over the edge
+    const free = (x, z, ya, yb) => mausSolids(x, z, r).every(b => {
+      if (b.y1 <= ya || b.y0 >= yb) return true;
+      const nx = Math.min(b.x1, Math.max(b.x0, x)), nz = Math.min(b.z1, Math.max(b.z0, z));
+      return (x - nx) ** 2 + (z - nz) ** 2 >= r * r * 0.72;
+    });
+    const path = free(player.x, player.z, fy + STEP_UP, T + PLAYER_H)
+      && [0.35, 0.7].every(f => free(player.x + (lx - player.x) * f, player.z + (lz - player.z) * f, T + 0.02, T + PLAYER_H));
+    if (room && path) return { T, lx, lz, m: top.m };
+    if (!path) return null;                         // blocked: don't try further in
+  }
+  return null;
+}
+// nearest spot (spiral search) with nothing overlapping the player's body, not in a pit
+function mausFreeSpot(x, z, y = 0) {
+  const clear = (px, pz) => mausSolids(px, pz).every(b => {
+    if (b.y1 <= y + 0.05 || b.y0 >= y + PLAYER_H) return true;
+    const nx = Math.min(b.x1, Math.max(b.x0, px)), nz = Math.min(b.z1, Math.max(b.z0, pz));
+    return (px - nx) ** 2 + (pz - nz) ** 2 > 0.5 * 0.5;
+  }) && (y > 0.05 || !mausHole(Math.floor(px / MAUS.peg.cell), Math.floor(pz / MAUS.peg.cell)));
+  if (clear(x, z) || (y < -0.05 && mausHole(Math.floor(x / MAUS.peg.cell), Math.floor(z / MAUS.peg.cell)))) return [x, z];   // (down in a pit: stay)
+  for (let rad = 1.5; rad < 200; rad += 1.5)
+    for (let k = 0, n = Math.ceil(rad * 4); k < n; k++) {
+      const a = k / n * 2 * Math.PI, px = x + Math.cos(a) * rad, pz = z + Math.sin(a) * rad;
+      if (clear(px, pz)) return [px, pz];
+    }
+  return [x, z];
+}
+function setArea(area, how) {
+  player.area = area;
+  body.falling = false; body.fallT = 0; body.slowFall = false;
+  player.vy = 0; body.vx = 0; body.vz = 0;
+  if (area === "mausoleum") [player.x, player.z] = mausFreeSpot(player.x, player.z);   // never inside a block
+  if (how === "drop") { player.y = FALL.dropHeight; body.air = true; player.vy = -WALK; body.slowFall = true; }
+  else { player.y = 0; body.air = false; fadeAmt = 0; }
+  updateAmbienceArea(how === "drop" ? 2.5 : 1);
+}
+
+// continue the saved body state (a reload looks like nothing happened)
+{ const n = (v, d) => Number.isFinite(+v) ? +v : d;
+  body.vx = n(S0.vx, 0); body.vz = n(S0.vz, 0);
+  body.air = !!S0.air; body.baseY = n(S0.baseY, player.y);
+  body.falling = !!S0.falling; body.fallT = n(S0.fallT, 0); body.slowFall = !!S0.slowFall;
+  body.fov = n(S0.fov, 75); body.coyote = n(S0.coyote, 0);
+  if (S0.climb && Array.isArray(S0.climb.segs)) body.climb = S0.climb;
+  if (S0.stam) { stam.v = n(S0.stam.v, 1); stam.out = !!S0.stam.out; stam.rest = n(S0.stam.rest, 0); stam.fx = n(S0.stam.fx, 0); tiredAmt = stam.fx; }
+  fadeAmt = n(S0.fade, 0);
+  if (S0.fly && typeof dfly !== "undefined") { dfly.checked = true; body.fly = true; }
+}
+// loaded (or handed over) inside something? step out of it (checked at the saved height,
+// so standing on top of a block is kept as it was)
+if (player.area === "mausoleum" && !body.climb) [player.x, player.z] = mausFreeSpot(player.x, player.z, player.y);
+
+/* ---- one fixed simulation step (dt ≤ 0.02 s) ---- */
+function update(dt) {
+  gameTime += dt;
+
+  // camera keys — turn speed eases in/out instead of snapping
+  const tTurn = ((keys.ArrowLeft ? 1 : 0) - (keys.ArrowRight ? 1 : 0)) * 2.2;
+  const tPitch = ((keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0)) * 1.8;
+  body.turnV += (tTurn - body.turnV) * ease(tTurn ? 9 : 12, dt);
+  body.pitchV += (tPitch - body.pitchV) * ease(tPitch ? 9 : 12, dt);
+  player.yaw += body.turnV * dt;
+  player.yaw = Math.atan2(Math.sin(player.yaw), Math.cos(player.yaw)); // keep angle wrapped & precise
+  player.pitch = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, player.pitch + body.pitchV * dt));
+
+  // movement on the grid plane
+  const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw);
+  const rx = Math.cos(player.yaw), rz = -Math.sin(player.yaw);
+  let mx = 0, mz = 0;
+  if (keys.KeyW) { mx += fx; mz += fz; }
+  if (keys.KeyS) { mx -= fx; mz -= fz; }
+  if (keys.KeyD) { mx += rx; mz += rz; }
+  if (keys.KeyA) { mx -= rx; mz -= rz; }
+  const ml = Math.hypot(mx, mz);
+  const sprint = keys.ShiftLeft || keys.ShiftRight;
+
+  // ---- debug fly: move where you look, no gravity, no floor ----
+  if (body.fly) {
+    const cp = Math.cos(player.pitch), sp = Math.sin(player.pitch);
+    let dx = 0, dy = 0, dz = 0;
+    if (keys.KeyW) { dx += fx * cp; dy += sp; dz += fz * cp; }
+    if (keys.KeyS) { dx -= fx * cp; dy -= sp; dz -= fz * cp; }
+    if (keys.KeyD) { dx += rx; dz += rz; }
+    if (keys.KeyA) { dx -= rx; dz -= rz; }
+    if (keys.Space) dy += 1;
+    if (keys.KeyC) dy -= 1;              // (not Ctrl: Ctrl+W would close the tab)
+    const dl = Math.hypot(dx, dy, dz) || 1;
+    const v = sprint ? 60 : 12;
+    body.vx += (dx / dl * v - body.vx) * ease(10, dt);
+    body.vz += (dz / dl * v - body.vz) * ease(10, dt);
+    player.vy += (dy / dl * v - player.vy) * ease(10, dt);
+    player.x += body.vx * dt; player.y += player.vy * dt; player.z += body.vz * dt;
+    body.air = true; body.falling = false;
+    body.bobAmt += (0 - body.bobAmt) * ease(4, dt);
+    body.landOff += (0 - body.landOff) * ease(8, dt); body.landVel = 0;
+    body.roll += (0 - body.roll) * ease(8, dt);
+    body.fov += (75 - body.fov) * ease(5, dt);
+    stam.fx += (0 - stam.fx) * ease(3, dt); tiredAmt = stam.fx;
+    body.bobY = 0; body.bobSide = 0; body.breath = 0;
+    body.climb = null; spaceHit = false;
+    return;
+  }
+  const hit = spaceHit; spaceHit = false;           // a fresh Space press this step
+
+  // ---- climbing onto a ledge (started below). Not a linear glide: it's a sequence of
+  // moves (climbPlan): reach for the edge, hand-over-hand pulls with short hangs between
+  // them (the body sags a little, the view sways toward the pulling hand), then a mantle
+  // (push up over the edge while leaning forward and looking down onto the ledge) and a
+  // knee/foot step onto it. A fast climb is a single quick vault.
+  if (body.climb) {
+    const c = body.climb;
+    if (keys.KeyS || player.area !== "mausoleum" || body.falling) {   // let go
+      body.climb = null; body.air = true; player.vy = 0;
+    } else {
+      c.t += dt;
+      while (c.i < c.segs.length && c.t >= c.segs[c.i].t1) {          // next move
+        c.i++;
+        const n = c.segs[c.i];
+        if (n && (n.type === "catch" || n.type === "mantle")) playSurf("grab", c.m, n.type === "catch" ? 0.8 : 0.55, 0);
+      }
+      const s = c.segs[c.i];
+      let tp = 0, tr = 0, ts = 0;                                   // camera targets: pitch, roll, sideways
+      if (!s) {                                                     // done: standing on the ledge
+        player.x = c.lx; player.z = c.lz; player.y = c.T;
+        body.climb = null; body.air = false; body.baseY = c.T;
+        body.landVel -= 0.5;
+        playSurf("step", c.m, 0.8, 0);
+        body.stepPhase = Math.ceil(body.stepPhase); body.stepIdx = body.stepPhase;
+      } else {
+        const k = Math.min(1, (c.t - s.t0) / (s.t1 - s.t0));
+        const sm = k * k * k * (k * (k * 6 - 15) + 10);           // smootherstep
+        if (s.type === "crouch") { player.y = s.y0 - 0.12 * Math.sin(Math.PI * 0.5 * k); tp = 0.08 * k; }
+        else if (s.type === "leap") {                               // jump: fast off the ground, slowing to the edge
+          player.y = s.y0 + (s.y1 - s.y0) * (1 - (1 - k) * (1 - k)); tp = 0.12;
+        } else if (s.type === "catch") {                            // arms take the weight: drop, swing, settle
+          const d = Math.sin(Math.PI * Math.min(1, k * 1.6)) * (1 - k * 0.4);
+          const hang = s.y0 > c.base + 0.3 ? 1 : 0.15;             // hanging: the arms take the full drop
+          player.y = s.y0 - 0.1 * d * hang; tp = 0.14 - 0.05 * d; tr = 0.035 * Math.sin(k * 2 * Math.PI) * (1 - k);
+        } else if (s.type === "pull") {                             // pull-up: effort at the start, then the chest rises to the edge
+          const e = k < 0.5 ? 2 * k * k : 1 - 2 * (1 - k) * (1 - k);
+          player.y = s.y0 + (s.y1 - s.y0) * e + 0.02 * Math.sin(Math.PI * 6 * k) * (1 - k);   // a little strain wobble
+          tp = 0.14 * (1 - k) + 0.02;
+        } else if (s.type === "mantle") {                           // press on the edge: up over it, leaning forward
+          const up = 1 - Math.pow(1 - k, 3);
+          player.y = s.y0 + (c.T - s.y0) * up + 0.05 * Math.sin(Math.PI * k);
+          const f = Math.max(0, Math.min(1, (k - 0.35) / 0.65)), fe = f * f * (3 - 2 * f);
+          player.x = c.x0 + (c.lx - c.x0) * fe * 0.7; player.z = c.z0 + (c.lz - c.z0) * fe * 0.7;
+          tp = -0.22 * Math.sin(Math.PI * Math.min(1, k * 1.2));
+        } else if (s.type === "stand") {                            // knee up, stand onto it
+          const f = 0.7 + 0.3 * sm;
+          player.x = c.x0 + (c.lx - c.x0) * f; player.z = c.z0 + (c.lz - c.z0) * f;
+          player.y = c.T + 0.02 * Math.sin(Math.PI * k);
+          tp = -0.06 * (1 - k);
+        }
+        if ((s.type === "catch" || s.type === "pull" || s.type === "mantle") && c.sp < CLIMB.fast && !dbgInfStam) {   // tiring
+          stam.v -= (c.sp <= CLIMB.slow ? 0.1 : 0.06) * dt; stam.rest = 0;
+          if (stam.v <= 0) { stam.v = 0; stam.out = true; body.climb = null; body.air = true; player.vy = 0; }
+        }
+      }
+      body.climbPitch += (tp - body.climbPitch) * ease(10, dt);
+      if (body.climb) {
+        body.vx = 0; body.vz = 0; player.vy = 0; body.air = true;
+        body.bobAmt += (0 - body.bobAmt) * ease(4, dt);
+        body.bobY *= 1 - ease(6, dt);
+        body.bobSide += (ts - body.bobSide) * ease(9, dt);
+        body.roll += (tr - body.roll) * ease(9, dt);
+        body.landVel += (-140 * body.landOff - 13 * body.landVel) * dt; body.landOff += body.landVel * dt;
+        stam.fx += (Math.max(stam.out ? 0.75 : 0, Math.min(1, (0.4 - stam.v) / 0.4)) - stam.fx) * ease(3, dt);
+        tiredAmt = stam.fx;
+        body.breathPh = (body.breathPh + (1.7 + 2.3 * stam.fx) * dt) % (2 * Math.PI);
+        body.breath = Math.sin(body.breathPh) * (0.012 + 0.03 * stam.fx);
+        body.fov += (75 - body.fov) * ease(5, dt);
+        return;
+      }
+    }
+  }
+  body.climbPitch += (0 - body.climbPitch) * ease(8, dt);
+
+  const sprinting = sprint && ml > 0 && !stam.out && !body.falling;
+  const maxSp = sprinting ? SPRINT : WALK;
+  const tvx = ml > 0 && !body.falling ? mx / ml * maxSp : 0, tvz = ml > 0 && !body.falling ? mz / ml * maxSp : 0;
+  // speed up / slow down smoothly but grippy; less control in the air
+  // (higher = snappier: ~0.15 s to full speed, ~0.12 s to stop)
+  const k = body.air ? 3 : (ml > 0 ? 15 : 20);
+  body.vx += (tvx - body.vx) * ease(k, dt);
+  body.vz += (tvz - body.vz) * ease(k, dt);
+  player.x += body.vx * dt; player.z += body.vz * dt;
+  // solid ground/obstacles: the matrix floor is flat; the mausoleum has blocks to bump into and stand on
+  const groundY = player.area === "mausoleum" && !body.falling ? mausCollide(player.y) : 0;
+  const speed = Math.hypot(body.vx, body.vz);
+
+  // stamina (hidden)
+  if (dbgInfStam) stam.v = 1;
+  if (sprinting && speed > WALK * 0.8) {
+    stam.v -= STAM.drain * dt; stam.rest = 0;
+  } else {
+    stam.rest += dt;
+    if (stam.rest > STAM.regenDelay)
+      stam.v += (speed > 0.6 ? STAM.regenWalk : STAM.regenIdle) * dt;
+  }
+  stam.v = Math.max(0, Math.min(1, stam.v));
+  if (stam.v <= 0) stam.out = true;
+  else if (stam.out && stam.v >= STAM.recover) stam.out = false;
+  const fatigue = Math.max(stam.out ? 0.75 : 0, Math.min(1, (0.4 - stam.v) / 0.4));
+  stam.fx += (Math.max(0, fatigue) - stam.fx) * ease(3, dt);
+
+  // secret fall: time spent looking straight down, standing still on the matrix floor
+  const lookingDown = player.pitch <= -PITCH_MAX + FALL.lookTol;
+  if (player.area === "matrix" && lookingDown && !body.air && !body.falling && speed < 0.3) body.downT += dt;
+  else body.downT = 0;
+
+  // climbing: Space facing a ledge. On the ground: up to 1.2 m just jump (then Space again
+  // in the air climbs fast), up to 1.8 m climb at medium speed, up to 4.8 m slowly.
+  // In the air: up to 1.25 m (above where you took off) fast, up to 4.8 m slowly.
+  // jump grace: 0.12 s after walking off an edge you can still jump; a Space press up to
+  // 0.15 s before landing still jumps when you land
+  if (!body.air) body.coyote = 0.12; else body.coyote = Math.max(0, body.coyote - dt);
+  body.jumpBuf = hit ? 0.15 : Math.max(0, body.jumpBuf - dt);
+  const canCoyote = body.air && body.coyote > 0 && player.vy <= 0.5;
+  let climbed = false;
+  if (hit && player.area === "mausoleum" && !body.falling && !canCoyote) {
+    const L = mausLedge(fx, fz);
+    if (L) {
+      const hh = L.T - body.baseY;
+      let sp = 0;
+      if (!body.air) sp = hh <= 1.2 ? 0 : hh <= 1.8 ? CLIMB.med : hh <= CLIMB.maxH ? CLIMB.slow : 0;
+      else sp = hh <= 1.25 ? CLIMB.fast : hh <= CLIMB.maxH ? CLIMB.slow : 0;
+      if (sp && !(stam.out && sp < CLIMB.fast)) {
+        body.climb = { T: L.T, lx: L.lx, lz: L.lz, m: L.m, sp, x0: player.x, z0: player.z, t: 0, i: 0, base: body.baseY,
+                       segs: climbPlan(player.y, L.T, sp, !body.air) };
+        body.air = true; player.vy = 0; body.vx = 0; body.vz = 0; climbed = true; body.jumpBuf = 0;
+        if (body.climb.segs[0].type === "catch") playSurf("grab", L.m, 0.8, 0);   // grips right away
+        return;
+      }
+    }
+  }
+  // jump & land back on the lines
+  if ((keys.Space || body.jumpBuf > 0) && ((player.y <= groundY + 1e-6 && !body.air) || canCoyote) && !body.falling && !climbed) {
+    player.vy = stam.v >= STAM.jump ? 6.5 : 5.0;          // tired = weaker jump
+    body.air = true; body.coyote = 0; body.jumpBuf = 0;
+    stam.v = Math.max(0, stam.v - STAM.jump); stam.rest = 0;
+    body.landVel -= 0.35;                                // small push-off dip
+    playSfx("jump", 0.55, 0);
+  }
+  if (body.slowFall) player.vy = Math.max(player.vy - FALL.accel * dt, -FALL.maxSpeed);   // fall-through: gentle
+  else player.vy -= 18 * dt;
+  player.y += player.vy * dt;
+  if (player.area === "mausoleum" && !body.falling && player.y + PLAYER_H > mausCeil) {   // head hits something
+    player.y = Math.max(groundY, mausCeil - PLAYER_H);
+    if (player.vy > 0) player.vy = 0;
+  }
+
+  if (body.falling) {
+    body.fallT += dt;
+    fadeAmt = Math.max(0, Math.min(1, (body.fallT - FALL.fadeAt) / (FALL.switchAt - FALL.fadeAt)));
+    if (body.fallT >= FALL.switchAt) setArea("mausoleum", "drop");   // arrive above the mausoleum
+  } else if (fadeAmt > 0) {
+    fadeAmt = Math.max(0, fadeAmt - dt / 0.9);             // fade back in while dropping
+  }
+
+  if (!body.air && !body.falling && groundY > player.y + 0.03) {   // stepping up onto something low
+    const dy = groundY - player.y;
+    body.stepOff -= dy;                                  // the camera catches up smoothly (no tilt)
+    const slow = 1 - 0.55 * Math.min(1, dy / STEP_UP);   // and walking slows for the step
+    body.vx *= slow; body.vz *= slow;
+    player.y = groundY;
+  }
+  if (player.y < groundY && !body.falling) {
+    if (body.air) {                                      // touchdown
+      const impact = Math.min(-player.vy, 20);
+      body.landVel -= impact * 0.075;
+      playSurf("land", mausSurf, Math.min(1, 0.45 + impact * 0.05), 0);
+      body.stepPhase = Math.ceil(body.stepPhase);        // next stride starts from this landing
+      body.stepIdx = body.stepPhase;
+    }
+    player.y = groundY; player.vy = 0; body.air = false; body.slowFall = false;
+  } else if (player.y > groundY + 0.001 || body.falling) body.air = true;
+  if (!body.air) body.baseY = player.y;
+
+  body.stepOff += (0 - body.stepOff) * ease(12, dt);
+  // landing spring (render only)
+  body.landVel += (-140 * body.landOff - 13 * body.landVel) * dt;
+  body.landOff += body.landVel * dt;
+  body.landOff = Math.max(-0.6, Math.min(0.3, body.landOff));
+
+  // footsteps & head bob: one step per stride length, longer strides when faster
+  const moving = !body.air && speed > 0.6;
+  body.bobAmt += ((moving ? Math.min(1, speed / WALK) : 0) - body.bobAmt) * ease(moving ? 6 : 4, dt);
+  if (!body.air) {
+    if (moving) body.stepPhase += speed / strideAt(speed) * dt;   // 133 bpm walking, 217 bpm running
+    else {                                               // settle feet: finish the current half-step
+      const target = Math.round(body.stepPhase);
+      body.stepPhase += (target - body.stepPhase) * ease(6, dt);
+    }
+    const idx = Math.floor(body.stepPhase + 1e-6);
+    if (idx > body.stepIdx) {
+      body.stepIdx = idx;
+      if (moving) playSurf("step", mausSurf, (0.75 + Math.random() * 0.2) * (sprinting ? 1.15 : 1), idx % 2 ? 0.14 : -0.14);
+    }
+  }
+  const sw = Math.PI * body.stepPhase;
+  const amp = (0.045 + 0.0045 * Math.min(speed, SPRINT)) * body.bobAmt;
+  body.bobY = -Math.abs(Math.sin(sw)) * amp + amp * 0.5;          // dips at each footfall
+  body.bobSide = Math.sin(sw) * 0.04 * body.bobAmt;               // weight shifts left/right
+  // idle breathing — deeper and faster when out of breath.
+  // The phase is ACCUMULATED (phase += rate·dt). Using sin(time·rate) made the
+  // camera shake when the rate changed (e.g. a jump using stamina), because the
+  // phase jumped by time·Δrate — worse the longer you had been playing.
+  const breathRate = 1.7 + 2.3 * stam.fx;
+  body.breathPh = (body.breathPh + breathRate * dt) % (2 * Math.PI);
+  body.breath = Math.sin(body.breathPh) * (0.012 + 0.03 * stam.fx) * (1 - body.bobAmt * 0.7);
+  // blue vignette — steady, no pulsing; only fades in/out with tiredness
+  tiredAmt = stam.fx;
+  // lean into strafes + a little sway with the steps
+  const strafe = (body.vx * rx + body.vz * rz) / SPRINT;
+  const tRoll = -strafe * 0.05 + Math.sin(sw) * 0.006 * body.bobAmt;
+  body.roll += (tRoll - body.roll) * ease(8, dt);
+  // field of view widens a little when sprinting
+  body.fov += ((75 + Math.max(0, speed - WALK) / (SPRINT - WALK) * 8) - body.fov) * ease(5, dt);
+}
+
+const IPD = 0.064, CONVERGE = 6;   // stereo: eye distance and focus distance in metres
+let fpsAvg = 60;
+function frame(now, xrFrame) {
+  if (dead) return;
+  if (xrSession && !xrFrame) return;           // the 3D-screen session runs its own loop
+  if (menuOpen && !xrFrame) {                  // frozen: nothing moves, the last frame stays
+    last = now; requestAnimationFrame(frame); return;
+  }
+  const realDt = Math.max(0, (now - last) / 1000); last = now;
+  if (realDt > 0) fpsAvg += (1 / realDt - fpsAvg) * 0.05;
+  // fixed small steps: stable physics at any frame rate and any time multiplier
+  let rem = Math.min(0.05, realDt) * dbgTime;
+  while (rem > 1e-7) { const h = Math.min(0.02, rem); update(h); rem -= h; }
+  if (dbgEl.classList.contains("on")) dbgInfo(now);
+
+  const time = gameTime;
+  const rx = Math.cos(player.yaw), rz = -Math.sin(player.yaw);
+  // camera — 64-bit on the CPU; only small camera-relative values reach the GPU
+  const camX = player.x + rx * body.bobSide,
+        camY = player.y + EYE + body.bobY + body.breath + body.landOff + body.stepOff,
+        camZ = player.z + rz * body.bobSide;
+  const mod = (a, n) => ((a % n) + n) % n;
+  const pitchR = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, player.pitch + body.landOff * 0.12 + body.climbPitch));
+  const F = 1 / Math.tan((body.fov * Math.PI / 180) / 2);
+
+  // draw the current area from an eye position (64-bit) into a viewport
+  function drawView(ex, ey, ez, vx, vy, vw, vh, aspect, shift, xrView) {
+    gl.viewport(vx, vy, vw, vh);
+    gl.enable(gl.SCISSOR_TEST); gl.scissor(vx, vy, vw, vh);
+    gl.disable(gl.DEPTH_TEST);
+
+    if (player.area === "mausoleum") {
+      gl.disable(gl.BLEND);
+      const setCam = (P) => {
+        const u = P.u;
+        gl.uniform1f(u.uYaw, player.yaw); gl.uniform1f(u.uPitch, pitchR); gl.uniform1f(u.uRoll, body.roll);
+        gl.uniform1f(u.uF, F); gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uEyeShift, shift);
+        gl.uniform1f(u.uXR, xrView ? 1 : 0);
+        if (xrView) {
+          gl.uniformMatrix4fv(u.uXRProj, false, xrView.projectionMatrix);
+          gl.uniformMatrix4fv(u.uXRView, false, xrView.transform.inverse.matrix);
+        }
+      };
+      // sky (full screen, behind everything)
+      gl.disable(gl.DEPTH_TEST);
+      gl.useProgram(mausSkyP.p);
+      { const u = mausSkyP.u;
+        gl.uniform4f(u.uVP, vx, vy, vw, vh);
+        gl.uniform1f(u.uYaw, player.yaw); gl.uniform1f(u.uPitch, pitchR); gl.uniform1f(u.uRoll, body.roll);
+        gl.uniform1f(u.uF, F); gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uEyeShift, shift);
+        gl.uniform1f(u.uXR, xrView ? 1 : 0);
+        if (xrView) {
+          const P = xrView.projectionMatrix;
+          gl.uniform4f(u.uXRP, P[0], P[5], P[8], P[9]);
+          gl.uniformMatrix4fv(u.uXRRot, false, xrView.transform.matrix);
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, postBuf);
+        const loc = gl.getAttribLocation(mausSkyP.p, "aV");
+        gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.TRIANGLES, 0, 3); gl.disableVertexAttribArray(loc); }
+      // geometry with depth
+      gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true);
+      // 64-bit on the CPU: the eye's cell + offset in each grid (floor patterns)
+      const cellOf = L => {
+        const cx = Math.floor(ex / L.cell), cz = Math.floor(ez / L.cell);
+        return { fx: ex - cx * L.cell, fz: ez - cz * L.cell, bx: mod(cx + L.off[0], 256), bz: mod(cz + L.off[1], 256) };
+      };
+      const cp = cellOf(MAUS.peg), cq = cellOf(MAUS.pillar), cw = cellOf(MAUS.wall), cf = cellOf(MAUS.floor);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, shadowOK ? shTex[0] : mausTex);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, shadowOK ? shTex[1] : mausTex);
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, shadowOK ? shTex[2] : mausTex);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, mausTex);
+      const setWorld = (P) => {
+        const u = P.u;
+        setCam(P);
+        gl.uniform2f(u.uClip, 0.1, 2500);
+        gl.uniform1f(u.uEyeY, ey);
+        gl.uniform4f(u.uFeA, cp.fx, cp.fz, cq.fx, cq.fz);
+        gl.uniform4f(u.uFeB, cw.fx, cw.fz, cf.fx, cf.fz);
+        gl.uniform4f(u.uBaseA, cp.bx, cp.bz, cq.bx, cq.bz);
+        gl.uniform4f(u.uBaseB, cw.bx, cw.bz, cf.bx, cf.bz);
+        gl.uniform1i(u.uTab, 0); gl.uniform1i(u.uSh0, 1); gl.uniform1i(u.uSh1, 2); gl.uniform1i(u.uSh2, 3);
+        const shOn = shadowOK && shS[0] && shS[1] && shS[2];
+        gl.uniform1f(u.uShadowOn, shOn ? 1 : 0);
+        if (shOn) {                                                            // eye - each map's centre (64-bit)
+          gl.uniform3f(u.uCamToS0, ex - shS[0].x, ey - shS[0].y, ez - shS[0].z);
+          gl.uniform3f(u.uCamToS1, ex - shS[1].x, ey - shS[1].y, ez - shS[1].z);
+          gl.uniform3f(u.uCamToS2, ex - shS[2].x, ey - shS[2].y, ez - shS[2].z);
+        }
+        gl.uniform3f(u.uLR, LR[0], LR[1], LR[2]); gl.uniform3f(u.uLU, LU[0], LU[1], LU[2]); gl.uniform3f(u.uLF, LF[0], LF[1], LF[2]);
+        gl.uniform3f(u.uShP, SH_HALF[0], SH_HALF[1], SH_HALF[2]); gl.uniform3f(u.uShD, SH_DEPTH[0], SH_DEPTH[1], SH_DEPTH[2]);
+      };
+      // floor
+      gl.useProgram(mausFloorP.p); setWorld(mausFloorP);
+      gl.bindBuffer(gl.ARRAY_BUFFER, floorQuadBuf);
+      { const loc = gl.getAttribLocation(mausFloorP.p, "aV");
+        gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.TRIANGLES, 0, 6); gl.disableVertexAttribArray(loc); }
+      // boxes
+      if (mausR) {
+        gl.useProgram(mausBoxP.p); setWorld(mausBoxP);
+        const rx = mausR.x - ex, rz = mausR.z - ez;
+        gl.uniform3f(mausBoxP.u.uROff, rx, -ey, rz);     // R - eye (64-bit)
+        gl.uniform1f(mausBoxP.u.uPix, 2 / ((F || 1.3) * Math.max(1, vh)));
+        // view-cone culling of 64 m tiles (not for 3D headsets: their views differ per eye)
+        let test = null;
+        if (!xrView) {
+          const cp = Math.cos(pitchR), fwx = -Math.sin(player.yaw) * cp, fwy = Math.sin(pitchR), fwz = -Math.cos(player.yaw) * cp;
+          const half = Math.atan(Math.hypot(aspect, 1) / F) + 0.12;   // half-diagonal of the view + margin
+          test = t => {
+            const vx2 = t.x + rx, vy2 = t.y - ey, vz2 = t.z + rz, d = Math.hypot(vx2, vy2, vz2);
+            if (d <= t.r) return true;
+            const lim = half + Math.asin(t.r / d);
+            return lim >= Math.PI || (vx2 * fwx + vy2 * fwy + vz2 * fwz) > d * Math.cos(lim);
+          };
+        }
+        drawBoxes(mausBoxP, meshRoundBuf, meshRound.length / 6, instBufs[0], instN[0], test && tileRanges(0, test));
+        for (let k = 1; k < 4; k++) drawBoxes(mausBoxP, meshPlainBuf, meshPlain.length / 6, instBufs[k], instN[k], test && tileRanges(k, test));
+      }
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.SCISSOR_TEST);
+      return;
+    }
+
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+    // grid wrap in 64-bit on the CPU; only small camera-relative values reach the GPU
+    const ox = Math.floor(ex / SP), oy = Math.floor(ey / SP), oz = Math.floor(ez / SP);
+    const fracX = ex - ox * SP, fracY = ey - oy * SP, fracZ = ez - oz * SP;
+    function common(P) {
+      gl.useProgram(P.p);
+      gl.uniform3f(P.u.uCamFrac, fracX, fracY, fracZ);
+      gl.uniform1f(P.u.uYaw, player.yaw); gl.uniform1f(P.u.uPitch, pitchR);
+      gl.uniform1f(P.u.uRoll, body.roll);
+      gl.uniform1f(P.u.uTime, time % 3600); gl.uniform1f(P.u.uF, F); gl.uniform1f(P.u.uAspect, aspect);
+      gl.uniform2f(P.u.uClip, 0.05, 400);
+      gl.uniform1f(P.u.uEyeShift, shift);
+      gl.uniform1f(P.u.uXR, xrView ? 1 : 0);
+      if (xrView) {
+        gl.uniformMatrix4fv(P.u.uXRProj, false, xrView.projectionMatrix);
+        gl.uniformMatrix4fv(P.u.uXRView, false, xrView.transform.inverse.matrix);
+      }
+    }
+    // grid
+    common(gridP);
+    gl.uniform3f(gridP.u.uOff, mod(ox, 997), Math.max(-1e6, Math.min(1e6, oy)), mod(oz, 997));
+    gl.uniform1f(gridP.u.uSP, SP);
+    gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
+    const locP = gl.getAttribLocation(gridP.p, "aP");
+    gl.enableVertexAttribArray(locP);
+    gl.vertexAttribPointer(locP, 4, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.LINES, 0, gridCount);
+    gl.disableVertexAttribArray(locP);
+    // glyphs
+    common(glyphP);
+    gl.uniform3f(glyphP.u.uCam, mod(ex, 90), mod(ey, 36), mod(ez, 90));   // y too, so the rain doesn't ride along when you fall
+    gl.uniform1f(glyphP.u.uH, vh);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(glyphP.u.uTex, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, glyphBuf);
+    const locS = gl.getAttribLocation(glyphP.p, "aS");
+    gl.enableVertexAttribArray(locS);
+    gl.vertexAttribPointer(locS, 4, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.POINTS, 0, NG);
+    gl.disableVertexAttribArray(locS);
+    gl.disable(gl.SCISSOR_TEST);
+  }
+
+  if (player.area === "mausoleum") mausPrepare(camX, camY, camZ);   // box lists + sun shadow maps
+
+  if (xrFrame) {
+    // ---- 3D screen / headset: the device gives one view per eye ----
+    const pose = xrRef && xrFrame.getViewerPose(xrRef);
+    const layer = xrSession.renderState.baseLayer;
+    if (pose && layer) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+      gl.disable(gl.SCISSOR_TEST);
+      gl.clearColor(0, 0.008, 0.004, 1); gl.depthMask(true);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      const views = pose.views;
+      views.forEach((view, i) => {
+        // Invert 3D: each eye's image goes to the other eye
+        const target = settings.invert && views.length === 2 ? views[1 - i] : view;
+        const vp = layer.getViewport(target);
+        drawView(camX, camY, camZ, vp.x, vp.y, vp.width, vp.height, vp.width / vp.height, 0, view);
+      });
+    }
+    xrSession.requestAnimationFrame(frame);
+    return;
+  }
+
+  // ---- screen: normal or one of the stereo layouts ----
+  const W = canvas.width, H = canvas.height;
+  const inv = settings.invert ? -1 : 1;
+  // eye k = -1 (left) / +1 (right): shifted sideways along the camera's right vector
+  const eye = k => { const e = k * inv * IPD / 2; return [camX + rx * e, camY, camZ + rz * e, e]; };
+  const shiftFor = (e, aspect) => e * F / (aspect * CONVERGE);
+  const full = [0, 0, W, H];
+  beginScene();
+  clearScene();
+  const mode = settings.stereo;
+  if (mode === "anaglyph") {
+    const L = eye(-1), R = eye(1), asp = W / H;
+    drawView(L[0], L[1], L[2], 0, 0, W, H, asp, shiftFor(L[3], asp));
+    captureScene(0);
+    bindSceneTarget(); clearScene();
+    drawView(R[0], R[1], R[2], 0, 0, W, H, asp, shiftFor(R[3], asp));
+    captureScene(1);
+    postPass(1, full, full);
+  } else if (mode === "sbs" || mode === "sbsFlat" || mode === "sbsStereo") {
+    const hw = Math.floor(W / 2);
+    let rL, rR, asp;
+    if (mode === "sbsStereo") {                // two rounded squares, black around them
+      const sq = Math.floor(Math.min(hw, H) * 0.92);
+      const y = Math.floor((H - sq) / 2);
+      rL = [Math.floor(hw / 2 - sq / 2), y, sq, sq];
+      rR = [hw + Math.floor((W - hw) / 2 - sq / 2), y, sq, sq];
+      asp = 1;
+    } else {
+      rL = [0, 0, hw, H]; rR = [hw, 0, W - hw, H];
+      // warped: each eye keeps the full-screen shape, squeezed into its half (3D TVs stretch it back)
+      // no-warp: each half is its own correctly-shaped picture
+      asp = mode === "sbs" ? W / H : hw / H;
+    }
+    const L = eye(-1), R = eye(1);
+    drawView(L[0], L[1], L[2], rL[0], rL[1], rL[2], rL[3], asp, shiftFor(L[3], asp));
+    drawView(R[0], R[1], R[2], rR[0], rR[1], rR[2], rR[3], asp, shiftFor(R[3], asp));
+    captureScene(0);
+    postPass(mode === "sbs" ? 2 : mode === "sbsFlat" ? 3 : 4, rL, rR);
+  } else {
+    drawView(camX, camY, camZ, 0, 0, W, H, W / H, 0);
+    captureScene(0);
+    postPass(0, full, full);
+  }
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ================= saving ================= */
+const tc = document.createElement("canvas"); tc.width = 160; tc.height = 90;
+function makeThumb() {
+  try {
+    const c = tc.getContext("2d");
+    c.fillStyle = "#000"; c.fillRect(0, 0, tc.width, tc.height);
+    // cover-fit the current frame
+    const s = Math.max(tc.width / canvas.width, tc.height / canvas.height);
+    const w = canvas.width * s, h = canvas.height * s;
+    c.drawImage(canvas, (tc.width - w) / 2, (tc.height - h) / 2, w, h);
+    return tc.toDataURL("image/jpeg", 0.6);
+  } catch (e) { return null; }
+}
+let lastCookie = "";
+function saveCookie() {
+  const s = snapshotState();
+  const sig = JSON.stringify([s.x, s.y, s.z, s.yaw, s.pitch, s.slot, s.area]);
+  if (sig !== lastCookie) { writeCookie(s); lastCookie = sig; }
+}
+function makeShot() {                      // sharp copy of the last frame for the reload screen
+  try {
+    const sc = Math.min(1, 1280 / canvas.width), c = document.createElement("canvas");
+    c.width = Math.round(canvas.width * sc); c.height = Math.round(canvas.height * sc);
+    c.getContext("2d").drawImage(canvas, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.85);
+  } catch (e) { return null; }
+}
+function backupLS(leaving) {
+  const s = snapshotState();
+  writeCookie(s);
+  writeLS(LS_STATE, JSON.stringify(s));
+  const th = makeThumb(); if (th) writeLS(LS_THUMB, th);
+  if (leaving) { const sh = makeShot(); if (!sh || !writeLS(LS_SHOT, sh)) writeLS(LS_SHOT, ""); }
+}
+const timers = [
+  setInterval(saveCookie, 1000),        // cookie: continuously
+  setInterval(() => { backupLS(); writeLS(LS_SHOT, ""); }, 60000)   // localStorage: once a minute (old reload shot dropped)
+];
+addEventListener("pagehide", () => { if (!dead) backupLS(true); }); // and once more on close / reload
+document.addEventListener("visibilitychange", () => { if (document.hidden && !dead) backupLS(); });
+
+// called when another tab takes over; returns the final state for the handoff
+function stop(save) {
+  if (dead) return null;
+  const st = snapshotState();
+  if (save) backupLS();
+  dead = true;
+  timers.forEach(clearInterval);
+  removeEventListener("pointerdown", startAmbience, true);
+  removeEventListener("keydown", startAmbience, true);
+  if (actx) actx.close().catch(() => {});
+  if (xrSession) xrSession.end().catch(() => {});
+  for (const k in keys) keys[k] = false;
+  if (document.pointerLockElement && document.exitPointerLock) document.exitPointerLock();
+  return save ? st : null;
+}
+
+/* ================= reveal ================= */
+const minShow = shot ? 120 : thumb ? 900 : 300;
+const start = performance.now();
+(function waitReady() {
+  const el = performance.now() - start;
+  if (el > minShow) { loader.classList.add("gone"); }
+  else setTimeout(waitReady, 50);
+})();
+return { stop };
+} // end boot()
+})();
+</script>
+</body>
+</html>
