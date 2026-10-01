@@ -62,12 +62,29 @@ input[type=range]{width:160px}
         <button class="btn ghost" type="button" id="copy">Copy image</button>
       </div>
       <div class="row">
+        <button class="btn ghost" type="button" id="pickdata">Punch a file instead</button>
+        <input type="file" id="datafile" class="hidden-file">
+        <button class="btn ghost" type="button" id="clearfile" hidden>Back to URL</button>
+        <label class="lbl" for="layout">Layout</label>
+        <select id="layout"><option value="stack">Stack</option><option value="grid">Grid</option></select>
+        <label class="lbl" for="res">Resolution</label>
+        <select id="res"><option value="full">Full</option><option value="8">Small text 8px</option><option value="3">Small text 3px</option></select>
+      </div>
+      <div class="row">
+        <button class="btn ghost" type="button" id="vidbtn">Export video</button>
+        <label class="lbl" for="vidrate">Speed</label>
+        <input type="number" id="vidrate" value="2" min="0.01" step="any" style="width:80px;font:14px var(--mono);padding:8px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg)">
+        <select id="vidunit" aria-label="Speed unit"><option value="fps" selected>cards per second (fps)</option><option value="sec">seconds per card</option></select>
+        <span class="meta" id="vidmeta"></span>
+      </div>
+      <div class="row">
         <label class="check"><input type="checkbox" id="interp"> Print the text along the top edge</label>
       </div>
       <div class="meta" id="meta"></div>
     </form>
+    <video id="vid" controls loop playsinline hidden style="width:100%;border-radius:4px;background:#000"></video>
     <div class="deck"><img id="out" alt="Punched card image"></div>
-    <p class="hint">Top-edge printing is off by default, so the only way to read the URL is to decode the holes. To save, right-click the image (long-press on a phone) and choose Save Image.</p>
+    <p class="hint">The video plays the deck one card at a time; right-click it to save. Text files are punched one line per card in Hollerith code. Any other file is punched in IBM column binary, 3 bytes across every 2 columns. Up to 2,000 cards are drawn, fewer at full resolution. To save, right-click the image (long-press on a phone) and choose Save Image.</p>
   </section>
 
   <section id="p-over" role="tabpanel" aria-labelledby="t-over" hidden style="display:grid;gap:16px">
@@ -152,44 +169,86 @@ function digit(g,d,cx,cy,h,lw,wr){
 }
 function colNum(g,n,cx,cy){const h=8.5,ds=String(n).split(""),adv=5.6;
   ds.forEach((d,i)=>digit(g,+d,cx+(i-(ds.length-1)/2)*adv,cy,h,1.1,.5));}
-function drawCard(g,text,n,total,interp){
+// The blank card is identical for every card, so draw it once and reuse it
+let TPL=null;
+function template(){
+  if(TPL)return TPL;
+  TPL=document.createElement("canvas");TPL.width=W;TPL.height=H;const g=TPL.getContext("2d");
   cardPath(g);g.fillStyle="#f2ebd3";g.fill();g.save();g.clip();
-  g.fillStyle="#7a6a4c";g.textAlign="center";g.textBaseline="middle";
+  g.strokeStyle="#3d3a33";
   for(let c=0;c<80;c++){
-    g.font="15px 'Pathway Gothic One','Arial Narrow',sans-serif";
-    g.strokeStyle="#3d3a33";for(let d=0;d<=9;d++)digit(g,d,colX(c),rowY(R[d]),14);
-    g.font="8px 'Pathway Gothic One','Arial Narrow',sans-serif";
+    for(let d=0;d<=9;d++)digit(g,d,colX(c),rowY(R[d]),14);
     colNum(g,c+1,colX(c),rowY(2)+26);colNum(g,c+1,colX(c),rowY(11)+26);
   }
-  g.textAlign="left";g.font="600 11px 'IBM Plex Mono',monospace";
+  g.fillStyle="#7a6a4c";g.textBaseline="middle";g.textAlign="left";
   g.strokeStyle="#7a6a4c";g.lineWidth=1;g.strokeRect(58,H-22,30,13);
   g.font="700 9px 'IBM Plex Sans Condensed',sans-serif";g.fillText("IBM",62,H-15);
   g.font="600 11px 'IBM Plex Mono',monospace";g.fillText("5081",94,H-15);
-  if(total>1)g.fillText(`${n}/${total}`,W-70,H-15);
-  if(interp){g.fillStyle="#3a3a3a";g.textAlign="center";g.font="900 17px 'Doto','IBM Plex Mono',monospace";}
-  [...text].forEach((ch,c)=>{
-    const code=C[ch]??[12,11,0,8,7];
-    if(interp)dotChar(g,ch,colX(c),6);
-    code.forEach(row=>{g.fillStyle="#222";g.fillRect(colX(c)-HW/2,rowY(R[row])-HH/2,HW,HH)});
-  });
   g.restore();cardPath(g);g.strokeStyle="#c2b28a";g.lineWidth=2;g.stroke();
+  return TPL;
 }
-
+// Draws one card into g at the current transform (so it can be drawn pre-scaled)
+function drawCard(g,text,n,total,interp){
+  g.drawImage(template(),0,0);
+  g.fillStyle="#7a6a4c";g.textBaseline="middle";g.textAlign="left";g.font="600 11px 'IBM Plex Mono',monospace";
+  if(total>1)g.fillText(`${n}/${total}`,W-70,H-15);
+  if(interp)text.forEach(({ch},c)=>{if(ch)dotChar(g,ch,colX(c),6)});
+  g.fillStyle="#222";
+  text.forEach(({code},c)=>{const x=colX(c)-HW/2;for(const row of code)g.fillRect(x,rowY(R[row])-HH/2,HW,HH)});
+}
+let fileData=null; // {name, bytes}
+const MAXCARDS=2000, ROWS=[12,11,0,1,2,3,4,5,6,7,8,9];
+function textCols(str){return [...str].map(ch=>({ch,code:C[ch]??[12,11,0,8,7]}))}
+function binCols(bytes){ // IBM column binary: 3 bytes -> 2 columns of 12 bits, row 12 = high bit
+  const cols=[];for(let i=0;i<bytes.length;i+=3){
+    const v=(bytes[i]<<16)|((bytes[i+1]??0)<<8)|(bytes[i+2]??0);
+    [v>>>12,v&4095].forEach((w,k)=>{if(k===1&&i+1>=bytes.length)return;cols.push({ch:null,code:ROWS.filter((_,r)=>w&(2048>>r))})});
+  }return cols}
+function isText(bytes){try{const t=new TextDecoder("utf-8",{fatal:true}).decode(bytes);return /^[\x20-\x7e\t\r\n]*$/.test(t)?t:null}catch{return null}}
+let cardCols=[];
+function renderCard(i,interp){const cv=document.createElement("canvas");cv.width=W;cv.height=H;drawCard(cv.getContext("2d"),cardCols[i],i+1,cardCols.length,interp);return cv}
 function punch(){
-  const s=document.getElementById("url").value.trim()||" ";
   const interp=document.getElementById("interp").checked;
-  const chunks=s.match(/[\s\S]{1,80}/g);
-  cards=chunks.map((t,i)=>{const cv=document.createElement("canvas");cv.width=W;cv.height=H;drawCard(cv.getContext("2d"),t,i+1,chunks.length,interp);return cv});
+  let cols,info,unk=[];
+  if(fileData){
+    const t=isText(fileData.bytes);
+    if(t!==null){const lines=t.replace(/\r/g,"").replace(/\t/g," ").split("\n");if(lines.at(-1)==="")lines.pop();
+      cardCols=lines.flatMap(l=>(l.match(/[\s\S]{1,80}/g)||[""]).map(textCols));unk=[...new Set([...t].filter(c=>c>" "&&!(c in C)))];
+      info=`${fileData.name} · text, one line per card`;}
+    else{const c=binCols(fileData.bytes);cardCols=[];for(let i=0;i<c.length;i+=80)cardCols.push(c.slice(i,i+80));
+      info=`${fileData.name} · ${fileData.bytes.length} bytes in column binary, 120 bytes per card`;}
+  }else{
+    const s=document.getElementById("url").value.trim()||" ";
+    cardCols=(s.match(/[\s\S]{1,80}/g)).map(textCols);unk=[...new Set([...s].filter(c=>!(c in C)))];
+    info=`${s.length} characters`;
+  }
+  if(!cardCols.length)cardCols=[[]];
+  const total=cardCols.length;
+  // output scale: smallest text (column numbers) is 8.5px at full size
+  const res=document.getElementById("res").value,sc=res==="full"?1:(+res)/8.5;
+  const cw=Math.round(W*sc),ch=Math.round(H*sc),gap=Math.round(GAP*sc);
+  const shown=Math.min(total,MAXCARDS,Math.floor(120e6/((cw+gap)*(ch+gap))),Math.floor(32000/(ch+gap))*(document.getElementById("layout").value==="grid"?999:1));
+  const grid=document.getElementById("layout").value==="grid";
+  const ncol=grid?Math.ceil(Math.sqrt(shown*ch/cw)):1,nrow=Math.ceil(shown/ncol);
   const deck=document.createElement("canvas");
-  deck.width=W;deck.height=cards.length*H+(cards.length-1)*GAP;
-  const g=deck.getContext("2d");cards.forEach((cv,i)=>g.drawImage(cv,0,i*(H+GAP)));
-  document.getElementById("out").src=deck.toDataURL("image/png");window._cv=deck;
-  const unk=[...new Set([...s].filter(c=>!(c in C)))];
-  document.getElementById("meta").textContent=`${s.length} characters · ${cards.length} card${cards.length>1?"s":""}`+(unk.length?` · no code for ${unk.join(" ")} (punched as lace)`:"");
+  deck.width=ncol*cw+(ncol-1)*gap;deck.height=nrow*ch+(nrow-1)*gap;
+  const g=deck.getContext("2d");g.imageSmoothingQuality="high";
+  for(let i=0;i<shown;i++){g.setTransform(cw/W,0,0,ch/H,(i%ncol)*(cw+gap),Math.floor(i/ncol)*(ch+gap));drawCard(g,cardCols[i],i+1,total,interp)}
+  g.setTransform(1,0,0,1,0,0);
+  window._cv=deck;deck.toBlob(bl=>{const o=document.getElementById("out");if(o._u)URL.revokeObjectURL(o._u);o._u=URL.createObjectURL(bl);o.src=o._u});
+  document.getElementById("meta").textContent=`${info} · ${total} card${total>1?"s":""}`+(shown<total?` (showing first ${shown})`:"")+` · ${deck.width}×${deck.height}px`+(unk.length?` · no code for ${unk.join(" ")} (punched as lace)`:"");
   const sel=document.getElementById("which"),prev=+sel.value||0;
-  sel.innerHTML=cards.map((_,i)=>`<option value="${i}">${i+1} of ${cards.length}</option>`).join("");
-  sel.value=Math.min(prev,cards.length-1);setWarpImg();
+  sel.innerHTML=cardCols.slice(0,shown).map((_,i)=>`<option value="${i}">${i+1} of ${total}</option>`).join("");
+  sel.value=Math.min(prev,shown-1);setWarpImg();
 }
+document.getElementById("pickdata").addEventListener("click",()=>document.getElementById("datafile").click());
+document.getElementById("datafile").addEventListener("change",async e=>{
+  const f=e.target.files[0];if(!f)return;
+  fileData={name:f.name,bytes:new Uint8Array(await f.arrayBuffer())};
+  document.getElementById("clearfile").hidden=false;document.getElementById("url").disabled=true;punch();
+});
+document.getElementById("clearfile").addEventListener("click",e=>{fileData=null;e.currentTarget.hidden=true;document.getElementById("url").disabled=false;document.getElementById("datafile").value="";punch()});
+["layout","res"].forEach(id=>document.getElementById(id).addEventListener("change",punch));
 document.getElementById("f").addEventListener("submit",e=>{e.preventDefault();punch()});
 document.getElementById("interp").addEventListener("change",punch);
 document.getElementById("copy").addEventListener("click",e=>{
@@ -199,6 +258,37 @@ document.getElementById("copy").addEventListener("click",e=>{
       .then(()=>b.textContent="Copied").catch(()=>b.textContent="Copy blocked, right-click instead")
       .finally(()=>setTimeout(()=>b.textContent="Copy image",2000));
   });
+});
+
+
+// Video export: record a canvas that shows one card at a time
+document.getElementById("vidbtn").addEventListener("click",async e=>{
+  const btn=e.currentTarget,meta=document.getElementById("vidmeta"),vid=document.getElementById("vid");
+  if(!window.MediaRecorder||!HTMLCanvasElement.prototype.captureStream){meta.textContent="This browser can't record video.";return}
+  btn.disabled=true;
+  const res=document.getElementById("res").value,sc=res==="full"?1:(+res)/8.5;
+  const cw=Math.round(W*sc/2)*2,ch=Math.round(H*sc/2)*2,interp=document.getElementById("interp").checked;
+  const v=parseFloat(document.getElementById("vidrate").value);
+  if(!(v>0)){meta.textContent="Enter a speed above 0.";btn.disabled=false;return}
+  const fps=document.getElementById("vidunit").value==="fps"?Math.min(v,60):1/v;
+  const n=Math.min(cardCols.length,MAXCARDS),dur=1000/fps;
+  const cv=document.createElement("canvas");cv.width=cw;cv.height=ch;const g=cv.getContext("2d");
+  const draw=i=>{g.setTransform(1,0,0,1,0,0);g.fillStyle="#2a2f36";g.fillRect(0,0,cw,ch);g.setTransform(cw/W,0,0,ch/H,0,0);drawCard(g,cardCols[i],i+1,cardCols.length,interp)};
+  draw(0);
+  const type=["video/mp4;codecs=avc1","video/webm;codecs=vp9","video/webm"].find(t=>MediaRecorder.isTypeSupported(t))||"";
+  const stream=cv.captureStream(0),track=stream.getVideoTracks()[0],rec=new MediaRecorder(stream,type?{mimeType:type,videoBitsPerSecond:8e6}:{});
+  const chunks=[];rec.ondataavailable=ev=>ev.data.size&&chunks.push(ev.data);
+  const done=new Promise(r=>rec.onstop=r);rec.start();
+  const t0=performance.now();
+  for(let i=0;i<n;i++){
+    draw(i);track.requestFrame?.();meta.textContent=`Recording card ${i+1} of ${n}…`;
+    const until=t0+(i+1)*dur;while(performance.now()<until)await new Promise(r=>setTimeout(r,Math.min(30,until-performance.now())));
+  }
+  rec.stop();await done;
+  const blob=new Blob(chunks,{type:rec.mimeType||"video/webm"});
+  if(vid._u)URL.revokeObjectURL(vid._u);vid._u=URL.createObjectURL(blob);vid.src=vid._u;vid.hidden=false;
+  meta.textContent=`${n} cards · ${(n*dur/1000).toFixed(1)} s · ${cw}×${ch} · ${(blob.type.split(";")[0]).replace("video/","").toUpperCase()} · ${(blob.size/1e6).toFixed(1)} MB`;
+  btn.disabled=false;
 });
 
 // ---------- Tabs ----------
@@ -211,7 +301,7 @@ const stage=document.getElementById("stage"),warp=document.getElementById("warp"
 let pts=null,photo=null; // points stored as fractions of stage size
 const handles=[1,2,3,4].map(n=>{const h=document.createElement("div");h.className="h";h.textContent=n;stage.appendChild(h);return h});
 function defaultPts(){const a=W/H;const w=.7,h=w/a*(stage.clientWidth/stage.clientHeight);const x=.15,y=(1-h)/2;return[[x,y],[x+w,y],[x+w,y+h],[x,y+h]]}
-function setWarpImg(){if(cards.length)warp.src=cards[+document.getElementById("which").value||0].toDataURL()}
+function setWarpImg(){if(cardCols.length)warp.src=renderCard(+document.getElementById("which").value||0,document.getElementById("interp").checked).toDataURL()}
 document.getElementById("which").addEventListener("change",setWarpImg);
 
 function solve(A,b){const n=b.length;for(let i=0;i<n;i++){let m=i;for(let k=i+1;k<n;k++)if(Math.abs(A[k][i])>Math.abs(A[m][i]))m=k;[A[i],A[m]]=[A[m],A[i]];[b[i],b[m]]=[b[m],b[i]];for(let k=i+1;k<n;k++){const f=A[k][i]/A[i][i];for(let j=i;j<n;j++)A[k][j]-=f*A[i][j];b[k]-=f*b[i]}}const x=Array(n);for(let i=n-1;i>=0;i--){let s=b[i];for(let j=i+1;j<n;j++)s-=A[i][j]*x[j];x[i]=s/A[i][i]}return x}
