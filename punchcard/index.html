@@ -84,7 +84,7 @@ input[type=range]{width:160px}
     </form>
     <video id="vid" controls loop playsinline hidden style="width:100%;border-radius:4px;background:#000"></video>
     <div class="deck"><img id="out" alt="Punched card image"></div>
-    <p class="hint">The video plays the deck one card at a time; right-click it to save. Text files are punched one line per card in Hollerith code. Any other file is punched in IBM column binary, 3 bytes across every 2 columns. Up to 2,000 cards are drawn, fewer at full resolution. To save, right-click the image (long-press on a phone) and choose Save Image.</p>
+    <p class="hint">The video plays the deck one card at a time; right-click it to save. Text files are punched one line per card in Hollerith code. Any other file is punched in IBM column binary, 3 bytes across every 2 columns. The image holds as many cards as the browser can draw in one picture (fewer at full resolution); the video has no limit. To save, right-click the image (long-press on a phone) and choose Save Image.</p>
   </section>
 
   <section id="p-over" role="tabpanel" aria-labelledby="t-over" hidden style="display:grid;gap:16px">
@@ -197,7 +197,7 @@ function drawCard(g,text,n,total,interp){
   text.forEach(({code},c)=>{const x=colX(c)-HW/2;for(const row of code)g.fillRect(x,rowY(R[row])-HH/2,HW,HH)});
 }
 let fileData=null; // {name, bytes}
-const MAXCARDS=2000, ROWS=[12,11,0,1,2,3,4,5,6,7,8,9];
+const MAXCARDS=Infinity, ROWS=[12,11,0,1,2,3,4,5,6,7,8,9];
 function textCols(str){return [...str].map(ch=>({ch,code:C[ch]??[12,11,0,8,7]}))}
 function binCols(bytes){ // IBM column binary: 3 bytes -> 2 columns of 12 bits, row 12 = high bit
   const cols=[];for(let i=0;i<bytes.length;i+=3){
