@@ -305,7 +305,44 @@ function snapshotState() {
    input and fades in.
    (Audio samples are Float32 — fine; the 64-bit rule is for world data.) */
 const AMB_VOL = 0.10;        // overall ambience loudness (keep it quiet)
-let actx = null, ambGain = null, ambOn = false;
+let actx = null, ambGain = null, ambOn = false, windL = null, windR = null;
+/* ---- directional audio ----
+   A sound from a direction in the world is louder in the near ear: the far ear gets up to
+   60% less (fully to one side: near 100%, far 40%; straight ahead / behind: both 100%).
+   Turning the camera fast weakens the effect (`dirK`): flinging the view around would
+   otherwise swing every sound from ear to ear ("shSHshSH"). It comes back smoothly once
+   the view settles. Gains glide (30 ms) so there's no zipper noise.
+   dirGains(dx, dz) -> [left, right] for a world direction from the listener. */
+const DIR_FAR = 0.6;                     // far-ear reduction when the sound is fully to one side
+let dirK = 1, dirTurn = 0, dirLastYaw = null;
+function dirGains(dx, dz) {
+  const l = Math.hypot(dx, dz) || 1;
+  const side = ((dx * Math.cos(player.yaw) - dz * Math.sin(player.yaw)) / l) * dirK;   // +1 right .. -1 left
+  return [1 - DIR_FAR * Math.max(0, side), 1 - DIR_FAR * Math.max(0, -side)];
+}
+// once per frame: measure how fast the view turns, then pan the looping sources
+function updateDirAudio(dt) {
+  if (dirLastYaw === null) dirLastYaw = player.yaw;
+  const dy = Math.atan2(Math.sin(player.yaw - dirLastYaw), Math.cos(player.yaw - dirLastYaw));
+  dirLastYaw = player.yaw;
+  if (dt <= 0) return;
+  const rate = Math.abs(dy) / dt;                                     // rad/s
+  dirTurn += (rate - dirTurn) * (1 - Math.exp(-(rate > dirTurn ? 14 : 4) * dt));
+  const k = 1 / (1 + Math.pow(dirTurn / 2.2, 2));                    // ~half effect at 2.2 rad/s
+  dirK += (k - dirK) * (1 - Math.exp(-(k < dirK ? 12 : 2.5) * dt));   // fades out fast, back in gently
+  if (!actx || !windL) return;
+  // the matrix wind blows from a world direction that drifts slowly (stays seamless)
+  const t = actx.currentTime, a = 0.6 + 0.9 * Math.sin(2 * Math.PI * t / 53) + 0.45 * Math.sin(2 * Math.PI * t / 23 + 1);
+  const [gl, gr] = dirGains(Math.cos(a), Math.sin(a));
+  windL.gain.setTargetAtTime(gl, t, 0.03); windR.gain.setTargetAtTime(gr, t, 0.03);
+}
+// a one-shot sound at a world position (for future world sounds / items): direction +
+// gentle distance falloff, decided when it starts
+function playAt(kind, vol, wx, wz) {
+  const dx = wx - player.x, dz = wz - player.z, d = Math.hypot(dx, dz);
+  const [gl, gr] = d > 0.3 ? dirGains(dx, dz) : [1, 1];
+  playSfx(kind, vol / (1 + d * 0.08), 0, [gl, gr]);
+}
 function makeWindBuffer(ctx) {
   const sr = 22050;          // generated at a lo-fi rate (also 2x faster to build); the browser resamples it
   const waves = [5.6, 6.8, 5.1, 7.3, 6.2];      // seconds per wave
@@ -353,11 +390,9 @@ function makeWindBuffer(ctx) {
       if (i < X) { const t = i / X; v = raw[i] * t + raw[L + i] * (1 - t); } // seamless loop
       // lo-fi; a little dither so quiet parts stay grainy instead of rounding to silence
       if (i % hold === 0) held = Math.round((v / peak) * 0.9 * levels + (Math.random() - Math.random()) * 0.5) / levels;
-      // slow left/right drift (periodic in the loop so it stays seamless)
-      const w = 2 * Math.PI * (i / sr) / secs;
-      const pan = 0.45 * Math.sin(3 * w + 0.8) + 0.15 * Math.sin(7 * w + 2.1);   // -0.6..0.6
-      const ang = (pan + 1) * Math.PI / 4;
-      out[i] = held * Math.SQRT2 * (ch === 0 ? Math.cos(ang) : Math.sin(ang));
+      // (no panning baked in any more: the wind now blows from a direction in the world
+      //  and is panned live by the directional audio, see dirAudio below)
+      out[i] = held;
     }
   }
   return buf;
@@ -392,7 +427,13 @@ function startAmbience() {
       const filt = actx.createBiquadFilter();       // soften the aliasing a little
       filt.type = "lowpass"; filt.frequency.value = 4200; filt.Q.value = 0.5;
       ambGain = actx.createGain(); ambGain.gain.value = 0;
-      src.connect(filt); filt.connect(ambGain); ambGain.connect(actx.destination);
+      // directional: each ear through its own gain (set every frame by updateDirAudio)
+      const split = actx.createChannelSplitter(2), merge = actx.createChannelMerger(2);
+      windL = actx.createGain(); windR = actx.createGain();
+      src.connect(filt); filt.connect(split);
+      split.connect(windL, 0); split.connect(windR, 1);
+      windL.connect(merge, 0, 0); windR.connect(merge, 0, 1);
+      merge.connect(ambGain); ambGain.connect(actx.destination);
       src.start();
     } catch (e) { actx = null; return; }
   }
@@ -503,7 +544,7 @@ function playSurf(kind, mat, vol, pan) {
           : (mat === 1 || mat === 5 || mat === 6 || mat === 15 || mat === 16) ? "hollow" : "slab";
   playSfx(kind + "_" + s, vol, pan);
 }
-function playSfx(kind, vol, pan) {
+function playSfx(kind, vol, pan, ears) {
   if (dead || !actx || actx.state !== "running") return;
   try {
     if (!sfxBufs) buildSfx();
@@ -512,7 +553,11 @@ function playSfx(kind, vol, pan) {
     src.playbackRate.value = 0.92 + Math.random() * 0.16;
     const g = actx.createGain(); g.gain.value = vol;
     src.connect(g);
-    if (actx.createStereoPanner) { const pn = actx.createStereoPanner(); pn.pan.value = pan; g.connect(pn); pn.connect(sfxBus); }
+    if (ears && actx.createChannelMerger) {          // directional: own gain per ear
+      const m = actx.createChannelMerger(2), gL = actx.createGain(), gR = actx.createGain();
+      gL.gain.value = ears[0]; gR.gain.value = ears[1];
+      g.connect(gL); g.connect(gR); gL.connect(m, 0, 0); gR.connect(m, 0, 1); m.connect(sfxBus);
+    } else if (actx.createStereoPanner) { const pn = actx.createStereoPanner(); pn.pan.value = pan; g.connect(pn); pn.connect(sfxBus); }
     else g.connect(sfxBus);
     src.start();
   } catch (e) {}
@@ -2893,6 +2938,7 @@ function frame(now, xrFrame) {
   // fixed small steps: stable physics at any frame rate and any time multiplier
   let rem = Math.min(0.05, realDt) * dbgTime;
   while (rem > 1e-7) { const h = Math.min(0.02, rem); update(h); rem -= h; }
+  updateDirAudio(Math.min(0.1, realDt));
   if (dbgEl.classList.contains("on")) dbgInfo(now);
 
   const time = gameTime;
