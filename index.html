@@ -1,15 +1,22 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
 <title>Interactive-site</title>
 <style>
+    html {
+        -webkit-text-size-adjust: 100%;
+    }
+
     body {
         margin: 0;
         padding: 0;
         overflow-x: hidden;
         background-color: #000000;
     }
-    
+
     .star-line {
         position: fixed;
         left: 0;
@@ -18,17 +25,87 @@
         background-image: url('stars.gif');
         background-repeat: repeat-x;
         z-index: 1;
+        pointer-events: none;
+    }
+
+    #MainContent {
+        position: relative;
+        margin: 0 auto;
+        padding: 40px 0 calc(40px + env(safe-area-inset-bottom));
+        width: 80%;
+        max-width: 700px;
+        z-index: 100;
+        text-align: center;
+    }
+
+    #MainContent h1 {
+        color: #00FF00;
+        font-family: "Courier New", Courier, monospace;
+        font-size: clamp(1.4rem, 6vw, 2em);
+        overflow-wrap: anywhere;
+    }
+
+    .lead {
+        color: #FFFFFF;
+        font-size: 1.1rem;
+    }
+
+    .sub {
+        color: #CCCCCC;
+        font-style: italic;
+    }
+
+    #MainContent p {
+        margin: 0.9em 0;
+    }
+
+    #MainContent a {
+        display: inline-block;
+        padding: 10px 14px;           /* comfortable tap target */
+        min-height: 24px;
+        color: #00FFFF;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 1rem;
+        line-height: 1.3;
+        overflow-wrap: anywhere;
+        -webkit-tap-highlight-color: rgba(0, 255, 255, 0.25);
+    }
+
+    #MainContent a:active {
+        color: #FFFFFF;
+    }
+
+    /* Phones */
+    @media (max-width: 600px) {
+        #MainContent {
+            width: auto;
+            margin: 0 16px;
+            padding-top: 28px;
+        }
+        #MainContent p {
+            margin: 0.4em 0;
+        }
+        #MainContent a {
+            display: block;
+            padding: 14px 10px;
+            font-size: 1.05rem;
+            border: 1px solid rgba(0, 255, 255, 0.25);
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.55);
+        }
+        .lead, .sub {
+            margin-bottom: 0.6em;
+        }
     }
 </style>
-<script language="JavaScript">
-<!--
+<script>
 var totalLayers = 20;
-var spacing = 50; 
+var spacing = 50;
 
 // Arrays to hold our physics properties for each layer
-var currentPositions = []; 
+var currentPositions = [];
 var speedFactors = [];
-var isInverted = []; 
+var isInverted = [];
 
 // Helper function to figure out the 3D perspective velocity based on target row indices (0-19)
 function getPerspectiveSpeed(rowIndex) {
@@ -42,38 +119,32 @@ function generateLayers() {
 
     for (var i = 0; i < totalLayers; i++) {
         var layerID = "starLine" + i;
-        var fixedTop = (i * spacing) + 50; 
-        
+        var fixedTop = (i * spacing) + 50;
+
         // Default perspective fallback speed value
         var finalSpeed = getPerspectiveSpeed(i);
 
-        // Explicit Custom Speed Map (Adjusting for 0-indexed values in Javascript)
-        // Row 1 is index 0, Row 2 is index 1, etc.
-        if (i == 0) finalSpeed = getPerspectiveSpeed(15); // Row 1 gets Speed of Row 16
-        if (i == 1) finalSpeed = getPerspectiveSpeed(14); // Row 2 gets Speed of Row 15
-        if (i == 2) finalSpeed = getPerspectiveSpeed(13); // Row 3 gets Speed of Row 14
-        if (i == 3) finalSpeed = getPerspectiveSpeed(12); // Row 4 gets Speed of Row 13
-        if (i == 4) finalSpeed = getPerspectiveSpeed(11); // Row 5 gets Speed of Row 12
-        if (i == 5) finalSpeed = getPerspectiveSpeed(10); // Row 6 gets Speed of Row 11 & 10
-        if (i == 6) finalSpeed = getPerspectiveSpeed(9);  // Row 7 gets Speed of Row 10
-        if (i == 7) finalSpeed = getPerspectiveSpeed(8);  // Row 8 gets Speed of Row 9
+        // Explicit Custom Speed Map (0-indexed)
+        if (i == 0) finalSpeed = getPerspectiveSpeed(15);
+        if (i == 1) finalSpeed = getPerspectiveSpeed(14);
+        if (i == 2) finalSpeed = getPerspectiveSpeed(13);
+        if (i == 3) finalSpeed = getPerspectiveSpeed(12);
+        if (i == 4) finalSpeed = getPerspectiveSpeed(11);
+        if (i == 5) finalSpeed = getPerspectiveSpeed(10);
+        if (i == 6) finalSpeed = getPerspectiveSpeed(9);
+        if (i == 7) finalSpeed = getPerspectiveSpeed(8);
 
         speedFactors.push(finalSpeed);
-        
+
         // True Random Horizontal Starting Offset
-        var randomXOffset = Math.floor(Math.random() * 250);
-        currentPositions.push(randomXOffset);
-        
-        // Track inversion independently 
-        if (Math.random() > 0.5) {
-            isInverted.push(true);
-        } else {
-            isInverted.push(false);
-        }
-        
+        currentPositions.push(Math.floor(Math.random() * 250));
+
+        // Track inversion independently
+        isInverted.push(Math.random() > 0.5);
+
         layerHTML += '<div id="' + layerID + '" class="star-line" style="top:' + fixedTop + 'px;"></div>';
     }
-    
+
     document.write(layerHTML);
 }
 
@@ -82,15 +153,12 @@ function updateGlidingPhysics() {
     for (var i = 0; i < totalLayers; i++) {
         var element = document.getElementById("starLine" + i);
         if (element) {
-            // Constantly progress the master tick position variables forward
             currentPositions[i] += speedFactors[i];
-            
-            // Loop the coordinate arithmetic cleanly to prevent canvas rendering errors
+
             if (currentPositions[i] >= 250) {
                 currentPositions[i] -= 250;
             }
-            
-            // Correct for inverted layers
+
             if (isInverted[i]) {
                 element.style.transform = "scaleX(-1)";
                 element.style.backgroundPositionX = (-currentPositions[i]) + "px";
@@ -100,117 +168,44 @@ function updateGlidingPhysics() {
             }
         }
     }
-    
+
     requestAnimationFrame(updateGlidingPhysics);
 }
 
 window.onload = function() {
     requestAnimationFrame(updateGlidingPhysics);
 };
-//-->
 </script>
 </head>
 
 <body>
 
-<script language="JavaScript">
-<!--
+<script>
 generateLayers();
-//-->
 </script>
 
 <!-- MAIN CONTENT LAYER -->
-<div id="MainContent" style="position:relative; margin:0 auto; padding-top:40px; width:80%; z-index:100; text-align:center;">
-    <h1><font color="#00FF00" face="Courier New">-- 1nt3ractiv3 s1te --</font></h1>
+<div id="MainContent">
+    <h1>-- 1nt3ractiv3 s1te --</h1>
 
-    <p>
-        <font size="4" color="#FFFFFF">Have fun!</font>
-    </p>
+    <p class="lead">Have fun!</p>
 
-    <p>
-        <font color="#CCCCCC"><i>Links:</i></font>
-    </p>
+    <p class="sub">Links:</p>
 
-    <p>
-        <a href="/gridphysicsdestroy/" style="color:#00FFFF; font-family:Courier New;">
-            [ Grid Physics Destroy ]
-        </a>
-    </p>
-
-    <p>
-        <a href="/soundtest/" style="color:#00FFFF; font-family:Courier New;">
-            [ Sound test ]
-        </a>
-    </p>
-	
-	<p>
-        <a href="/noisepatterns/" style="color:#00FFFF; font-family:Courier New;">
-            [ Noise ]
-        </a>
-    </p>
-	
-	<p>
-        <a href="https://marbleblast.onrender.com" style="color:#00FFFF; font-family:Courier New;">
-            [ Marbleblast ONRENDER PORT ]
-        </a>
-    </p>
-
-	<p>
-        <a href="https://gd-gameplay-finder.onrender.com" style="color:#00FFFF; font-family:Courier New;">
-            [ gd gameplay finder ]
-        </a>
-    </p>
-	
-	<p>
-        <a href="patent_ui.py" style="color:#00FFFF; font-family:Courier New;">
-            [ patent_ui.py ]
-        </a>
-    </p>
-
-	<p>
-        <a href="/games/" style="color:#00FFFF; font-family:Courier New;">
-            [ games ]
-        </a>
-    </p>
-	
-	<p>
-        <a href="/curveforge/" style="color:#00FFFF; font-family:Courier New;">
-            [ Curve forge ]
-        </a>
-    </p>
-	
-	
-	<p>
-        <a href="/thestar/" style="color:#00FFFF; font-family:Courier New;">
-            [ THE STAR (big unicode symbol) ]
-        </a>
-    </p>
-	
-	<p>
-        <a href="/webaccelmachine/" style="color:#00FFFF; font-family:Courier New;">
-            [ WebAccel machine (cell machine remake) ]
-        </a>
-    </p>
-	
-	<p>
-        <a href="/notreadyyet/" style="color:#00FFFF; font-family:Courier New;">
-            [ lk ]
-        </a>
-    </p>
-	
-	<p>
-        <a href="/area/" style="color:#00FFFF; font-family:Courier New;">
-            [ ae ]
-        </a>
-    </p>
-	
-	<p>
-        <a href="/punchcard/" style="color:#00FFFF; font-family:Courier New;">
-            [ Text to punch card ]
-        </a>
-    </p>
-
-
+    <p><a href="/gridphysicsdestroy/">[ Grid Physics Destroy ]</a></p>
+    <p><a href="/soundtest/">[ Sound test ]</a></p>
+    <p><a href="/noisepatterns/">[ Noise ]</a></p>
+    <p><a href="https://marbleblast.onrender.com">[ Marbleblast ONRENDER PORT ]</a></p>
+    <p><a href="https://gd-gameplay-finder.onrender.com">[ gd gameplay finder ]</a></p>
+    <p><a href="patent_ui.py">[ patent_ui.py ]</a></p>
+    <p><a href="/games/">[ games ]</a></p>
+    <p><a href="/curveforge/">[ Curve forge ]</a></p>
+    <p><a href="/thestar/">[ THE STAR (big unicode symbol) ]</a></p>
+    <p><a href="/webaccelmachine/">[ WebAccel machine (cell machine remake) ]</a></p>
+    <p><a href="/notreadyyet/">[ lk ]</a></p>
+    <p><a href="/area/">[ ae ]</a></p>
+    <p><a href="/punchcard/">[ Text to punch card ]</a></p>
+	<p><a href="/smalltests/">[ small tests or projects for tests? ]</a></p>
 </div>
 
 </body>

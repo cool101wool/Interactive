@@ -3,13 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Matrix Space</title>
+<title>Area</title>
 <style>
   html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:crosshair;user-select:none}
   canvas#gl{position:fixed;inset:0;width:100%;height:100%;display:block}
   #hotbar{position:fixed;pointer-events:none}      /* placed in whole device pixels by layoutHotbar() */
-  .slot{position:absolute;display:block;image-rendering:pixelated;opacity:.55;transition:opacity .12s}
-  .slot.sel{opacity:1;filter:drop-shadow(0 0 3px rgba(255,255,255,.55))}
+  .slot{position:absolute;display:block;image-rendering:pixelated;opacity:.55}   /* animated from JS (hotbarAnim) */
   /* UI is intentionally neutral (no colour theme) */
   #loader{position:fixed;inset:0;background:#000 center/cover no-repeat;image-rendering:pixelated;
           transition:opacity .8s;z-index:10;display:flex;align-items:flex-end;justify-content:center}
@@ -62,7 +61,7 @@
   <label>Time <input type="range" id="dtime" min="-1" max="1" step="0.01" value="0"><span id="dtimev">1.00×</span></label>
   <button id="dtime1">reset time</button>
   <pre id="dinfo"></pre>
-  <div class="hint">type 1337dbg again to close · Esc frees the mouse</div>
+  <div class="hint">type 1337dbg again to close · Tab frees the mouse</div>
 </div>
 <div id="menu"><div class="panel">
   <label class="row"><span>3D</span>
@@ -77,7 +76,7 @@
   <div class="row"><span id="mdata">Data storage: OK</span></div>
   <label class="row"><span>Mouse sensitivity</span>
     <span class="sl"><input type="range" id="msens" min="10" max="300" step="5"><b id="msensv">100%</b></span></label>
-  <div class="hint">Press tab to close this menu</div>
+  <div class="hint">Press Esc to close this menu</div>
 </div></div>
 <div id="busy"><span id="btext">ALREADY RUNNING IN ANOTHER TAB</span><button id="bgo">PLAY HERE</button></div>
 
@@ -265,12 +264,16 @@ saved = [fromLS, fromCookie, handoffState].filter(Boolean).sort((a, b) => (b.ts 
 const S0 = Object.assign({}, defaults, saved || {});
 
 // world state — 64-bit floats only (see PRECISION RULE at the top)
+const fin = v => Number.isFinite(+v) ? +v : 0;             // bad / missing numbers -> 0
 const player = {
-  x: +S0.x || 0, y: +S0.y || 0, z: +S0.z || 0,
+  x: fin(S0.x), y: fin(S0.y), z: fin(S0.z),
   yaw: +S0.yaw || 0, pitch: +S0.pitch || 0, vy: +S0.vy || 0, slot: S0.slot | 0,   // slot 0 = very left
   // items: 9 hotbar slots (null = empty) + active item effects [{ id, t, ... }]; saved as-is
   hotbar: Array.isArray(S0.hotbar) && S0.hotbar.length === 9 ? S0.hotbar : Array(9).fill(null),
   effects: Array.isArray(S0.effects) ? S0.effects : [],
+  // each realm keeps its own last position, so going back to a realm returns you where you
+  // were in it (and saves never mix coordinates between realms)
+  realms: S0.realms && typeof S0.realms === "object" ? S0.realms : {},
   area: S0.area === "plane" ? "mausoleum" : AREAS.includes(S0.area) ? S0.area : "matrix"   // "plane" = old name
 };
 
@@ -278,9 +281,10 @@ function snapshotState() {
   // raw 64-bit values — no rounding, so far-away positions survive a save exactly
   // everything needed so a reload (F5) continues exactly: position, look, velocity, the
   // body's state (in the air / climbing / falling through / stamina), hotbar + item effects
+  player.realms[player.area] = { x: player.x, y: player.y, z: player.z, yaw: player.yaw, pitch: player.pitch };
   const s = { x: player.x, y: player.y, z: player.z, yaw: player.yaw,
            pitch: player.pitch, slot: player.slot, area: player.area, ts: Date.now(),
-           vy: player.vy, hotbar: player.hotbar, effects: player.effects };
+           vy: player.vy, hotbar: player.hotbar, effects: player.effects, realms: player.realms };
   if (typeof body !== "undefined") {
     Object.assign(s, { vx: body.vx, vz: body.vz, air: body.air, baseY: body.baseY, climb: body.climb,
       falling: body.falling, fallT: body.fallT, slowFall: body.slowFall, fov: body.fov, fly: body.fly,
@@ -456,14 +460,15 @@ document.addEventListener("visibilitychange", () => {
    AudioContext as the ambience, so they only sound once audio is allowed. */
 const STEP_VOL = 0.26;       // footstep loudness
 let sfxBufs = null, sfxBus = null;
-function synthSfx(dur, fn) {
-  const sr = 11025, n = Math.floor(sr * dur), tmp = new Float32Array(n), st = { ph: 0, zp: 0, lp: 0, lp2: 0 };
+function synthSfx(dur, fn, sr = 11025, lv = 22) {          // lv = quantize levels (lo-fi grain); 0 = clean
+  const n = Math.floor(sr * dur), tmp = new Float32Array(n), st = { ph: 0, zp: 0, lp: 0, lp2: 0, sr };
   let peak = 1e-9;
   for (let i = 0; i < n; i++) { const v = fn(i / sr, st); tmp[i] = v; if (Math.abs(v) > peak) peak = Math.abs(v); }
-  const b = actx.createBuffer(1, n, sr), d = b.getChannelData(0), lv = 22, fade = Math.floor(sr * 0.006);
+  const b = actx.createBuffer(1, n, sr), d = b.getChannelData(0), fade = Math.floor(sr * 0.006);
   for (let i = 0; i < n; i++) {
     const f = i > n - fade ? (n - i) / fade : 1;
-    d[i] = Math.round(tmp[i] / peak * 0.9 * f * lv) / lv;
+    const v = tmp[i] / peak * 0.9 * f;
+    d[i] = lv ? Math.round(v * lv) / lv : v;
   }
   return b;
 }
@@ -473,25 +478,26 @@ function buildSfx() {
   // 90-400 Hz (a low "knock") so it's heard even on laptop speakers, with a
   // crunchy tick and a short square "zap" from the glowing grid on top.
   const svf = (st, key, x, fc, q) => {            // resonant band-pass (state-variable)
-    const f = 2 * Math.sin(Math.PI * fc / sr), L = key + "L", B = key + "B";
+    const f = 2 * Math.sin(Math.PI * Math.min(fc, (st.sr || sr) * 0.45) / (st.sr || sr)), L = key + "L", B = key + "B";
     st[L] = st[L] || 0; st[B] = st[B] || 0;
     const hp = x - st[L] - q * st[B]; st[B] += f * hp; st[L] += f * st[B];
     return st[B];
   };
   const foot = o => (t, st) => {
-    const n = Math.random() * 2 - 1;
+    const n = Math.random() * 2 - 1, SRx = st.sr || sr, lpk = Math.min(1, 0.35 * sr / SRx);
     // heel: pitched body thump + wooden knock + tick
-    st.ph += TAU * (o.body + o.body * 1.1 * Math.exp(-t / 0.018)) / sr;
+    st.ph += TAU * (o.body + o.body * 1.1 * Math.exp(-t / 0.018)) / SRx;
     let v = Math.sin(st.ph) * Math.exp(-t / o.bodyT) * o.bodyA;
-    v += svf(st, "k", n, o.knock, 0.35) * Math.exp(-t / o.knockT) * o.knockA;
-    st.lp += 0.35 * (n - st.lp);
+    v += svf(st, "k", n, o.knock, o.q || 0.35) * Math.exp(-t / o.knockT) * o.knockA;
+    st.lp += lpk * (n - st.lp);
     v += (n - st.lp) * Math.exp(-t / 0.011) * o.tickA;
-    st.zp += TAU * (o.zap + o.zap * 0.6 * Math.exp(-t / 0.02)) / sr;
-    v += (Math.sin(st.zp) > 0 ? 1 : -1) * Math.exp(-t / 0.02) * o.zapA;
+    st.zp += TAU * (o.zap + o.zap * 0.6 * Math.exp(-t / 0.02)) / SRx;
+    st.zl = (st.zl || 0) + (1 - Math.exp(-TAU * 1400 / SRx)) * ((Math.sin(st.zp) > 0 ? 1 : -1) - (st.zl || 0));   // rounded "zap"
+    v += st.zl * Math.exp(-t / 0.02) * o.zapA;
     // toe: a softer, higher knock a moment later
     const tt = t - o.toe;
     if (tt > 0) {
-      v += svf(st, "t", n, o.knock * 1.4, 0.4) * Math.exp(-tt / 0.02) * o.knockA * 0.55;
+      v += svf(st, "t", n, o.knock * 1.4, (o.q || 0.35) + 0.05) * Math.exp(-tt / 0.02) * o.knockA * 0.55;
       v += (n - st.lp) * Math.exp(-tt / 0.008) * o.tickA * 0.5;
     }
     return v;
@@ -502,29 +508,73 @@ function buildSfx() {
       body: R(85, 105), bodyT: R(0.045, 0.06), bodyA: 0.9,
       knock: R(300, 420), knockT: R(0.025, 0.035), knockA: R(5, 6.5),
       tickA: R(0.4, 0.55), zap: R(820, 1050), zapA: R(0.07, 0.11), toe: R(0.045, 0.065)
-    })));
+    }), 22050, 0));
   for (let k = 0; k < 2; k++)
     sfxBufs.land.push(synthSfx(0.36, foot({
       body: R(62, 72), bodyT: 0.1, bodyA: 1.1,
       knock: R(220, 260), knockT: 0.05, knockA: 7,
       tickA: 0.7, zap: R(480, 560), zapA: 0.14, toe: R(0.03, 0.04)
-    })));
-  // mausoleum surfaces (shiny plastic, no grid "zap"): per material family a step, a
-  // landing and a hand "grab" (climbing) — see playSurf()
-  const SURF = {
-    floor: { body: [105, 120], bodyT: 0.035, bodyA: 0.7, knock: [520, 650], knockT: 0.02, knockA: 6, tickA: 0.6 },    // hard glossy tiles
-    hollow: { body: [165, 210], bodyT: 0.09, bodyA: 1.1, knock: [380, 450], knockT: 0.05, knockA: 5, tickA: 0.35 },   // hollow plastic blocks
-    cap: { body: [235, 280], bodyT: 0.05, bodyA: 0.8, knock: [760, 900], knockT: 0.03, knockA: 5.5, tickA: 0.5 },     // thick yellow caps / trims
-    slab: { body: [70, 85], bodyT: 0.07, bodyA: 1.2, knock: [260, 320], knockT: 0.03, knockA: 6, tickA: 0.3 },        // dense olive / red slabs
-    pit: { body: [85, 95], bodyT: 0.08, bodyA: 1.0, knock: [280, 320], knockT: 0.04, knockA: 4, tickA: 0.15 }         // down in a pit: dull
+    }), 22050, 0));
+  // ---- mausoleum surfaces ----
+  // The step sound was chosen by ear over three rounds of 20 (see the project doc
+  // claude/sound-picker.md): round 1 #9 "hollow drum" -> round 2 #18 "no weight layer" ->
+  // round 3 #6 "higher (230 / 540 Hz)". A single damped noise hit through a falling low-pass
+  // rings two soft drum tones; no click, no weight layer, no echo, no filter afterwards.
+  // Each surface uses the same sound, only nudged in pitch / darkness so they stay one family.
+  function fsynth(P, sr, rnd) {
+    sr = sr || 44100; rnd = rnd || Math.random;
+    const N = Math.floor(sr * (P.dur || 0.4)), out = new Float32Array(N), TAU = 2 * Math.PI;
+    const mk = () => ({ b0: 0, b1: 0, b2: 0, a1: 0, a2: 0, x1: 0, x2: 0, y1: 0, y2: 0 });
+    const setLP = (f, fc, q) => { const w = TAU * Math.min(fc, sr * 0.45) / sr, al = Math.sin(w) / (2 * q), c = Math.cos(w), a0 = 1 + al;
+      f.b0 = f.b2 = (1 - c) / 2 / a0; f.b1 = (1 - c) / a0; f.a1 = -2 * c / a0; f.a2 = (1 - al) / a0; };
+    const setBP = (f, fc, q) => { const w = TAU * Math.min(fc, sr * 0.45) / sr, al = Math.sin(w) / (2 * q), c = Math.cos(w), a0 = 1 + al;
+      f.b0 = al / a0; f.b1 = 0; f.b2 = -al / a0; f.a1 = -2 * c / a0; f.a2 = (1 - al) / a0; };
+    const run = (f, x) => { const y = f.b0 * x + f.b1 * f.x1 + f.b2 * f.x2 - f.a1 * f.y1 - f.a2 * f.y2; f.x2 = f.x1; f.x1 = x; f.y2 = f.y1; f.y1 = y; return y; };
+    const env = (t, a, d) => t < a ? t / a : Math.exp(-(t - a) / d);
+    const j = () => 0.94 + rnd() * 0.12;                       // small per-step variation
+    const tl = mk(), wl = mk(), sc = mk(), res = (P.res || []).map(r => ({ r, f: mk(), fj: r.f * j() }));
+    const top = (P.top || 4000) * j(), bot = P.bot || 600;
+    setLP(wl, (P.weight || 120) * j(), 0.6);
+    if (P.scuff) setBP(sc, (P.scuffF || 1500) * j(), P.scuffQ || 0.8);
+    let hp = 0;
+    for (let i = 0; i < N; i++) {
+      const t = i / sr, n = rnd() * 2 - 1, e = env(t, P.att || 0.0006, P.dec || 0.02);
+      if ((i & 7) === 0) {
+        setLP(tl, bot + (top - bot) * Math.exp(-t / (P.tauF || 0.004)), 0.6);
+        for (const R of res) setBP(R.f, R.fj * (1 + (R.r.sw || 0) * Math.exp(-t / (R.r.tauS || 0.01))), R.r.q);
+      }
+      const lo = run(tl, n * e);
+      let v = lo * (P.lo == null ? 1 : P.lo);
+      for (const R of res) v += run(R.f, lo) * R.r.g * env(t, 0.0005, R.r.dec || P.dec || 0.02);
+      if (P.click) { const x = n * env(t, 0.0003, P.clickDec || 0.004); hp += (P.clickHP || 0.5) * (x - hp); v += (x - hp) * P.click; }
+      if (P.wmix) v += run(wl, n * env(t, 0.001, P.wDec || (P.dec || 0.02) * 1.7)) * P.wmix * 3;
+      if (P.scuff) v += run(sc, n * env(t, P.scuffAtt || 0.006, P.scuffDec || 0.03)) * P.scuff;
+      out[i] = v;
+    }
+    let s = 0; for (const v of out) s += v * v;           // loudness over a fixed 0.3 s window, so short and long sounds match
+    const g = (P.rms || 0.09) / Math.sqrt(s / Math.floor(sr * 0.3) + 1e-12), fade = Math.floor(sr * 0.01);
+    for (let i = 0; i < N; i++) out[i] = Math.tanh(out[i] * g) * (i > N - fade ? (N - i) / fade : 1);
+    return out;
+  }
+  const STEP_FINAL = { dur: 0.45, dec: 0.02, top: 2000, bot: 300, tauF: 0.004, lo: 0.5, wmix: 0,
+    res: [{ f: 230, q: 5, g: 4, dec: 0.055 }, { f: 540, q: 4, g: 1.5, dec: 0.028 }] };
+  const SURF_TUNE = {   // pitch factor, brightness factor
+    floor: [1, 1], hollow: [0.9, 0.95], cap: [1.12, 1.1], slab: [0.82, 0.9], pit: [0.86, 0.75]
   };
-  for (const s in SURF) {
-    const o = SURF[s], P = (m = 1) => ({ body: R(o.body[0], o.body[1]) * m, bodyT: o.bodyT, bodyA: o.bodyA,
-      knock: R(o.knock[0], o.knock[1]) * m, knockT: o.knockT, knockA: o.knockA, tickA: o.tickA, zap: 500, zapA: 0, toe: R(0.045, 0.065) });
+  const tuned = (pf, bf, o) => {
+    const P = JSON.parse(JSON.stringify(STEP_FINAL));
+    P.res.forEach(r => { r.f *= pf; if (o.ring) r.dec *= o.ring; });
+    P.top *= bf; if (o.dur) P.dur = o.dur; if (o.rms) P.rms = o.rms; if (o.dec) P.dec *= o.dec;
+    return P;
+  };
+  const SRF = actx.sampleRate || 44100;
+  const asBuf = x => { const b = actx.createBuffer(1, x.length, SRF); b.getChannelData(0).set(x); return b; };
+  for (const s in SURF_TUNE) {
+    const [pf, bf] = SURF_TUNE[s];
     sfxBufs["step_" + s] = []; sfxBufs["land_" + s] = []; sfxBufs["grab_" + s] = [];
-    for (let k = 0; k < 5; k++) sfxBufs["step_" + s].push(synthSfx(0.26, foot(P())));
-    for (let k = 0; k < 2; k++) sfxBufs["land_" + s].push(synthSfx(0.4, foot(Object.assign(P(0.8), { bodyT: o.bodyT * 1.6, bodyA: o.bodyA * 1.3, toe: R(0.03, 0.04) }))));
-    for (let k = 0; k < 3; k++) sfxBufs["grab_" + s].push(synthSfx(0.14, foot(Object.assign(P(1.3), { bodyA: o.bodyA * 0.4, tickA: o.tickA * 1.4, toe: 1 }))));
+    for (let k = 0; k < 6; k++) sfxBufs["step_" + s].push(asBuf(fsynth(tuned(pf, bf, { rms: 0.095 }), SRF)));
+    for (let k = 0; k < 3; k++) sfxBufs["land_" + s].push(asBuf(fsynth(tuned(pf * 0.85, bf * 0.9, { rms: 0.12, dur: 0.6, ring: 1.4, dec: 1.4 }), SRF)));
+    for (let k = 0; k < 4; k++) sfxBufs["grab_" + s].push(asBuf(fsynth(tuned(pf * 1.15, bf * 1.1, { rms: 0.07, dur: 0.25, ring: 0.6, dec: 0.7 }), SRF)));
   }
   sfxBufs.jump.push(synthSfx(0.2, (t, st) => {     // soft push-off + rising blip
     const n = Math.random() * 2 - 1; st.lp += 0.2 * (n - st.lp);
@@ -533,8 +583,7 @@ function buildSfx() {
            (Math.sin(st.zp) > 0 ? 1 : -1) * 0.07 * Math.exp(-t / 0.05);
   }));
   sfxBus = actx.createGain(); sfxBus.gain.value = STEP_VOL;
-  const lp = actx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 6000;
-  sfxBus.connect(lp); lp.connect(actx.destination);
+  sfxBus.connect(actx.destination);                  // no master filter: the sounds go out as made
 }
 // surface-aware footsteps: in the mausoleum the material under the feet picks the sound
 // (0 floor, -1 pit, 1/5/6/15 hollow blocks & tower, 2/10 caps & trims, 3/4/8/9/13 slabs)
@@ -625,6 +674,12 @@ function renderSlot(size) {
   slotCache.set(size, img);
   return img;
 }
+// selection animation: each slot eases between 0 (normal) and 1 (selected): size 100% ->
+// 108%, lift 0 -> 4 px, opacity .55 -> 1, glow. Every size in between is pre-rendered
+// once (bicubic, cached in RAM), so each frame just copies the canvas for the current
+// whole-pixel size: smooth, and never nearest-neighbour scaled by the browser.
+const slotAnim = new Array(9).fill(0);
+let hbGeom = null, hbLast = 0;
 function layoutHotbar() {
   if (!slotSrc) return;
   const dpr = window.devicePixelRatio || 1, narrow = innerWidth <= 560;
@@ -634,16 +689,40 @@ function layoutHotbar() {
   const left = Math.round((Math.round(innerWidth * dpr) - total) / 2);
   const top = Math.round(innerHeight * dpr) - bottom - cell;
   hotbar.style.left = left / dpr + "px"; hotbar.style.top = top / dpr + "px";
+  for (let s = cell; s <= selSz; s++) renderSlot(s);      // warm the size cache
+  hbGeom = { dpr, cell, gap, selSz, lift };
+  slots.forEach(c => c._sz = 0);
+  drawHotbar();
+}
+function drawHotbar() {
+  if (!hbGeom) return;
+  const { dpr, cell, gap, selSz, lift } = hbGeom;
   slots.forEach((c, i) => {
-    const sel = i === player.slot, sz = sel ? selSz : cell;
-    const x = i * (cell + gap) - (sel ? Math.round((selSz - cell) / 2) : 0);
-    const y = sel ? -Math.round((selSz - cell) / 2) - lift : 0;
-    if (c.width !== sz) { c.width = sz; c.height = sz; }
-    c.getContext("2d").putImageData(renderSlot(sz), 0, 0);
-    c.style.width = sz / dpr + "px"; c.style.height = sz / dpr + "px";
+    const a = slotAnim[i], e = a * a * (3 - 2 * a);       // smoothstep
+    const sz = Math.round(cell + (selSz - cell) * e);
+    const x = i * (cell + gap) - Math.round((sz - cell) / 2);
+    const y = -Math.round((sz - cell) / 2) - Math.round(lift * e);
+    if (c._sz !== sz) {
+      c._sz = sz; c.width = sz; c.height = sz;
+      c.getContext("2d").putImageData(renderSlot(sz), 0, 0);
+      c.style.width = sz / dpr + "px"; c.style.height = sz / dpr + "px";
+    }
     c.style.left = x / dpr + "px"; c.style.top = y / dpr + "px";
+    c.style.opacity = (0.55 + 0.45 * e).toFixed(3);
+    c.style.filter = e > 0.01 ? "drop-shadow(0 0 3px rgba(255,255,255," + (0.55 * e).toFixed(3) + "))" : "none";
   });
 }
+(function hotbarAnim(now) {                               // ~0.14 s ease, independent of the game loop
+  const dt = Math.min(0.1, (now - (hbLast || now)) / 1000); hbLast = now;
+  let moving = false;
+  for (let i = 0; i < 9; i++) {
+    const t = i === player.slot ? 1 : 0, d = t - slotAnim[i];
+    if (Math.abs(d) > 1e-3) { slotAnim[i] += Math.sign(d) * Math.min(Math.abs(d), dt / 0.14); moving = true; }
+    else slotAnim[i] = t;
+  }
+  if (moving) drawHotbar();
+  if (!dead) requestAnimationFrame(hotbarAnim);
+})(performance.now());
 (function loadSlotImage() {
   const im = new Image();
   im.onload = () => {
@@ -661,11 +740,10 @@ function layoutHotbar() {
 })();
 addEventListener("resize", layoutHotbar);
 function setSlot(i) {
-  player.slot = ((i % 9) + 9) % 9;
-  slots.forEach((s, j) => s.classList.toggle("sel", j === player.slot));
-  layoutHotbar();
+  player.slot = ((i % 9) + 9) % 9;                         // the animation picks it up
 }
 setSlot(player.slot);
+slotAnim[player.slot] = 1;                                 // loaded: already selected, no animation
 
 /* ================= webgl ================= */
 const canvas = document.getElementById("gl");
@@ -972,6 +1050,16 @@ vec4 blockRect(vec4 u){
 }
 // is a point (p frame) within reach of a tower (incl. its enclosure) or a wall, plus margin m?
 // (same rule as mausNearBig() in JS; each tower/wall stays inside its own cell)
+// does the wall in the wall cell under point wpt (wall frame) overlap the rect (ctr, s)?
+bool wallOverlap(vec2 wpt, vec2 ctr, vec2 s){
+  vec2 wc = floor(wpt / 200.0);
+  vec4 t = tab(wc + uBaseB.xy);
+  if (t.r >= 0.45) return false;
+  vec2 ws = vec2(20.0 + 30.0 * t.g, 8.0 + 14.0 * t.b);
+  if (t.a > 0.5) ws = ws.yx;
+  vec2 wp = (wc + 0.5) * 200.0 + (vec2(fract(t.g * 3.3), fract(t.b * 6.1)) - 0.5) * 60.0;
+  return abs(ctr.x - wp.x) < s.x + ws.x + 6.0 && abs(ctr.y - wp.y) < s.y + ws.y + 6.0;
+}
 bool nearBig(vec2 c, vec2 m){
   vec2 q = uFeA.zw + (c - uFeA.xy), qc = floor(q / 40.0);
   vec4 t = tab(qc + uBaseA.zw);
@@ -979,7 +1067,10 @@ bool nearBig(vec2 c, vec2 m){
     bool bld = fract(t.a * 7.7) < 0.35;
     vec2 s = bld ? vec2(6.0 + 2.0 * t.g + 7.2) : vec2(2.6 + 1.4 * t.g, 2.6 + 1.4 * fract(t.g * 5.3)) + 2.4;
     vec2 pp = (qc + 0.5) * 40.0 + (bld ? vec2(0.0) : (vec2(t.b, fract(t.b * 4.7)) - 0.5) * 12.0);
-    if (abs(q.x - pp.x) < s.x + m.x && abs(q.y - pp.y) < s.y + m.y) return true;
+    vec2 wctr = uFeB.xy + (pp - uFeA.zw);              // tower centre in the wall frame
+    bool gone = wallOverlap(wctr + vec2(-s.x, -s.y), wctr, s) || wallOverlap(wctr + vec2(-s.x, s.y), wctr, s)
+             || wallOverlap(wctr + vec2(s.x, -s.y), wctr, s) || wallOverlap(wctr + vec2(s.x, s.y), wctr, s);
+    if (!gone && abs(q.x - pp.x) < s.x + m.x && abs(q.y - pp.y) < s.y + m.y) return true;
   }
   vec2 w = uFeB.xy + (c - uFeA.xy), wc = floor(w / 200.0);
   t = tab(wc + uBaseB.xy);
@@ -1842,9 +1933,17 @@ addEventListener("keydown", e => {
     if (!e.repeat) toggleFullscreen();
     return;
   }
-  if (e.code === "Tab") {                  // Tab opens / closes the menu
+  if (e.code === "Escape") {               // Esc opens / closes the menu
     e.preventDefault();
-    if (!e.repeat) (menuOpen ? closeMenu() : tryOpenMenu());
+    if (!e.repeat) (menuOpen ? closeMenu(true) : tryOpenMenu());
+    return;
+  }
+  if (e.code === "Tab") {                  // Tab frees the mouse (or captures it again)
+    e.preventDefault();
+    if (!e.repeat && !menuOpen) {
+      if (document.pointerLockElement === canvas) { lockByTab = true; document.exitPointerLock(); }
+      else lockMouse();
+    }
     return;
   }
   if (menuOpen) return;                    // game is frozen while the menu is open
@@ -1935,11 +2034,23 @@ function toggleFullscreen() {
   } catch (e) {}
 }
 document.addEventListener("fullscreenchange", () => resize());
-function closeMenu() {
+function closeMenu(relock) {
   menuOpen = false;
   menuEl.classList.remove("on");
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  if (relock) lockMouse();                 // back into the game with the mouse captured
 }
+// Esc while the mouse is captured is taken by the browser (it frees the mouse and the
+// page never sees the key), so losing the capture without Tab / the menu = Esc: open the menu
+let lockByTab = false;
+function lockMouse() {
+  try { const r = canvas.requestPointerLock && canvas.requestPointerLock(); if (r && r.catch) r.catch(() => {}); } catch (e) {}
+}
+document.addEventListener("pointerlockchange", () => {
+  if (document.pointerLockElement === canvas) return;
+  if (lockByTab) { lockByTab = false; return; }
+  if (!menuOpen && !dead) tryOpenMenu();
+});
 // controls ← settings
 m3d.value = settings.stereo;
 document.body.dataset.stereo = settings.stereo;
@@ -1957,7 +2068,7 @@ msens.addEventListener("input", () => {
   settings.sens = Math.max(0.1, Math.min(3, +msens.value / 100)); showSens(); saveSettings();
 });
 // keep arrow keys / space inside the menu from reaching the page
-menuEl.addEventListener("keydown", e => { if (e.code !== "Tab") e.stopPropagation(); });
+menuEl.addEventListener("keydown", e => { if (e.code !== "Escape") e.stopPropagation(); });
 
 /* ---- "3D Screen": WebXR immersive display (headset or 3D monitor) ----
    The option only appears if the browser reports one is available. */
@@ -1993,7 +2104,7 @@ async function startXR() {
 }
 
 /* ================= debug menu (type 1337dbg) =================
-   Not frozen like the Tab menu: the game keeps running. Press Esc to free
+   Not frozen like the Esc menu: the game keeps running. Press Tab to free
    the mouse if you need to click it. */
 const dbgEl = document.getElementById("dbg");
 const dfly = document.getElementById("dfly"), dstam = document.getElementById("dstam");
@@ -2114,13 +2225,23 @@ function mausTower(cx, cz) {
   const P = MAUS.pillar, t = mausTab(cx, cz, P.off);
   if (t[0] >= 0.28) return null;
   const c0x = (cx + 0.5) * P.cell, c0z = (cz + 0.5) * P.cell;
+  let T;
   if (fract(t[3] * 7.7) < 0.35) {                       // medium building
     const h = 6 + 2 * t[1];
-    return { t, bld: true, hx: h, hz: h, H: 8 + 2 * t[3], px: c0x, pz: c0z, reach: h + 7.2 };
+    T = { t, bld: true, hx: h, hz: h, H: 8 + 2 * t[3], px: c0x, pz: c0z, reach: h + 7.2 };
+  } else {
+    const hx = 2.6 + 1.4 * t[1], hz = 2.6 + 1.4 * fract(t[1] * 5.3);
+    T = { t, bld: false, hx, hz, H: 2 * Math.max(hx, hz) * (1.1 + 0.4 * t[3]),
+      px: c0x + (t[2] - 0.5) * 12, pz: c0z + (fract(t[2] * 4.7) - 0.5) * 12, reach: 2.4 };
   }
-  const hx = 2.6 + 1.4 * t[1], hz = 2.6 + 1.4 * fract(t[1] * 5.3);
-  return { t, bld: false, hx, hz, H: 2 * Math.max(hx, hz) * (1.1 + 0.4 * t[3]),
-    px: c0x + (t[2] - 0.5) * 12, pz: c0z + (fract(t[2] * 4.7) - 0.5) * 12, reach: 2.4 };
+  // no tower / building where it would overlap a huge wall (checked against the wall cell
+  // under each corner of its footprint; same test as towerSuppressed() in the shader)
+  const sx = T.bld ? T.reach : T.hx + T.reach, sz = T.bld ? T.reach : T.hz + T.reach;
+  for (const [ax, az] of [[-1, -1], [-1, 1], [1, -1], [1, 1]]) {
+    const W = mausWall(Math.floor((T.px + ax * sx) / MAUS.wall.cell), Math.floor((T.pz + az * sz) / MAUS.wall.cell));
+    if (W && Math.abs(T.px - W.wx) < sx + W.hx + 6 && Math.abs(T.pz - W.wz) < sz + W.hz + 6) return null;
+  }
+  return T;
 }
 // walls (200 m cells), or null
 function mausWall(cx, cz) {
@@ -2167,8 +2288,13 @@ function mausBlock(t) {
     hw = 0.38 + 0.17 * t[1]; hd = Math.min(0.58, hw * (0.85 + 0.3 * fract(t[1] * 7.13))); h = 0.8 + 0.45 * t[2];
   }
   const capI = cap ? { k: 0.78 + 0.07 * fract(t[1] * 2.9), th: 0.1 + 0.03 * fract(t[1] * 6.1), tabs: fract(t[1] * 8.3) < 0.5 } : null;
-  const top = h + (capI ? capI.th : 0);
-  return { hw, hd, h, ox: 0, oz: 0, kind, n, ax, cap: capI, step: null, top };
+  let top = h + (capI ? capI.th : 0);
+  // rare extras on plain capped cubes: a small cube stacked on the cap, or a thin post
+  const xv = fract(t[1] * 31.7 + t[2] * 7.9);
+  let stack = null, post = null;
+  if (kind === 0 && capI && xv < 0.1) { stack = { s: 0.3 * Math.min(hw, hd) + 0.06, h: 0.24 }; top += stack.h; }
+  else if (kind === 0 && capI && xv < 0.15) post = { h: 0.45 + 0.3 * fract(t[1] * 5.9) };
+  return { hw, hd, h, ox: 0, oz: 0, kind, n, ax, cap: capI, step: null, top, stack, post };
 }
 // the block in 2.5 m cell (cx, cz), placed, or null (none in big-pit cells or near big things)
 function mausBlockAt(cx, cz) {
@@ -2251,6 +2377,12 @@ function blockParts(b, e, sink = 0) {
       if (b.ax) unit(X + a, Z, hu, b.hd); else unit(X, Z + a, b.hw, hu);
     }
   } else unit(X, Z, b.hw, b.hd);
+  const ct = y0 + b.h + (b.cap ? b.cap.th : 0);
+  if (b.stack) {                                          // small cube on the cap (+ its own little cap)
+    e(X, ct + b.stack.h / 2 - 0.02, Z, b.stack.s, b.stack.h / 2 - 0.02, b.stack.s, 0.04, 1, sd);
+    e(X, ct + b.stack.h - 0.02, Z, b.stack.s * 0.75, 0.03, b.stack.s * 0.75, 0.02, 2);
+  }
+  if (b.post) e(X + b.hw * 0.4, ct + b.post.h / 2, Z - b.hd * 0.4, 0.035, b.post.h / 2, 0.035, 0, 2);   // thin post
 }
 // rim of cube modules around a big pit
 function pitParts(P, e) {
@@ -2306,6 +2438,27 @@ function towerParts(T, cx, cz, e) {
   e(px, H + 0.02, pz, hx - 0.4, 0.02, hz - 0.4, 0, 15);                      // roof, a bit darker
   modRing(e, px, pz, ox, oz, H + 0.3, 0.6, 0.75, 0.8, 16, 2);                 // parapet
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) e(px + sx * (ox + 0.1), H + 0.15, pz + sz * (oz + 0.1), 0.45, 0.4, 0.45, 0.05, 5);   // corner knobs
+  // rare extras (decided by the tower's own table value, always the same, inside its footprint)
+  const v = fract(T.t[1] * 17.3 + T.t[3] * 3.1);
+  if (v < 0.18) {                                       // setback crown: a narrower upper storey
+    const cx2 = hx * 0.55, cz2 = hz * 0.55, ch = Math.max(2.5, H * 0.25);
+    e(px, H + 0.3 + ch / 2, pz, cx2, ch / 2, cz2, 0.08, 5);
+    e(px, H + 0.3 + ch + 0.12, pz, cx2 + 0.35, 0.12, cz2 + 0.35, 0.04, 4);
+    modRing(e, px, pz, cx2 + 0.35, cz2 + 0.35, H + 0.54 + ch, 0.45, 0.55, 0.7);
+    for (const [nx, nz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) frameKnob(e, px + nx * cx2, H + 0.3 + ch * 0.55, pz + nz * cz2, nx, nz, Math.min(0.5, ch * 0.18));
+  } else if (v < 0.3) {                                 // a slim shaft rising from one roof quarter
+    const qx = (T.t[2] < 0.5 ? -1 : 1) * hx * 0.45, qz = (fract(T.t[2] * 4.7) < 0.5 ? -1 : 1) * hz * 0.45, sh = H * 0.5;
+    e(px + qx, H + sh / 2, pz + qz, 0.8, sh / 2, 0.8, 0.06, 5);
+    e(px + qx, H + sh + 0.15, pz + qz, 1.05, 0.15, 1.05, 0.04, 4);
+    e(px + qx, H + sh + 0.45, pz + qz, 0.5, 0.15, 0.5, 0.04, 2);
+    for (const [nx, nz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) frameKnob(e, px + qx + nx * 0.8, H + sh * 0.75, pz + qz + nz * 0.8, nx, nz, 0.35);
+  } else if (v < 0.4) {                                 // corner fins (thin slabs out of each corner)
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+      const fx2 = px + sx * (hx + 0.45), fz2 = pz + sz * (hz + 0.45);
+      e(fx2, (1 + H - 1) / 2 + 0.5, fz2, 0.45, (H - 2) / 2, 0.08, 0, 5);
+      e(fx2, (1 + H - 1) / 2 + 0.5, fz2, 0.08, (H - 2) / 2, 0.45, 0, 5);
+    }
+  }
 }
 // medium buildings: 3 panels per side between stepped pilasters with capital blocks at
 // mid height, hole grid, on a platform over a dark gap; cornice + parapet around a
@@ -2344,6 +2497,21 @@ function buildingParts(T, cx, cz, e) {
   modRow(e, true, px - ox + 0.6, px + ox - 0.6, pz, H + 0.4, 0.5, 0.6, 0.9, 16, 2);   // roof cross
   modRow(e, false, pz - oz + 0.6, pz - 0.25, px, H + 0.4, 0.5, 0.6, 0.9, 16, 2);
   modRow(e, false, pz + 0.25, pz + oz - 0.6, px, H + 0.4, 0.5, 0.6, 0.9, 16, 2);
+  const v = fract(T.t[1] * 13.7 + T.t[3] * 5.3);         // rare extras on the roof
+  if (v < 0.25) {                                       // a small tower rising from the courtyard
+    const th = 3.5 + 2 * T.t[1];
+    e(px + 2.2, H + 0.4 + th / 2, pz + 2.2, 1.6, th / 2, 1.6, 0.06, 5);
+    e(px + 2.2, H + 0.4 + th + 0.12, pz + 2.2, 1.95, 0.12, 1.95, 0.04, 4);
+    modRing(e, px + 2.2, pz + 2.2, 1.95, 1.95, H + 0.64 + th, 0.4, 0.5, 0.7);
+    for (const [nx, nz] of [[1, 0], [0, 1]]) frameKnob(e, px + 2.2 + nx * 1.6, H + 0.4 + th * 0.6, pz + 2.2 + nz * 1.6, nx, nz, 0.4);
+  } else if (v < 0.4) {                                 // corner turrets on the roof
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+      const tx2 = px + sx * (ox - 0.9), tz2 = pz + sz * (oz - 0.9);
+      e(tx2, H + 1.4, tz2, 0.75, 1.0, 0.75, 0.06, 5);
+      e(tx2, H + 2.5, tz2, 0.95, 0.1, 0.95, 0.03, 4);
+      e(tx2, H + 2.75, tz2, 0.4, 0.15, 0.4, 0.03, 2);
+    }
+  }
   for (const [nx, nz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {                // cross troughs
     const out = (nx ? hx : hz) + 1.0, L = 6.0, w = 0.8;                      // channel half width
     const a0 = out, a1 = out + L;
@@ -2473,6 +2641,26 @@ function wallParts(W, e) {
       }
     }
   });
+  // rare extras, decided by the wall's own table values
+  const v = fract(t[2] * 9.1 + t[3] * 4.3);
+  if (v < 0.25) {                                       // a crown storey on top of the cornice
+    const cx2 = ux * 0.45, cz2 = uz * 0.45, ch = 6 + 4 * t[2];
+    e(wx, H + 2.8 + ch / 2, wz, cx2, ch / 2, cz2, 0.2, wm, ws);
+    e(wx, H + 2.8 + ch + 0.4, wz, cx2 + 1.0, 0.4, cz2 + 1.0, 0.1, 4);
+    modRing(e, wx, wz, cx2 + 1.0, cz2 + 1.0, H + 3.6 + ch, 0.9, 0.9, 1.8);
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) e(wx + sx * cx2, H + 2.8 + ch / 2, wz + sz * cz2, 0.9, ch / 2, 0.9, 0.1, 16);
+  } else if (v < 0.4) {                                 // two bays sticking out of the long faces
+    const alongX = ux >= uz, hl = alongX ? ux : uz, hs = alongX ? uz : ux, yb = H1 + 1 + (H - H1 - 1) * 0.45;
+    for (const sd of [-1, 1]) for (const k of [-1, 1]) {
+      const a = k * hl * 0.45, o = sd * (hs + 1.6);
+      const at = (A, O, y, sa, sy, so, r, m) => alongX ? e(wx + A, y, wz + O, sa, sy, so, r, m) : e(wx + O, y, wz + A, so, sy, sa, r, m);
+      at(a, o, yb, 2.6, 3.0, 1.6, 0.1, 5);                                 // the bay
+      at(a, o, yb + 3.2, 2.9, 0.2, 1.8, 0.05, 4);                           // its roof
+      at(a, o, yb - 3.25, 2.4, 0.25, 1.4, 0.05, 8);                         // its base
+      const nx = alongX ? 0 : sd, nz = alongX ? sd : 0;
+      frameKnob(e, alongX ? wx + a : wx + o + sd * 1.6, yb, alongX ? wz + o + sd * 1.6 : wz + a, nx, nz, 0.9);
+    }
+  }
 }
 // ---- collision solids near (x, z): 3D boxes { x0, x1, y0, y1, z0, z1 } from the same parts.
 // Towers and walls never reach outside their own cell, so only the cell under (x, z) matters.
@@ -2617,27 +2805,45 @@ function mausLedge(dx, dz) {
   return null;
 }
 // nearest spot (spiral search) with nothing overlapping the player's body, not in a pit
-function mausFreeSpot(x, z, y = 0) {
-  const clear = (px, pz) => mausSolids(px, pz).every(b => {
-    if (b.y1 <= y + 0.05 || b.y0 >= y + PLAYER_H) return true;
+// the nearest spot where the player is NOT stuck inside something, searched outward.
+// "Stuck" uses the same rules as the collision: boxes low enough to step onto and boxes
+// above the head don't count, and only a real overlap (90% of the body radius) does, so
+// standing against a wall or on a ledge is left exactly as it was.
+function mausStuck(px, pz, y) {
+  const r = PLAYER_R * 0.9;
+  return mausSolids(px, pz, 1).some(b => {
+    if (b.y1 <= y + STEP_UP + 0.01 || b.y0 >= y + PLAYER_H) return false;
     const nx = Math.min(b.x1, Math.max(b.x0, px)), nz = Math.min(b.z1, Math.max(b.z0, pz));
-    return (px - nx) ** 2 + (pz - nz) ** 2 > 0.5 * 0.5;
-  }) && (y > 0.05 || !mausHole(Math.floor(px / MAUS.peg.cell), Math.floor(pz / MAUS.peg.cell)));
-  if (clear(x, z) || (y < -0.05 && mausHole(Math.floor(x / MAUS.peg.cell), Math.floor(z / MAUS.peg.cell)))) return [x, z];   // (down in a pit: stay)
-  for (let rad = 1.5; rad < 200; rad += 1.5)
-    for (let k = 0, n = Math.ceil(rad * 4); k < n; k++) {
+    return (px - nx) ** 2 + (pz - nz) ** 2 < r * r;
+  });
+}
+function mausFreeSpot(x, z, y = 0) {
+  if (!mausStuck(x, z, y)) return [x, z];               // fine where it is: never move
+  const ok = (px, pz) => !mausStuck(px, pz, y) && (y > 0.05 || !mausHole(Math.floor(px / MAUS.peg.cell), Math.floor(pz / MAUS.peg.cell)));
+  for (let rad = 0.25; rad < 200; rad += rad < 3 ? 0.25 : 1.5)   // small steps first: move as little as possible
+    for (let k = 0, n = Math.max(8, Math.ceil(rad * 6)); k < n; k++) {
       const a = k / n * 2 * Math.PI, px = x + Math.cos(a) * rad, pz = z + Math.sin(a) * rad;
-      if (clear(px, pz)) return [px, pz];
+      if (ok(px, pz)) return [px, pz];
     }
   return [x, z];
 }
 function setArea(area, how) {
+  player.realms[player.area] = { x: player.x, y: player.y, z: player.z, yaw: player.yaw, pitch: player.pitch };   // remember this realm
+  const back = player.realms[area];
   player.area = area;
-  body.falling = false; body.fallT = 0; body.slowFall = false;
+  body.falling = false; body.fallT = 0; body.slowFall = false; body.climb = null;
   player.vy = 0; body.vx = 0; body.vz = 0;
-  if (area === "mausoleum") [player.x, player.z] = mausFreeSpot(player.x, player.z);   // never inside a block
-  if (how === "drop") { player.y = FALL.dropHeight; body.air = true; player.vy = -WALK; body.slowFall = true; }
-  else { player.y = 0; body.air = false; fadeAmt = 0; }
+  if (how === "drop") {                                  // falling in from above: same x/z, from the sky
+    player.y = FALL.dropHeight; body.air = true; player.vy = -WALK; body.slowFall = true;
+    if (area === "mausoleum") [player.x, player.z] = mausFreeSpot(player.x, player.z, 0);
+  } else if (back && Number.isFinite(back.x)) {           // teleport: back to where you were in that realm
+    player.x = back.x; player.y = back.y; player.z = back.z;
+    body.air = player.y > 0.01; body.baseY = player.y; fadeAmt = 0;
+    if (area === "mausoleum") [player.x, player.z] = mausFreeSpot(player.x, player.z, player.y);
+  } else {
+    player.y = 0; body.air = false; fadeAmt = 0;
+    if (area === "mausoleum") [player.x, player.z] = mausFreeSpot(player.x, player.z, 0);
+  }
   updateAmbienceArea(how === "drop" ? 2.5 : 1);
 }
 
@@ -3159,9 +3365,10 @@ function frame(now, xrFrame) {
     captureScene(0);
     postPass(0, full, full);
   }
-
+  framesDrawn++;
   requestAnimationFrame(frame);
 }
+let framesDrawn = 0;                       // the loader (last image) stays up until real frames exist
 requestAnimationFrame(frame);
 
 /* ================= saving ================= */
@@ -3226,7 +3433,8 @@ const minShow = shot ? 120 : thumb ? 900 : 300;
 const start = performance.now();
 (function waitReady() {
   const el = performance.now() - start;
-  if (el > minShow) { loader.classList.add("gone"); }
+  // keep showing the last image until the world has really been drawn (no black flash)
+  if (el > minShow && (framesDrawn >= 3 || el > 15000)) { loader.classList.add("gone"); }
   else setTimeout(waitReady, 50);
 })();
 return { stop };

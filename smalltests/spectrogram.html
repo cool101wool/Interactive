@@ -1,0 +1,311 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mic Spectrogram</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:8px;background:#111;color:#ddd}
+  canvas{width:100%;height:auto;background:#000;display:block}
+  button{font-size:18px;padding:12px;margin:3px;min-width:80px}
+  #rec{width:100%;font-size:24px;padding:22px;margin:6px 0}
+  pre{white-space:pre-wrap;font-size:13px;margin:6px 0}
+  label{font-size:14px}
+</style>
+</head>
+<body>
+<canvas id="cv" width="600" height="256"></canvas>
+<button id="rec">Tap to start</button>
+<div>
+  Trim both ends:
+  <button class="t" data-s="0.5">0.5s</button>
+  <button class="t" data-s="1">1s</button>
+  <button id="reset">Reset</button>
+  <button id="play">Play</button>
+</div>
+<div>
+  <button id="cb">Copy base64</button>
+  <button id="uri" title="Toggle data: URI prefix" style="width:96px;height:64px;min-width:0;padding:0;background:#222 center/contain no-repeat;color:#2a7fff;font-weight:bold;font-size:15px;line-height:1.1;text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 6px #fff">data: URI<br>prefix</button>
+  <button id="help">Help</button>
+  <button id="cf">Copy .ogg file</button>
+  <button id="sh">Share</button>
+  <button id="dl">Download</button>
+</div>
+<div id="helpbox" style="display:none;background:#222;padding:8px;font-size:14px;line-height:1.4"></div>
+<pre id="st"></pre>
+<pre id="info"></pre>
+
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('cv'), g = cv.getContext('2d');
+const W = cv.width, H = cv.height, N = 1024, HOP = 512;
+const IMG_ON = 'data:image/png;base64,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', IMG_OFF = 'data:image/png;base64,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';
+let useUri = false;
+const uriBtn = $('uri');
+function drawUri() { uriBtn.style.backgroundImage = 'url(' + (useUri ? IMG_ON : IMG_OFF) + ')'; }
+uriBtn.onclick = () => { useUri = !useUri; drawUri(); };
+drawUri();
+const HELP = `<b>Big button</b>: tap to start recording from the mic, tap again to stop. Spectrogram: time runs left to right, low frequency at the bottom, high at the top, brighter = louder.
+<br><br><b>Trim 0.5s / 1s</b>: removes that much from the start AND the end (to cut the tap sounds). Can be pressed repeatedly; <b>Reset</b> restores the full recording. <b>Play</b> plays (or stops) the current trimmed audio.
+<br><br><b>Copy base64</b>: copies the encoded .ogg (Opus audio) as text. Base64 is a way of writing binary file bytes as plain letters/numbers so they can be pasted anywhere. Output is a long text string like T2dnUwAC...
+<br><br><b>Square toggle button</b>: red X = plain base64 only. Green tick = the text gets a "data: URI" prefix: <code>data:audio/ogg;base64,T2dnUw...</code>. A URI is just an address/label for a resource; a data: URI embeds the actual file inside that address, so it can be used directly as e.g. an <code>&lt;audio src="..."&gt;</code> or pasted in a browser address bar. Use plain base64 if an API/field expects raw base64, and data: URI if you want something self-contained and playable.
+<br><br><b>Copy .ogg file</b>: tries to put the actual file on the clipboard (so you can paste it as a file). Most browsers block audio on the clipboard; if so you'll get a message, so use Share or Download.
+<br><br><b>Share</b>: opens the phone/OS share sheet with the file attached. <b>Download</b>: saves the file. <br><br><b>Timestamp</b>: the recording start time is added as recording_YYYYMMDD_HHMMSS.ogg (share/download/file copy), as a name= field in the data: URI, and as DATE/TITLE tags inside the .ogg itself (so it's also in the plain base64).
+<br><br><b>Info panel</b>: duration, sample rate (Hz), peak and RMS level in dBFS (0 = digital maximum, more negative = quieter), count of clipped (maxed-out) samples, and the mic settings the browser reports (echo cancellation, noise suppression and auto gain are all turned off for raw audio).
+<br><br><b>Format</b>: mono, 48 kHz, Opus codec in an Ogg container, ~64 kbps.`;
+$('help').onclick = () => { const h = $('helpbox'); h.innerHTML = HELP; h.style.display = h.style.display === 'none' ? 'block' : 'none'; };
+const status = s => $('st').textContent = s;
+
+/* ---------- FFT / spectrogram ---------- */
+const win = new Float32Array(N).map((_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1)));
+const cosT = new Float32Array(N / 2), sinT = new Float32Array(N / 2);
+for (let i = 0; i < N / 2; i++) { cosT[i] = Math.cos(2 * Math.PI * i / N); sinT[i] = -Math.sin(2 * Math.PI * i / N); }
+const rev = new Uint16Array(N);
+for (let i = 0; i < N; i++) { let r = 0; for (let b = 0; b < 10; b++) if (i >> b & 1) r |= 1 << (9 - b); rev[i] = r; }
+const re = new Float32Array(N), im = new Float32Array(N);
+
+function column(x, off) { // returns Uint8ClampedArray RGBA (H px tall) for samples x[off..off+N)
+  for (let i = 0; i < N; i++) { re[rev[i]] = x[off + i] * win[i]; im[rev[i]] = 0; }
+  for (let size = 2; size <= N; size <<= 1) {
+    const half = size >> 1, step = N / size;
+    for (let s = 0; s < N; s += size)
+      for (let j = 0, k = 0; j < half; j++, k += step) {
+        const a = s + j, b = a + half;
+        const tr = re[b] * cosT[k] - im[b] * sinT[k], ti = re[b] * sinT[k] + im[b] * cosT[k];
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+      }
+  }
+  const out = new Uint8ClampedArray(H * 4), per = (N / 2) / H;
+  for (let y = 0; y < H; y++) {
+    const bin = Math.floor((H - 1 - y) * per); // low freq at bottom
+    let m = 0;
+    for (let k = 0; k < per; k++) m = Math.max(m, Math.hypot(re[bin + k], im[bin + k]));
+    const db = 20 * Math.log10(m / (N / 4) + 1e-9);
+    const t = Math.min(1, Math.max(0, (db + 90) / 80));
+    const c = (v) => Math.min(255, Math.max(0, v));
+    out[y * 4] = c(t * 510); out[y * 4 + 1] = c(t * 510 - 255); out[y * 4 + 2] = c(t < .5 ? t * 400 : 255 - (t - .5) * 900); out[y * 4 + 3] = 255;
+  }
+  return out;
+}
+function renderStatic(x) {
+  g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  if (x.length < N) return;
+  const cols = Math.floor((x.length - N) / HOP) + 1;
+  const off = document.createElement('canvas'); off.width = cols; off.height = H;
+  const oc = off.getContext('2d'), img = oc.createImageData(cols, H);
+  for (let c = 0; c < cols; c++) {
+    const col = column(x, c * HOP);
+    for (let y = 0; y < H; y++) img.data.set(col.subarray(y * 4, y * 4 + 4), (y * cols + c) * 4);
+  }
+  oc.putImageData(img, 0, 0);
+  g.drawImage(off, 0, 0, cols, H, 0, 0, W, H);
+}
+
+/* ---------- recording ---------- */
+let ctx, stream, node, chunks = [], tail = new Float32Array(0), recording = false, t0, timer;
+let recStamp = '', orig = null, cur = null, rate = 48000, encPromise = null, settings = {};
+
+const workletSrc = `class R extends AudioWorkletProcessor{constructor(){super();this.b=new Float32Array(2048);this.n=0}
+process(i){const c=i[0][0];if(c){for(let k=0;k<c.length;k++){this.b[this.n++]=c[k];if(this.n==2048){this.port.postMessage(this.b.slice());this.n=0}}}return true}}
+registerProcessor('r',R)`;
+
+async function start() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
+  } catch (e) { status('Mic error: ' + e.message); return; }
+  settings = stream.getAudioTracks()[0].getSettings();
+  ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+  await ctx.resume();
+  rate = ctx.sampleRate;
+  const url = URL.createObjectURL(new Blob([workletSrc], { type: 'text/javascript' }));
+  await ctx.audioWorklet.addModule(url);
+  node = new AudioWorkletNode(ctx, 'r');
+  chunks = []; tail = new Float32Array(0);
+  g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  node.port.onmessage = e => { chunks.push(e.data); live(e.data); };
+  const src = ctx.createMediaStreamSource(stream), mute = ctx.createGain();
+  mute.gain.value = 0;
+  src.connect(node); node.connect(mute); mute.connect(ctx.destination);
+  recording = true; t0 = Date.now();
+  { const d = new Date(t0), p = n => String(n).padStart(2, '0'); recStamp = d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '_' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()); }
+  $('rec').textContent = 'Recording… tap to stop';
+  timer = setInterval(() => status('Recording ' + ((Date.now() - t0) / 1000).toFixed(1) + 's'), 100);
+}
+
+function live(chunk) {
+  const t = new Float32Array(tail.length + chunk.length); t.set(tail); t.set(chunk, tail.length); tail = t;
+  while (tail.length >= N) {
+    const col = column(tail, 0);
+    g.drawImage(cv, -1, 0);
+    const img = g.createImageData(1, H); img.data.set(col); g.putImageData(img, W - 1, 0);
+    tail = tail.slice(HOP);
+  }
+}
+
+async function stop() {
+  recording = false; clearInterval(timer);
+  stream.getTracks().forEach(t => t.stop());
+  node.disconnect(); await ctx.close();
+  $('rec').textContent = 'Tap to start';
+  const len = chunks.reduce((a, c) => a + c.length, 0);
+  orig = new Float32Array(len); let p = 0;
+  for (const c of chunks) { orig.set(c, p); p += c.length; }
+  cur = orig; refresh();
+}
+
+$('rec').onclick = () => recording ? stop() : start();
+
+/* ---------- trim / info ---------- */
+document.querySelectorAll('.t').forEach(b => b.onclick = () => {
+  if (!cur) return;
+  const n = Math.round(parseFloat(b.dataset.s) * rate);
+  if (cur.length <= 2 * n + N) { status('Too short to trim that much'); return; }
+  cur = cur.subarray(n, cur.length - n); refresh();
+});
+$('reset').onclick = () => { if (orig) { cur = orig; refresh(); } };
+
+function refresh() {
+  renderStatic(cur);
+  let peak = 0, sum = 0, clip = 0;
+  for (let i = 0; i < cur.length; i++) { const a = Math.abs(cur[i]); if (a > peak) peak = a; if (a >= 0.999) clip++; sum += cur[i] * cur[i]; }
+  const db = v => v > 0 ? (20 * Math.log10(v)).toFixed(1) + ' dBFS' : '-inf';
+  $('info').textContent =
+    `duration: ${(cur.length / rate).toFixed(2)}s (original ${(orig.length / rate).toFixed(2)}s)\n` +
+    `samples: ${cur.length}  rate: ${rate} Hz\n` +
+    `peak: ${db(peak)}  rms: ${db(Math.sqrt(sum / cur.length))}  clipped: ${clip}\n` +
+    `track: ${JSON.stringify(settings)}`;
+  encPromise = encodeOgg(cur, rate); // cached so clipboard calls stay inside the tap gesture
+  encPromise.then(b => status('Ready: ogg/opus ' + (b.size / 1024).toFixed(1) + ' KB'), e => status('Encode error: ' + e.message));
+  status('Encoding…');
+}
+
+/* ---------- play ---------- */
+let pctx;
+$('play').onclick = async () => {
+  if (!cur) return;
+  if (pctx) { pctx.close(); pctx = null; return; }
+  pctx = new AudioContext();
+  const buf = pctx.createBuffer(1, cur.length, rate); buf.copyToChannel(cur, 0);
+  const s = pctx.createBufferSource(); s.buffer = buf; s.connect(pctx.destination);
+  const me = pctx; s.onended = () => { if (pctx === me) { me.close(); pctx = null; } };
+  s.start();
+};
+
+/* ---------- Ogg/Opus encoding (WebCodecs + manual muxer) ---------- */
+const crcT = new Uint32Array(256);
+for (let i = 0; i < 256; i++) { let r = i << 24; for (let k = 0; k < 8; k++) r = (r & 0x80000000) ? (r << 1) ^ 0x04C11DB7 : r << 1; crcT[i] = r >>> 0; }
+function crc(b) { let c = 0; for (let i = 0; i < b.length; i++) c = ((c << 8) ^ crcT[((c >>> 24) ^ b[i]) & 255]) >>> 0; return c; }
+
+function makePage(packets, granule, seq, type, serial) {
+  const segs = [];
+  packets.forEach(p => { let n = p.length; while (n >= 255) { segs.push(255); n -= 255; } segs.push(n); });
+  const dataLen = packets.reduce((a, p) => a + p.length, 0);
+  const out = new Uint8Array(27 + segs.length + dataLen), dv = new DataView(out.buffer);
+  out.set([0x4f, 0x67, 0x67, 0x53, 0, type]);
+  dv.setUint32(6, granule % 4294967296, true); dv.setUint32(10, Math.floor(granule / 4294967296), true);
+  dv.setUint32(14, serial, true); dv.setUint32(18, seq, true);
+  out[26] = segs.length; out.set(segs, 27);
+  let o = 27 + segs.length; packets.forEach(p => { out.set(p, o); o += p.length; });
+  dv.setUint32(22, crc(out), true);
+  return out;
+}
+
+async function encodeOgg(pcm, inRate) {
+  if (typeof AudioEncoder === 'undefined') throw new Error('WebCodecs AudioEncoder not supported in this browser');
+  if (inRate !== 48000) { // resample
+    const oc = new OfflineAudioContext(1, Math.ceil(pcm.length * 48000 / inRate), 48000);
+    const b = oc.createBuffer(1, pcm.length, inRate); b.copyToChannel(pcm, 0);
+    const s = oc.createBufferSource(); s.buffer = b; s.connect(oc.destination); s.start();
+    pcm = (await oc.startRendering()).getChannelData(0);
+  }
+  const packets = []; let preskip = 312, err = null;
+  const enc = new AudioEncoder({
+    output: (c, meta) => {
+      const d = new Uint8Array(c.byteLength); c.copyTo(d);
+      packets.push({ d, dur: Math.round((c.duration || 20000) * 48 / 1000) });
+      const desc = meta && meta.decoderConfig && meta.decoderConfig.description;
+      if (desc && packets.length === 1) {
+        const u = new Uint8Array(desc instanceof ArrayBuffer ? desc : desc.buffer);
+        if (u.length >= 12 && u[0] === 0x4f) preskip = u[10] | (u[11] << 8);
+      }
+    },
+    error: e => err = e
+  });
+  enc.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1, bitrate: 64000 });
+  const F = 960;
+  for (let i = 0; i < pcm.length; i += F) {
+    const part = pcm.slice(i, i + F);
+    enc.encode(new AudioData({ format: 'f32', sampleRate: 48000, numberOfFrames: part.length, numberOfChannels: 1, timestamp: Math.round(i / 48000 * 1e6), data: part }));
+    if (enc.encodeQueueSize > 50) await new Promise(r => setTimeout(r, 0));
+  }
+  await enc.flush(); enc.close();
+  if (err) throw err;
+
+  const te = new TextEncoder(), serial = (Math.random() * 4294967295) >>> 0;
+  const head = new Uint8Array(19), hv = new DataView(head.buffer);
+  head.set(te.encode('OpusHead')); head[8] = 1; head[9] = 1; hv.setUint16(10, preskip, true); hv.setUint32(12, 48000, true);
+  const vendor = te.encode('web-spectrogram');
+  const iso = recStamp.replace(/^(\d{4})(\d\d)(\d\d)_(\d\d)(\d\d)(\d\d)$/, '$1-$2-$3T$4:$5:$6');
+  const cm = [te.encode('DATE=' + iso), te.encode('TITLE=' + fname())];
+  const tags = new Uint8Array(8 + 4 + vendor.length + 4 + cm.reduce((a, c) => a + 4 + c.length, 0)), tv = new DataView(tags.buffer);
+  tags.set(te.encode('OpusTags')); tv.setUint32(8, vendor.length, true); tags.set(vendor, 12);
+  let to = 12 + vendor.length; tv.setUint32(to, cm.length, true); to += 4;
+  cm.forEach(c => { tv.setUint32(to, c.length, true); tags.set(c, to + 4); to += 4 + c.length; });
+  const pages = [makePage([head], 0, 0, 2, serial), makePage([tags], 0, 1, 0, serial)];
+  let seq = 2, cum = 0, batch = [], segCount = 0;
+  const flushBatch = last => {
+    pages.push(makePage(batch.map(x => x.d), last ? preskip + pcm.length : preskip + cum, seq++, last ? 4 : 0, serial));
+    batch = []; segCount = 0;
+  };
+  packets.forEach((p, i) => {
+    const s = Math.floor(p.d.length / 255) + 1;
+    if (segCount + s > 250) flushBatch(false);
+    batch.push(p); segCount += s; cum += p.dur;
+    if (i === packets.length - 1) flushBatch(true);
+  });
+  return new Blob(pages, { type: 'audio/ogg' });
+}
+
+/* ---------- output ---------- */
+const fname = () => 'recording_' + (recStamp || 'unknown') + '.ogg';
+const getBlob = () => { if (!encPromise) throw new Error('Nothing recorded yet'); return encPromise; };
+const toB64 = blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
+
+$('cb').onclick = async () => {
+  try {
+    const p = getBlob().then(async b => {
+      const uri = await toB64(b);
+      return new Blob([useUri ? uri.replace(';base64,', ';name=' + fname() + ';base64,') : uri.slice(uri.indexOf(',') + 1)], { type: 'text/plain' });
+    });
+    try { await navigator.clipboard.write([new ClipboardItem({ 'text/plain': p })]); }
+    catch (e) { await navigator.clipboard.writeText(await (await p).text()); }
+    status('Base64 copied');
+  } catch (e) { status('Copy failed: ' + e.message); }
+};
+
+const file = async () => new File([await getBlob()], fname(), { type: 'audio/ogg' });
+async function share() {
+  const f = await file();
+  if (navigator.canShare && navigator.canShare({ files: [f] })) { await navigator.share({ files: [f] }); return true; }
+  return false;
+}
+function download(f) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = fname(); a.click();
+}
+
+$('cf').onclick = async () => {
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ 'audio/ogg': getBlob() })]);
+    status('.ogg file copied to clipboard');
+  } catch (e) {
+    status('Browser can\'t put audio/ogg on the clipboard (' + e.message + '). Use Copy base64, Share or Download.');
+  }
+};
+$('sh').onclick = async () => {
+  try { if (!(await share())) status('Share with files not supported here'); else status('Shared'); }
+  catch (e) { status('Share: ' + e.message); }
+};
+$('dl').onclick = async () => { try { download(await file()); } catch (e) { status(e.message); } };
+</script>
+</body>
+</html>
